@@ -19,9 +19,25 @@ note() { echo "leakscan: $*" >&2; fail=1; }
 files=$(git ls-files | grep -vE '^(vendor/|go\.sum$)' || true)
 [ -n "$files" ] || exit 0
 
+# ⚠️ -i ON EVERY SCAN, AND NEVER AN INLINE `(?i)`. Two of the patterns
+# below were written `(?i)...`, which is not valid ERE: GNU grep answers
+# `warning: ? at start of expression` and matches NOTHING, so the two most
+# valuable scans -- the credential-shaped one and the concrete-store one --
+# passed vacuously. It looked fine locally only because this author's `grep`
+# was ugrep, which accepts the inline form. A guard that cannot fail is worse
+# than no guard, because it reports success. scripts/leakscan-test is the
+# answer to that and runs in CI beside this.
+#
+# Case-insensitive for ALL of them rather than per-pattern: one rule, nothing
+# to get wrong at a call site. It widens the hex scan to uppercase, which is
+# correct -- an account id in capitals is still an account id.
 scan() { # pattern description
   local hits
-  hits=$(grep -nEI "$1" $files 2>/dev/null | grep -v 'leakscan' || true)
+  hits=$(grep -nEIi "$1" $files 2>/dev/null | grep -v 'leakscan' || true)
+  # The module path is this repository's own name, declared where Go requires
+  # it. It is a public handle, not a deployment: exempt that one line, and
+  # nothing else in go.mod.
+  hits=$(echo "$hits" | grep -vE '^go\.mod:[0-9]+:module ' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
 
@@ -31,11 +47,11 @@ scan '\b(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2}))
      'an IP address'
 scan '\b[0-9a-f]{32,}\b' \
      'a 32+ character hex string (account id, key id, hash of something real)'
-scan '(?i)(secret|token|password|api[_-]?key|credential)[[:space:]]*[:=][[:space:]]*.?[A-Za-z0-9/+_-]{16,}' \
+scan '(secret|token|password|api[_-]?key|credential)[[:space:]]*[:=][[:space:]]*.?[A-Za-z0-9/+_-]{16,}' \
      'something shaped like an assigned credential'
 scan '\b[A-Za-z0-9-]+\.(com|net|org|io|dev|pw)\b/[A-Za-z0-9._/-]+' \
      'a URL path into a specific host'
-scan '(?i)\b(op://|1password|cloudflare account|gs://|s3://)' \
+scan '\b(op://|1password|cloudflare account|gs://|s3://)' \
      'a reference to a concrete store or account'
 
 # ⚠️ Co-authored-by trailers are refused here as well as by the commit hook,

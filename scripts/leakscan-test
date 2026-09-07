@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Proves scripts/leakscan still refuses what it claims to refuse.
+#
+# ⚠️ THIS EXISTS BECAUSE THE SCANNER WAS ONCE VACUOUS AND SAID IT WAS CLEAN.
+# Two patterns were written with an inline `(?i)`, which GNU grep rejects as
+# `warning: ? at start of expression` and matches nothing with -- so the
+# credential-shaped scan and the concrete-store scan never ran, in CI, while
+# reporting success. Every guard here has been watched failing.
+#
+# It drives the REAL scanner against a real throwaway git repository, because
+# leakscan reads `git ls-files` and a fixture that skipped git would be
+# testing something else.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCAN="$HERE/leakscan"
+[ -x "$SCAN" ] || { echo "leakscan-test: $SCAN is not executable" >&2; exit 1; }
+
+pass=0 fail=0
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Runs the scanner over a repo containing exactly the given file content.
+# want=refuse|clean
+check() { # name want filename content
+  local name="$1" want="$2" file="$3" content="$4"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/scripts" "$dir/$(dirname "$file")"
+  cp "$SCAN" "$dir/scripts/leakscan"
+  printf '%s\n' "$content" > "$dir/$file"
+  git -C "$dir" init -q -b main
+  git -C "$dir" add -A
+  set +e
+  out="$(cd "$dir" && ./scripts/leakscan 2>&1)"; rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1)); echo "ok    $name ($got)"
+  else
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+  fi
+}
+
+# One per class the scanner claims to catch. If any of these starts passing
+# as clean, that scan has stopped working -- which is exactly what happened.
+check 'email address'      refuse notes.md   'ask someone@example.org about it'
+check 'IP address'         refuse notes.md   'the box answers on 203.0.113.7 only'
+check 'long hex string'    refuse notes.md   'account 0123456789abcdef0123456789abcdef'
+check 'uppercase hex'      refuse notes.md   'account 0123456789ABCDEF0123456789ABCDEF'
+check 'credential shape'   refuse conf.yaml  'api_key: sk-abcdefghijklmnopqrstuv'
+check 'credential, capsed' refuse conf.yaml  'API_KEY = ABCDEFGHIJKLMNOPQRSTUV'
+check 'concrete store'     refuse conf.yaml  'reads op://platform/thing/field'
+check 'store, capsed'      refuse conf.yaml  'reads OP://PLATFORM/thing/field'
+check 'bucket url'         refuse conf.yaml  'state lives in gs://someones-real-bucket'
+check 'url into a host'    refuse notes.md   'see example.com/private/thing for it'
+
+# The other direction. A scanner that refuses everything is no more useful
+# than one that refuses nothing, and the go.mod exemption is narrow on purpose.
+check 'ordinary prose'     clean  notes.md   'The applier refuses a plan it did not make.'
+check 'go.mod module line' clean  go.mod     'module github.com/beeradb/truss'
+check 'go.mod, other line' refuse go.mod     'module github.com/beeradb/truss
+// see example.com/private/thing'
+
+echo
+echo "leakscan-test: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

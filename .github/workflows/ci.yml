@@ -1,0 +1,51 @@
+# Build, vet, test, and refuse anything that identifies a real deployment.
+#
+# ⚠️ `pull_request`, NOT `pull_request_target`, and the difference is about
+# what this workflow holds. The platform this engine came from uses
+# `pull_request_target` because its plan job needs credentials, so it must run
+# main's workflow rather than the PR's. Nothing here holds a credential, so
+# running the PR's own workflow against the PR's own code is exactly right --
+# and `pull_request_target` would be the more dangerous choice, because it
+# would grant a writable token to a run over untrusted code.
+#
+# ⚠️ Actions are pinned to commit SHAs, not tags. A tag is a mutable pointer
+# somebody else controls; a SHA is the code that was reviewed. The trailing
+# comment is the version the SHA stood for when it was pinned -- verified
+# against the API, not copied from a README.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # leakscan reads `git log` for Co-Authored-By trailers, which a
+          # depth-1 checkout cannot see past the tip commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # One pin, in go.mod, so the toolchain here and the toolchain a
+          # developer runs cannot drift apart.
+          go-version-file: go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+      # ⚠️ THE SCANNER'S OWN TEST RUNS FIRST, AND THAT ORDER IS THE POINT.
+      # A leak scan that has quietly stopped matching reports success, so the
+      # question "does the guard still work" has to be answered before its
+      # answer is trusted. Two of its patterns were once inert under this very
+      # runner's grep while passing here in green.
+      - run: scripts/leakscan-test
+      - run: scripts/leakscan
