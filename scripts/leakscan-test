@@ -63,6 +63,13 @@ check 'go.mod module line' clean  go.mod     'module github.com/beeradb/truss'
 check 'go.mod, other line' refuse go.mod     'module github.com/beeradb/truss
 // see example.com/private/thing'
 
+# A pinned action is a commit id of somebody else's public repository. CI
+# caught this on the scanner's first green run; the exemption is the `uses:`
+# line shape, so a bare hex string anywhere else in the same file still bites.
+check 'pinned action'      clean  .github/workflows/ci.yml '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1'
+check 'hex in a workflow'  refuse .github/workflows/ci.yml '      - run: echo 0123456789abcdef0123456789abcdef'
+check 'unpinned uses line' clean  .github/workflows/ci.yml '      - uses: actions/checkout@v7'
+
 echo
 echo "leakscan-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

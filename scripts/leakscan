@@ -34,10 +34,18 @@ files=$(git ls-files | grep -vE '^(vendor/|go\.sum$)' || true)
 scan() { # pattern description
   local hits
   hits=$(grep -nEIi "$1" $files 2>/dev/null | grep -v 'leakscan' || true)
-  # The module path is this repository's own name, declared where Go requires
-  # it. It is a public handle, not a deployment: exempt that one line, and
-  # nothing else in go.mod.
+  # Two exemptions, both for public identifiers that this repository is
+  # REQUIRED to state, and both written as the exact line shape rather than as
+  # a filename -- exempting a whole file would hide a real leak added to it.
+  #
+  #   go.mod's module path: the author's public handle, where Go demands it.
+  #   a workflow's `uses: owner/action@<sha>`: pinning an action to a commit
+  #   is the supply-chain-correct thing to do, and a commit id of somebody
+  #   else's public repository identifies nothing of ours. Caught in CI on
+  #   this scanner's own first green run, which is the argument for pinning
+  #   the exemption to the `uses:` shape and not to `.github/`.
   hits=$(echo "$hits" | grep -vE '^go\.mod:[0-9]+:module ' || true)
+  hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
 
