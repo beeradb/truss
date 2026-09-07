@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Refuses to let anything identifying the author's own deployment reach this
+# repository.
+#
+# ⚠️ THIS REPOSITORY IS WRITTEN TO BE PUBLIC, AND IS PORTED FROM A PRIVATE
+# ONE. That is the whole risk: the reference implementation is a live
+# platform with real account ids, bucket names, hostnames and vault names in
+# it, and porting is a copying exercise. A grep is cheap; noticing an account
+# id in a commit six months later is not.
+#
+# It scans for CLASSES of thing, not a list of the author's secrets -- a
+# denylist of real values would itself be the leak.
+set -euo pipefail
+
+fail=0
+note() { echo "leakscan: $*" >&2; fail=1; }
+
+# Files git actually tracks; build output and vendored code are not ours.
+files=$(git ls-files | grep -vE '^(vendor/|go\.sum$)' || true)
+[ -n "$files" ] || exit 0
+
+scan() { # pattern description
+  local hits
+  hits=$(grep -nEI "$1" $files 2>/dev/null | grep -v 'leakscan' || true)
+  [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
+}
+
+scan '[0-9a-zA-Z._%+-]+@[0-9a-zA-Z.-]+\.[a-zA-Z]{2,}' \
+     'an email address (use a noreply address, or nothing)'
+scan '\b(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}\b' \
+     'an IP address'
+scan '\b[0-9a-f]{32,}\b' \
+     'a 32+ character hex string (account id, key id, hash of something real)'
+scan '(?i)(secret|token|password|api[_-]?key|credential)[[:space:]]*[:=][[:space:]]*.?[A-Za-z0-9/+_-]{16,}' \
+     'something shaped like an assigned credential'
+scan '\b[A-Za-z0-9-]+\.(com|net|org|io|dev|pw)\b/[A-Za-z0-9._/-]+' \
+     'a URL path into a specific host'
+scan '(?i)\b(op://|1password|cloudflare account|gs://|s3://)' \
+     'a reference to a concrete store or account'
+
+# ⚠️ Co-authored-by trailers are refused here as well as by the commit hook,
+# because a hook lives on one machine and this runs for everybody.
+if git log --format='%b' 2>/dev/null | grep -qiE '^[[:space:]]*co-authored-by:.*(claude|anthropic)'; then
+  note 'a Co-Authored-By trailer naming an AI assistant'
+fi
+
+[ "$fail" -eq 0 ] || { echo "leakscan: refusing" >&2; exit 1; }
+echo "leakscan: clean"

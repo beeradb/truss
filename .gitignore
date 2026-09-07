@@ -1,0 +1,14 @@
+# Build output
+/truss
+/dist/
+*.test
+*.out
+
+# Go workspace files are per-developer, never shared
+go.work
+go.work.sum
+
+# Editors
+.idea/
+.vscode/
+*.swp
