@@ -237,6 +237,99 @@ func TestOPExpiryNeverPasses(t *testing.T) {
 	}
 }
 
+// --- Field: the credential-value read, deliberately stricter than Expiry ---
+
+func TestOPFieldReturnsTheValue(t *testing.T) {
+	f := newFakeOP(t)
+	f.arrange(fakeOPResponse{stdout: `[{"label":"password","value":"gen2-cloudflare-token"}]`},
+		"item", "get", "cf-infra-admin", "--vault", "recipes-runtime", "--fields", "password", "--format", "json")
+	op := newTestOP(t, f, "recipes-runtime")
+
+	value, err := op.Field(context.Background(), "cf-infra-admin", "password")
+	if err != nil {
+		t.Fatalf("Field: %v", err)
+	}
+	if value != "gen2-cloudflare-token" {
+		t.Fatalf("Field = %q, want %q", value, "gen2-cloudflare-token")
+	}
+}
+
+// TestOPFieldOnAnEmptyValueIsAnError is Field's central difference from
+// Expiry: an empty answer is a real credential fetch failing silently, so
+// it must never be treated as "found nothing" the way Expiry's own doc
+// explains a missing expires field legitimately can be.
+func TestOPFieldOnAnEmptyValueIsAnError(t *testing.T) {
+	f := newFakeOP(t)
+	f.arrange(fakeOPResponse{stdout: `[{"label":"password","value":""}]`},
+		"item", "get", "cf-infra-admin", "--vault", "recipes-runtime", "--fields", "password", "--format", "json")
+	op := newTestOP(t, f, "recipes-runtime")
+
+	value, err := op.Field(context.Background(), "cf-infra-admin", "password")
+	if err == nil {
+		t.Fatalf("Field on an empty value = (%q, nil), want a refusal", value)
+	}
+	if value != "" {
+		t.Errorf("Field on an empty value returned %q, want empty", value)
+	}
+}
+
+// TestOPFieldOnAMissingFieldIsAnError is Field's other difference from
+// Expiry: Expiry treats "isn't an item"/"doesn't have" stderr as a
+// legitimate "unrecorded" outcome (recorded=false, err=nil) because most
+// items in a swept vault have no expires field at all. There is no
+// equivalent legitimate reason for the credential field this method reads
+// to be missing, so the exact same stderr shape must surface as an error
+// here rather than being read as "found nothing".
+func TestOPFieldOnAMissingFieldIsAnError(t *testing.T) {
+	f := newFakeOP(t)
+	f.arrange(fakeOPResponse{stderr: `[ERROR] "password" doesn't have a value under item "cf-infra-admin"`, err: exitErr},
+		"item", "get", "cf-infra-admin", "--vault", "recipes-runtime", "--fields", "password", "--format", "json")
+	op := newTestOP(t, f, "recipes-runtime")
+
+	value, err := op.Field(context.Background(), "cf-infra-admin", "password")
+	if err == nil {
+		t.Fatalf("Field on a missing field = (%q, nil), want a refusal", value)
+	}
+	if value != "" {
+		t.Errorf("Field on a missing field returned %q, want empty", value)
+	}
+}
+
+func TestOPFieldOnAGenuineFailureIsAnError(t *testing.T) {
+	f := newFakeOP(t)
+	f.arrange(fakeOPResponse{stderr: "Too many requests. Your client has been rate-limited.", err: exitErr},
+		"item", "get", "cf-infra-admin", "--vault", "recipes-runtime", "--fields", "password", "--format", "json")
+	op := newTestOP(t, f, "recipes-runtime")
+
+	value, err := op.Field(context.Background(), "cf-infra-admin", "password")
+	if err == nil {
+		t.Fatalf("Field on a rate limit = (%q, nil), want an error", value)
+	}
+}
+
+// TestOPFieldNeverPutsTheServiceAccountTokenInAnError is Field's own
+// version of TestOPTokenNeverAppearsInAnError -- Field builds its error
+// strings independently of Expiry and List, so redaction has to be proven
+// again at this call site rather than assumed from theirs.
+func TestOPFieldNeverPutsTheServiceAccountTokenInAnError(t *testing.T) {
+	f := newFakeOP(t)
+	op := newTestOP(t, f, "recipes-runtime")
+	tok, err := (&OP{cfg: OPConfig{TokenFile: op.cfg.TokenFile}}).token()
+	if err != nil {
+		t.Fatalf("reading back the token fixture: %v", err)
+	}
+	f.arrange(fakeOPResponse{stderr: "denied for token " + tok, err: exitErr},
+		"item", "get", "cf-infra-admin", "--vault", "recipes-runtime", "--fields", "password", "--format", "json")
+
+	_, err = op.Field(context.Background(), "cf-infra-admin", "password")
+	if err == nil {
+		t.Fatal("Field with a failing fake = nil error, want an error to inspect")
+	}
+	if strings.Contains(err.Error(), tok) {
+		t.Errorf("error %q contains the service-account token", err.Error())
+	}
+}
+
 func TestOPNeverPutsTheTokenInArgv(t *testing.T) {
 	f := newFakeOP(t)
 	f.arrange(fakeOPResponse{stdout: "[]"},

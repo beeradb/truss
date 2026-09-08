@@ -51,38 +51,23 @@ const connDeadline = 30 * time.Second
 // skipped, rotation applied all end by sending one of these, with
 // PublishValue false where there is nothing to publish.
 //
-// It is never logged: String() exists so that a stray %v or %+v in some
-// future error path cannot be the leak (TestTheRequestNeverRendersItsValue
-// is the guard).
+// It carries no secret and no data. The publisher fetches the credential
+// and its expiry itself, from 1Password, under an item and field name
+// compiled into the publisher binary (cmd/truss's itemCFInfraAdmin,
+// fieldCFPassword) -- never named by, or received from, this request. A
+// bool has nothing to redact, which is why there is no String() method
+// here any more: this type used to also carry Item, Field, Value and
+// Expires, with a String() built solely to keep Value out of a stray %v,
+// and both went together once the publisher stopped needing a value handed
+// to it at all.
 type Request struct {
-	// PublishValue is true exactly when credentials/ was applied this pass
-	// AND the minted value differs from the copy already mounted at
-	// /secrets/cf-infra-admin/password. Otherwise every other field is
-	// absent (omitempty), not merely empty.
+	// PublishValue is true exactly when credentials/ was applied AND
+	// succeeded on this (drift) pass -- the signal that a freshly minted
+	// value exists for the publisher to fetch and write. False on every
+	// other pass: the gate failed, rotation was skipped (no credentials
+	// root at this commit, or the state lock was held elsewhere), or
+	// rotation itself failed.
 	PublishValue bool `json:"publish_value"`
-	// Item is the item name to write. Always the one compiled-in name in
-	// practice; the publisher refuses anything else regardless.
-	Item string `json:"item,omitempty"`
-	// Field is the field within Item to write.
-	Field string `json:"field,omitempty"`
-	// Value is the credential itself. NEVER rendered by String, NEVER
-	// logged, and must never reach an error string on either side.
-	Value string `json:"value,omitempty"`
-	// Expires is the minted item's own expiry, in the same form
-	// internal/secrets.LoadExpiries accepts. It travels in the request
-	// because it is a fact about THIS mint and only the mint knows it --
-	// the authored table (design §4) never carries it.
-	Expires string `json:"expires,omitempty"`
-}
-
-// String renders a Request for logging without ever including Value. Every
-// other field is safe to print: Item and Field are compile-time-constant
-// names, Expires is a date, and PublishValue is a bool.
-func (r Request) String() string {
-	if !r.PublishValue {
-		return "publish: nothing to publish this pass"
-	}
-	return fmt.Sprintf("publish %s/%s (value redacted)", r.Item, r.Field)
 }
 
 // Response is what the publisher hands back. There is no field here that

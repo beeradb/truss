@@ -270,9 +270,16 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		rotationSummary         any = map[string]string{"skipped": "not a drift run"}
 		driftSummary            any = map[string]string{"skipped": "not a drift run"}
 		rotatedChanges          int
-		drifted, errored        []string
-		driftRun                = d.Cfg.DriftOnly
-		driftSkipped            string
+		// rotationApplied is true only when runRotation actually re-applied
+		// the credentials root on THIS pass and reported no error -- never
+		// on a skip (no credentials root, state lock held elsewhere) and
+		// never on a failure. It is the one signal that decides
+		// handoff.Request.PublishValue below: a freshly minted value exists
+		// to publish only when rotation itself ran and succeeded.
+		rotationApplied  bool
+		drifted, errored []string
+		driftRun         = d.Cfg.DriftOnly
+		driftSkipped     string
 	)
 
 	gateOK := false
@@ -343,9 +350,10 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// rotate_credentials and then check_drift together under
 		// DRIFT_CHECK=1; the daily pass never runs the commit loop, so
 		// rotation has nothing from this run to have already applied.
-		summary, changes, rotErr := runRotation(ctx, d, last, cc)
+		summary, changes, applied, rotErr := runRotation(ctx, d, last, cc)
 		rotationSummary = summary
 		rotatedChanges = changes
+		rotationApplied = applied && rotErr == nil
 		if rotErr != nil {
 			reason := fmt.Sprintf("rotation of credentials at %s: %v", last, rotErr)
 
@@ -422,9 +430,15 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// until its deadline, and concurrencyPolicy: Forbid then silently
 	// suppresses every pass after it.
 	if driftRun {
-		req := handoff.Request{} // always "nothing to publish" today: see
-		// runHandoff's doc for what is still missing before this can ever
-		// carry a minted value.
+		// PublishValue is the one signal rotationApplied exists to carry:
+		// true only when runRotation actually re-applied credentials/ on
+		// THIS pass and reported no error. A skip (no credentials root, the
+		// state lock held elsewhere) or a failure both leave it false --
+		// there is nothing freshly minted to publish either way, and
+		// publishing whatever rotation last succeeded at, on a pass where
+		// THIS attempt failed, would publish a value nothing here has just
+		// verified against Cloudflare.
+		req := handoff.Request{PublishValue: rotationApplied}
 		if pubFailure := runHandoff(ctx, d, req, last); pubFailure != "" {
 			// Filed under its own key for the same reason a rotation
 			// failure already is (see the rotKey comment above): not a
@@ -965,9 +979,12 @@ func countResourceChanges(planJSON []byte) (int, bool) {
 // the credentials root at last -- never at origin/main (§2 item 14). It
 // returns a JSON-marshalable summary (mirroring rotation_summary's shapes:
 // {"skipped": "..."} or a RootSummary-shaped success, or {"failed": "..."}),
-// the number of resource changes rotation made, and an error only when
-// rotation itself failed (never for a skip, which is not a failure).
-func runRotation(ctx context.Context, d applyDeps, last string, cc *credCache) (summary any, changes int, err error) {
+// the number of resource changes rotation made, applied (true only on the
+// success path -- never on a skip or a failure, and the caller's sole
+// signal for whether a freshly minted value exists to hand the publisher),
+// and an error only when rotation itself failed (never for a skip, which is
+// not a failure).
+func runRotation(ctx context.Context, d applyDeps, last string, cc *credCache) (summary any, changes int, applied bool, err error) {
 	// ⚠️ THE "ALREADY APPLIED THIS RUN" SKIP IS GONE, BECAUSE IT BECAME
 	// UNREACHABLE. It existed so a pass that had just applied credentials/ in
 	// the commit loop would not immediately re-plan it here. Rotation now
@@ -987,30 +1004,30 @@ func runRotation(ctx context.Context, d applyDeps, last string, cc *credCache) (
 	// order right, so the inconsistency was within one file. Found by the
 	// 2026-09-08 code audit.
 	if err := d.Git.Checkout(ctx, last); err != nil {
-		return map[string]string{"failed": err.Error()}, 0, fmt.Errorf("could not check out %s for rotation: %w", last, err)
+		return map[string]string{"failed": err.Error()}, 0, false, fmt.Errorf("could not check out %s for rotation: %w", last, err)
 	}
 	if !d.Git.HasDir("credentials") {
 		d.logf("rotation: no credentials root at %s, nothing to rotate", last)
-		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, nil
+		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, false, nil
 	}
 
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
-		return map[string]string{"failed": err.Error()}, 0, err
+		return map[string]string{"failed": err.Error()}, 0, false, err
 	}
 	d.logf("rotation: re-planning credentials at %s", last)
 	result, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, last, "credentials")
 	if lockBusy {
 		d.logf("rotation: state lock held elsewhere; next pass will re-plan")
-		return map[string]string{"skipped": "state lock held elsewhere"}, 0, nil
+		return map[string]string{"skipped": "state lock held elsewhere"}, 0, false, nil
 	}
 	if reason != "" {
-		return map[string]string{"failed": reason}, 0, errors.New(reason)
+		return map[string]string{"failed": reason}, 0, false, errors.New(reason)
 	}
 	if result.ResourceChanges != nil {
 		changes = *result.ResourceChanges
 	}
-	return result, changes, nil
+	return result, changes, true, nil
 }
 
 // runDrift plans every root at last WITHOUT applying (§2 item 15), under
@@ -1136,10 +1153,11 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 // req.PublishValue -- what TRUSS ITSELF decided to send -- never on the
 // shape of the response. A dial failure and a Response.Error are folded
 // the same way deliberately: from here, both mean "the publisher did not
-// confirm the write". When nothing was minted (req.PublishValue is false,
-// which is every call today -- see the caller), ANY answer, including the
-// publisher's own refusal of a vacuous pass or nobody listening at all, is
-// narrated and never fails this pass: the same reasoning already governs
+// confirm the write". When nothing was minted this pass (req.PublishValue
+// is false -- every gate failure, every skipped or failed rotation; see
+// the caller for exactly which), ANY answer, including the publisher's own
+// refusal of a vacuous pass or nobody listening at all, is narrated and
+// never fails this pass: the same reasoning already governs
 // the expiry sweep elsewhere in this file -- an alert channel nobody reads
 // is where a real gate refusal goes to die, and the underlying problem
 // (an unpatched expiry table, say) is still shouted about on its own

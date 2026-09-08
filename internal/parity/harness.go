@@ -7,7 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+
 	"fmt"
+	"github.com/beeradb/truss/internal/handoff"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,11 +216,47 @@ func (h *Harness) Run(ctx context.Context, s Scenario, now time.Time) (Outcome, 
 	// rotation runs only under DRIFT_CHECK=1 and so only that pass has
 	// anything to publish. Set here only for drift scenarios.
 	//
-	// No publisher process is ever started for a parity run: runHandoff treats
-	// a socket nobody is listening on as "nothing to publish" (§9's table), so
-	// a path is all a scenario needs, never a listener.
+	// ⚠️ A STUB PUBLISHER LISTENS, AND IT HAS TO. An earlier version of this
+	// comment said "no publisher process is ever started for a parity run:
+	// runHandoff treats a socket nobody is listening on as nothing to publish"
+	// -- which was true only while truss never had anything to publish.
+	//
+	// Now that a successful rotation on a drift pass sets PublishValue, a dial
+	// failure is CORRECTLY a pass failure (design §9), so a harness with no
+	// listener made seven recorded scenarios fail against a bash reference
+	// that has no concept of a publisher at all. That is not a divergence to
+	// record -- in production a publisher IS listening -- it is a fixture
+	// missing a component that production has, which invents a failure. The
+	// fixture is the bug, so the fixture grows the component.
+	//
+	// It runs the REAL handoff.Serve rather than a hand-rolled socket, so the
+	// wire protocol under test is the one production uses; only the verdict is
+	// canned. It answers once, which is exactly what truss sends.
+	//
+	// ⚠️ THE VERDICT IT RETURNS IS NOT OBSERVED, AND THAT IS CORRECT. Mutating
+	// this handler to always answer "skipped" changes no scenario: parity
+	// compares ledger writes, the heartbeat and the alert, and a publish that
+	// SUCCEEDS changes none of them. What is load-bearing is that a publisher
+	// ANSWERS AT ALL -- removing the listener fails the same seven scenarios
+	// that were failing before it was added. Verified both ways.
 	if s.Env["DRIFT_CHECK"] == "1" {
-		env["HANDOFF_SOCKET"] = filepath.Join(root, "handoff.sock")
+		sock := filepath.Join(root, "handoff.sock")
+		env["HANDOFF_SOCKET"] = sock
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			// The error is deliberately dropped: a scenario where truss never
+			// contacts the publisher is a scenario where Serve times out, and
+			// that must surface as the pass's own recorded outcome rather than
+			// as a harness error that masks it.
+			_ = handoff.Serve(ctx, sock, 60*time.Second, func(req handoff.Request) handoff.Response {
+				if req.PublishValue {
+					return handoff.Response{Value: handoff.ValueWritten, Expiries: 1}
+				}
+				return handoff.Response{Value: handoff.ValueSkipped}
+			})
+		}()
+		defer func() { <-done }()
 	}
 	for k, v := range s.Env {
 		// The scenario's own recorded environment wins, so a drift run's

@@ -3,12 +3,18 @@
 // identity in the pod that can write -- a role bound to the audience
 // "vault-publish", reachable only through a token the kubelet projects
 // into this container and no other -- and it exists to keep that identity
-// out of the container that runs OpenTofu.
+// out of the container that runs OpenTofu. It also holds a second,
+// independent credential: a 1Password service account scoped read-only to
+// the `platform` vault, delivered as its own Kubernetes Secret mounted only
+// into this container, which it uses to fetch the Cloudflare token itself
+// rather than receive it over the handoff socket -- truss never sees the
+// value, not in memory, not in a request, not in a log.
 //
 // It is a rendezvous, not a server: it loads its config and the authored
 // expiry table, listens on one Unix socket for exactly one request
 // (internal/handoff.Serve), answers it, and exits. No timer, no state read,
-// no Vault login until a request has actually arrived.
+// no Vault login and no 1Password read until a request has actually
+// arrived.
 package main
 
 import (
@@ -30,6 +36,10 @@ import (
 // point of a separate identity (design §2, §6) -- nothing on this side is
 // reachable from the truss container, including by accident through a
 // shared config loader.
+//
+// ⚠️ OP_TOKEN_FILE AND THE 1PASSWORD VAULT NAME ARE DELIBERATELY NOT HERE.
+// See loadPublishConfig's own doc for why: they gate a value publish, not
+// startup.
 var publishRequiredEnv = []string{
 	"VAULT_ADDR", "VAULT_ROLE", "VAULT_JWT_PATH", "VAULT_MOUNT",
 	"HANDOFF_SOCKET", "EXPIRIES_FILE",
@@ -43,7 +53,8 @@ const defaultPublishWait = 30 * time.Minute
 // vaultCallTimeout bounds the handler's own Vault work per request. The
 // handler receives no context from internal/handoff.Serve (h's signature
 // is func(Request) Response, deliberately -- Serve's ctx governs only the
-// accept-side wait), so it derives its own bounded one.
+// accept-side wait), so it derives its own bounded one. It also bounds the
+// 1Password reads made on the same request, for the same reason.
 const vaultCallTimeout = 60 * time.Second
 
 // publishConfig is everything cmdPublish needs, read once from the
@@ -54,6 +65,8 @@ type publishConfig struct {
 	socket       string
 	expiriesFile string
 	wait         time.Duration
+	// op is read but NOT validated here -- see loadPublishConfig's doc.
+	op secrets.OPConfig
 }
 
 // loadPublishConfig reads and validates the publisher container's
@@ -61,6 +74,20 @@ type publishConfig struct {
 // (design §4); it is never the repo checkout truss writes, and this
 // function has no path by which it could become one -- there is no
 // fallback to any other location.
+//
+// ⚠️ $OP_TOKEN_FILE AND THE 1PASSWORD VAULT NAME ARE READ HERE BUT NEVER
+// VALIDATED HERE, AND THAT ASYMMETRY WITH EVERYTHING ELSE IN THIS FUNCTION
+// IS DELIBERATE. Patching the authored expiry table -- this publisher's
+// other, already-live job -- needs no 1Password at all, and this container
+// is a native sidecar: if an absent or unreadable 1Password credential
+// refused to let it start, the pod would sit Pending and, under
+// concurrencyPolicy: Forbid, silently suppress every pass after it, over a
+// credential that pass might never even need. So these two are optional at
+// load. They become required, loudly, only at the moment handle() actually
+// attempts to fetch a value -- see its own doc -- and even then there is no
+// fallback: not to another token, not to an environment variable, not to
+// the truss container's own `op-applier` mount, which carries broader
+// access than this container is meant to have.
 func loadPublishConfig(getenv func(string) string) (publishConfig, []string) {
 	values := make(map[string]string, len(publishRequiredEnv))
 	var problems []string
@@ -97,18 +124,45 @@ func loadPublishConfig(getenv func(string) string) (publishConfig, []string) {
 		socket:       values["HANDOFF_SOCKET"],
 		expiriesFile: values["EXPIRIES_FILE"],
 		wait:         wait,
+		op: secrets.OPConfig{
+			Vault:     getenv("OP_VAULT"),
+			TokenFile: getenv("OP_TOKEN_FILE"),
+		},
 	}, nil
+}
+
+// opReader is the seam handle lets a test double the 1Password reads
+// without a real `op` process: the credential value (Field) and its
+// expiry (Expiry), both against the compiled-in item. *secrets.OP is the
+// real implementation.
+type opReader interface {
+	Field(ctx context.Context, item, field string) (string, error)
+	Expiry(ctx context.Context, item string) (raw string, recorded bool, err error)
+}
+
+// newOPStore wraps secrets.NewOP so its return type matches opReader --
+// production's only implementation of the seam. It is called from inside
+// handle(), never from cmdPublish, which is what makes $OP_TOKEN_FILE and
+// the 1Password vault name optional at startup and required only at the
+// point of use (see loadPublishConfig's doc).
+func newOPStore(cfg secrets.OPConfig) (opReader, error) {
+	return secrets.NewOP(cfg)
 }
 
 // publishHandler closes over everything one request needs to answer: the
 // write identity, a way to read the cas version PutValue's guard requires,
-// and the authored expiry table loaded once at startup, before any request
-// has arrived.
+// the authored expiry table loaded once at startup, before any request has
+// arrived, and how to build the 1Password reader a value publish needs
+// (newOP, not a constructed opReader -- see handle's own doc for why
+// construction is deferred rather than done once up front).
 type publishHandler struct {
 	publisher secrets.Publisher
 	versions  currentVersionReader
 	table     secrets.Expiries
 	item      string // the one item this handler may write; itemCFInfraAdmin in production
+	field     string // the field read from item for its value; fieldCFPassword in production
+	opCfg     secrets.OPConfig
+	newOP     func(secrets.OPConfig) (opReader, error) // newOPStore in production
 }
 
 // currentVersionReader is the seam handle lets a test double the KV v2
@@ -122,8 +176,16 @@ type currentVersionReader interface {
 // table first, regardless of PublishValue -- a pass with nothing to
 // publish still exists to keep the expiry alarm honest (design §9,
 // "Nothing to publish; the expiry patches failed" is reported, not a
-// failure) -- and then, only when PublishValue is true, writes the value
-// and the minted item's own expiry.
+// failure) -- and then, only when PublishValue is true, fetches the value
+// and its expiry from 1Password and writes both.
+//
+// The 1Password reader is constructed HERE, not by cmdPublish before
+// Serve, and only on this branch: loadPublishConfig deliberately leaves
+// $OP_TOKEN_FILE and the vault name unvalidated, because a pass with
+// nothing to publish (the common case) must not need them at all. An
+// absent, empty or unreadable token surfaces here, in the Response, as
+// this request's own failure -- loud, and never a fallback to any other
+// credential.
 //
 // The vacuous-pass rule (design §9's last row) is enforced at the end:
 // wrote nothing, skipped nothing, and had nothing to do is refused, never
@@ -162,19 +224,6 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 		patched++
 	}
 
-	// The minted item's own expiry travels in the request, because it is a
-	// fact about this mint that only the mint knows (design §4, "one row").
-	// It is never read from the authored table, and the table's own loader
-	// (secrets.LoadExpiries) already refuses an entry naming a probed item
-	// -- this is neither: it is the one row truss itself still controls.
-	if req.PublishValue && req.Expires != "" {
-		if err := h.publisher.PatchExpiry(ctx, req.Item, req.Expires); err != nil {
-			note(req.Item+" (own expiry)", err)
-		} else {
-			patched++
-		}
-	}
-
 	resp.Expiries = patched
 	resp.Skipped = skipped
 
@@ -186,18 +235,54 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 		return finish(resp)
 	}
 
-	if req.Item != h.item {
+	op, err := h.newOP(h.opCfg)
+	if err != nil {
 		resp.Value = handoff.ValueFailed
-		resp.Error = fmt.Sprintf("refusing to publish %q: this publisher may write only %q", req.Item, h.item)
-		return finish(resp)
-	}
-	if req.Field == "" || req.Value == "" {
-		resp.Value = handoff.ValueFailed
-		resp.Error = "refusing to publish: field and value must both be set when publish_value is true"
+		resp.Error = err.Error()
 		return finish(resp)
 	}
 
-	version, exists, err := h.versions.CurrentVersion(ctx, req.Item)
+	// h.item and h.field are the compiled-in constants (itemCFInfraAdmin,
+	// fieldCFPassword in production) -- never named by the request, which
+	// carries only the PublishValue bool. PutValue below refuses any item
+	// but the one it was constructed for regardless; this is the first,
+	// independent refusal, not the only one.
+	value, err := op.Field(ctx, h.item, h.field)
+	if err != nil {
+		resp.Value = handoff.ValueFailed
+		resp.Error = err.Error()
+		return finish(resp)
+	}
+	expires, recorded, err := op.Expiry(ctx, h.item)
+	if err != nil {
+		resp.Value = handoff.ValueFailed
+		resp.Error = err.Error()
+		return finish(resp)
+	}
+	if !recorded {
+		// Op.Field already refuses a present-but-empty credential; this is
+		// its counterpart for the expiry -- a fetch that finds nothing
+		// recorded is an error here, never a silent skip (unlike Sweep's
+		// walk over arbitrary items, where most legitimately carry none).
+		resp.Value = handoff.ValueFailed
+		resp.Error = fmt.Sprintf("refusing to publish: %q has no expiry recorded in 1Password", h.item)
+		return finish(resp)
+	}
+
+	// The minted item's own expiry, like every table entry above, is a
+	// best-effort PATCH: its failure is reported (note) alongside whatever
+	// else failed, but must not stop the value write below from being
+	// attempted -- design §9's "a value publish can succeed even when an
+	// earlier expiry patch did not".
+	if err := h.publisher.PatchExpiry(ctx, h.item, expires); err != nil {
+		note(h.item+" (own expiry)", err)
+	} else {
+		patched++
+	}
+	resp.Expiries = patched
+	resp.Skipped = skipped
+
+	version, exists, err := h.versions.CurrentVersion(ctx, h.item)
 	if err != nil {
 		resp.Value = handoff.ValueFailed
 		resp.Error = err.Error()
@@ -208,7 +293,7 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 		cas = version
 	}
 
-	if err := h.publisher.PutValue(ctx, req.Item, map[string]string{req.Field: req.Value}, cas); err != nil {
+	if err := h.publisher.PutValue(ctx, h.item, map[string]string{h.field: value}, cas); err != nil {
 		resp.Value = handoff.ValueFailed
 		resp.Error = err.Error()
 		return finish(resp)
@@ -287,6 +372,9 @@ func cmdPublish(ctx context.Context, args []string, getenv func(string) string, 
 		versions:  kv,
 		table:     table,
 		item:      itemCFInfraAdmin,
+		field:     fieldCFPassword,
+		opCfg:     cfg.op,
+		newOP:     newOPStore,
 	}
 
 	if err := handoff.Serve(ctx, cfg.socket, cfg.wait, handler.handle); err != nil {

@@ -97,6 +97,15 @@ func TestHandoffSocketIsRequiredOnTheDriftPassAndForbiddenOnTheFrequentOne(t *te
 // the minted value exists only there; wiring the publisher to the frequent pass
 // put it on the one pass that never mints anything, publishing nothing forever
 // while the pass that does rotate had nobody to hand its value to.
+//
+// Each case also pins req.PublishValue: "rotation ran and succeeded" (see
+// runRotation's applied return) is the ONLY thing that sets it true --
+// gate failed, no credentials root, the state lock held elsewhere, and a
+// rotation that ran but failed must all send false. Publishing whatever
+// rotation last succeeded at, on a pass where THIS attempt failed or never
+// ran, would publish a value nothing here has just verified against
+// Cloudflare -- named as its own rule in the task brief, not merely an
+// implementation detail.
 func TestEveryDriftPassPathContactsThePublisherExactlyOnce(t *testing.T) {
 	// driftDeps builds a drift pass whose gate passes and whose roots all
 	// exist, so rotation and drift both get their chance. Each case then
@@ -112,9 +121,10 @@ func TestEveryDriftPassPathContactsThePublisherExactlyOnce(t *testing.T) {
 	}
 
 	cases := []struct {
-		name      string
-		build     func(t *testing.T) applyDeps
-		wantCalls int
+		name             string
+		build            func(t *testing.T) applyDeps
+		wantCalls        int
+		wantPublishValue bool // only checked when wantCalls > 0
 	}{
 		{
 			name: "drift: gate failed",
@@ -126,31 +136,52 @@ func TestEveryDriftPassPathContactsThePublisherExactlyOnce(t *testing.T) {
 				deps.Cfg.DriftOnly = true
 				return deps
 			},
-			wantCalls: 1,
+			wantCalls:        1,
+			wantPublishValue: false,
 		},
 		{
 			name: "drift: rotation ran cleanly",
 			build: func(t *testing.T) applyDeps {
 				return driftDeps(t, &fakeTofu{})
 			},
-			wantCalls: 1,
+			wantCalls:        1,
+			wantPublishValue: true,
 		},
 		{
 			name: "drift: rotation failed",
 			build: func(t *testing.T) applyDeps {
 				// A rotation failure is a pass failure, and the publisher must
 				// STILL be contacted -- otherwise a bad night wedges every
-				// following pass via concurrencyPolicy: Forbid.
+				// following pass via concurrencyPolicy: Forbid. It must also
+				// never be told to publish: this attempt never verified a
+				// value against Cloudflare.
 				return driftDeps(t, &fakeTofu{ApplyErr: errors.New("rotation blew up")})
 			},
-			wantCalls: 1,
+			wantCalls:        1,
+			wantPublishValue: false,
 		},
 		{
 			name: "drift: state lock held elsewhere",
 			build: func(t *testing.T) applyDeps {
 				return driftDeps(t, &fakeTofu{InitErr: plan.ErrLockBusy})
 			},
-			wantCalls: 1,
+			wantCalls:        1,
+			wantPublishValue: false,
+		},
+		{
+			name: "drift: rotation skipped, no credentials root at this commit",
+			build: func(t *testing.T) applyDeps {
+				forgeFake := compliantCommitGate("alice", "headsha1", "headsha1")
+				forgeFake.ProtectionResult = compliantGatesProtection()
+				// Every root exists except credentials -- HasDir("credentials")
+				// is runRotation's own skip test.
+				git := &fakeGit{HasDirFn: func(root string) bool { return root != "credentials" }}
+				deps, _, _ := buildTestDeps(t, forgeFake, git, func(env []string) tofuRunner { return &fakeTofu{} })
+				deps.Cfg.DriftOnly = true
+				return deps
+			},
+			wantCalls:        1,
+			wantPublishValue: false,
 		},
 		{
 			name: "frequent pass: never, it has no publisher",
@@ -178,16 +209,22 @@ func TestEveryDriftPassPathContactsThePublisherExactlyOnce(t *testing.T) {
 			if got := fh.callCount(); got != tc.wantCalls {
 				t.Fatalf("publisher contacted %d time(s), want %d", got, tc.wantCalls)
 			}
+			if tc.wantCalls > 0 {
+				if got := fh.lastRequest().PublishValue; got != tc.wantPublishValue {
+					t.Errorf("req.PublishValue = %v, want %v", got, tc.wantPublishValue)
+				}
+			}
 		})
 	}
 }
 
 // TestNothingToPublishSendsPublishValueFalseAndNoValueField covers the
-// present-day shape of every call this port makes: no code path here yet
-// determines a newly minted value to hand across (design §3's two entry
-// points are not wired to this call), so the request must always say
-// "nothing to publish" -- PublishValue false and every other field its
-// zero value, never guessed at.
+// FREQUENT pass: DriftOnly defaults false here, so runApplyPass never even
+// reaches the `if driftRun` block that contacts the publisher at all --
+// fh is never called, and Request's own zero value already means "nothing
+// to publish". TestEveryDriftPassPathContactsThePublisherExactlyOnce is
+// where PublishValue's real wiring (rotation ran and succeeded, on a DRIFT
+// pass) is pinned, case by case.
 func TestNothingToPublishSendsPublishValueFalseAndNoValueField(t *testing.T) {
 	forgeFake := &fakeForge{}
 	git := &fakeGit{HasDirFn: func(string) bool { return false }}
@@ -202,10 +239,10 @@ func TestNothingToPublishSendsPublishValueFalseAndNoValueField(t *testing.T) {
 	defer cancel()
 	runApplyPass(ctx, deps, "headsha1")
 
-	req := fh.lastRequest()
-	if req.PublishValue {
-		t.Fatalf("req.PublishValue = true, want false")
+	if got := fh.callCount(); got != 0 {
+		t.Fatalf("publisher contacted %d time(s) on a frequent pass, want 0", got)
 	}
+	req := fh.lastRequest()
 	if req != (handoff.Request{}) {
 		t.Fatalf("req = %+v, want the zero Request", req)
 	}
@@ -215,11 +252,12 @@ func TestNothingToPublishSendsPublishValueFalseAndNoValueField(t *testing.T) {
 
 // TestAValuePublishFailureFailsThePassAndIsFiledUnderItsOwnRotationKey and
 // its siblings below call runHandoff directly rather than through
-// runApplyPass: nothing in this port yet sets req.PublishValue true in
-// production (see the test above), so the only way to exercise §9's other
-// table rows is to hand runHandoff the request that future work will one
-// day construct. That is the same style apply_rotation_test.go and
-// apply_credcache_test.go already use for runRotation and runDrift.
+// runApplyPass: driving every §9 table row through a real drift pass would
+// mean a real rotation success or failure for each one, which is
+// apply_rotation_test.go's and apply_credcache_test.go's job, not this
+// file's. Handing runHandoff the request directly isolates §9's own
+// mapping (a Response, or a Send error, folded to a pass failure or not)
+// from how PublishValue came to be true.
 func TestAValuePublishFailureFailsThePassAndIsFiledUnderItsOwnRotationKey(t *testing.T) {
 	forgeFake := &fakeForge{}
 	git := &fakeGit{HasDirFn: func(string) bool { return false }}
@@ -230,14 +268,11 @@ func TestAValuePublishFailureFailsThePassAndIsFiledUnderItsOwnRotationKey(t *tes
 	deps.Handoff = fh.send
 	deps.HandoffSocket = "fake-socket"
 
-	req := handoff.Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: "topsecret", Expires: "2027-01-01"}
+	req := handoff.Request{PublishValue: true}
 	failure := runHandoff(context.Background(), deps, req, "headsha1")
 
 	if failure == "" {
 		t.Fatal("failure is empty, want a rotation failure: a minted value could not be published")
-	}
-	if strings.Contains(failure, "topsecret") {
-		t.Fatalf("failure text = %q, contains the credential value", failure)
 	}
 }
 
@@ -254,7 +289,7 @@ func TestASendErrorWithAMintedValueAlsoFailsThePass(t *testing.T) {
 	deps.Handoff = fh.send
 	deps.HandoffSocket = "fake-socket"
 
-	req := handoff.Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: "topsecret"}
+	req := handoff.Request{PublishValue: true}
 	failure := runHandoff(context.Background(), deps, req, "headsha1")
 
 	if failure == "" {
@@ -276,7 +311,7 @@ func TestAPublishFailureSaysTheApplySucceeded(t *testing.T) {
 	deps.Handoff = fh.send
 	deps.HandoffSocket = "fake-socket"
 
-	req := handoff.Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: "topsecret"}
+	req := handoff.Request{PublishValue: true}
 	failure := runHandoff(context.Background(), deps, req, "deadbeef")
 
 	if !strings.Contains(failure, "credentials applied at deadbeef") {
@@ -368,33 +403,6 @@ func TestApplyPartialPublishReportsBothItsWritesAndItsError(t *testing.T) {
 	}
 	if !strings.Contains(out, "github-app: 403") {
 		t.Errorf("stderr = %q, want the failure reported alongside the successes", out)
-	}
-}
-
-// TestRunHandoffNeverLogsACredentialValue is the mutation-tested guard for
-// the constraint "no credential in a log, ledger record or Telegram
-// message": even a request built with a real Value (which nothing in this
-// port constructs today, but a future caller will) must never reach
-// stderr.
-func TestRunHandoffNeverLogsACredentialValue(t *testing.T) {
-	forgeFake := &fakeForge{}
-	git := &fakeGit{HasDirFn: func(string) bool { return false }}
-	newTofu := func(env []string) tofuRunner { return &fakeTofu{} }
-	deps, _, _ := buildTestDeps(t, forgeFake, git, newTofu)
-
-	var stderr bytes.Buffer
-	deps.Stderr = &stderr
-
-	fh := &fakeHandoff{Resp: handoff.Response{Value: handoff.ValueWritten, Expiries: 1}}
-	deps.Handoff = fh.send
-	deps.HandoffSocket = "fake-socket"
-
-	const sentinel = "SENTINEL-MINTED-VALUE"
-	req := handoff.Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: sentinel}
-	runHandoff(context.Background(), deps, req, "headsha1")
-
-	if strings.Contains(stderr.String(), sentinel) {
-		t.Fatalf("stderr = %q, contains the credential value", stderr.String())
 	}
 }
 

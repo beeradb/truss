@@ -253,7 +253,7 @@ func (o *OP) Expiry(ctx context.Context, item string) (raw string, recorded bool
 	// every version that supports it. An unparseable answer is an ERROR, never
 	// "no expiry recorded" -- the fail-closed direction §4.7 requires, and the
 	// reason this does not simply fall back to trimming stdout.
-	raw, err = expiresFromJSON(stdout)
+	raw, err = fieldValueFromJSON(stdout)
 	if err != nil {
 		return "", false, fmt.Errorf("secrets: reading the expiry of %q in 1Password vault %q: %w", item, o.cfg.Vault, err)
 	}
@@ -264,10 +264,38 @@ func (o *OP) Expiry(ctx context.Context, item string) (raw string, recorded bool
 	return raw, true, nil
 }
 
-// expiresFromJSON pulls the field value out of `op item get --format json`.
-// It accepts both shapes op has emitted for --fields: a single field object,
-// and an array of them.
-func expiresFromJSON(b []byte) (string, error) {
+// Field reads one field of one item -- the credential value itself, as
+// opposed to Expiry's metadata read. It exists for the publisher fetching
+// the Cloudflare token it is about to write into Vault rather than
+// receiving it over the handoff socket. Its contract is deliberately
+// stricter than Expiry's: a missing OR present-but-empty field is always an
+// error, never a value quietly treated as absent. Expiry's "unrecorded"
+// outcome is correct for a sweep walking arbitrary items, most of which
+// legitimately carry no expiry; there is no equivalent legitimate reason
+// for the field this method reads to come back empty, so returning "" here
+// would be exactly the vacuous-pass mistake Expiry's own doc warns about,
+// one fetch at a time instead of one item at a time.
+func (o *OP) Field(ctx context.Context, item, field string) (string, error) {
+	stdout, stderr, err := o.exec(ctx, "item", "get", item,
+		"--vault", o.cfg.Vault, "--fields", field, "--format", "json")
+	if err != nil {
+		return "", fmt.Errorf("secrets: reading %q.%q from 1Password vault %q: %s: %s", item, field, o.cfg.Vault, err, string(stderr))
+	}
+	value, err := fieldValueFromJSON(stdout)
+	if err != nil {
+		return "", fmt.Errorf("secrets: reading %q.%q from 1Password vault %q: %w", item, field, o.cfg.Vault, err)
+	}
+	if value == "" {
+		return "", fmt.Errorf("secrets: %q.%q in 1Password vault %q is empty -- refusing to treat that as a silent skip", item, field, o.cfg.Vault)
+	}
+	return value, nil
+}
+
+// fieldValueFromJSON pulls the field value out of `op item get --format
+// json`. It accepts both shapes op has emitted for --fields: a single field
+// object, and an array of them. Shared by Expiry and Field -- both read a
+// field's value identically and differ only in what an empty answer means.
+func fieldValueFromJSON(b []byte) (string, error) {
 	type field struct {
 		Value string `json:"value"`
 	}

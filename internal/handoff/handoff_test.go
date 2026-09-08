@@ -1,9 +1,11 @@
 package handoff
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +15,10 @@ import (
 
 // sentinelValue is a value that must never appear rendered anywhere --
 // error strings, %v/%+v output, or an encoded Response -- across this
-// file's tests.
+// file's tests. Response is the only type left in this package that could
+// ever carry one (TestTheResponseHasNoFieldThatCanHoldACredential below);
+// Request cannot any more (see handoff.go's own doc), which is why this
+// sentinel is used to build a Response, never a Request.
 const sentinelValue = "SENTINEL-DO-NOT-LEAK-9f3a1c7e"
 
 func socketPath(t *testing.T) string {
@@ -21,10 +26,10 @@ func socketPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "publish.sock")
 }
 
-// TestSendCarriesTheValueAndReturnsThePublishersVerdict is the round-trip:
-// what Serve's handler receives is exactly what Send sent, and Send returns
-// exactly what the handler returned.
-func TestSendCarriesTheValueAndReturnsThePublishersVerdict(t *testing.T) {
+// TestSendCarriesPublishValueAndReturnsThePublishersVerdict is the
+// round-trip: what Serve's handler receives is exactly what Send sent, and
+// Send returns exactly what the handler returned.
+func TestSendCarriesPublishValueAndReturnsThePublishersVerdict(t *testing.T) {
 	path := socketPath(t)
 
 	var gotReq Request
@@ -43,7 +48,7 @@ func TestSendCarriesTheValueAndReturnsThePublishersVerdict(t *testing.T) {
 	// to exercise (that is TestSendFailsDistinguishablyWhenNoPublisherIsListening).
 	waitForSocket(t, path)
 
-	req := Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: sentinelValue, Expires: "2027-01-01"}
+	req := Request{PublishValue: true}
 	resp, err := Send(context.Background(), path, 5*time.Second, req)
 	if err != nil {
 		t.Fatalf("Send: %v", err)
@@ -57,8 +62,8 @@ func TestSendCarriesTheValueAndReturnsThePublishersVerdict(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("handler was never called")
 	}
-	if gotReq.Value != sentinelValue || gotReq.Item != "cf-infra-admin" || gotReq.Expires != "2027-01-01" {
-		t.Fatalf("handler received %+v, want the exact request Send sent", gotReq)
+	if gotReq != req {
+		t.Fatalf("handler received %+v, want the exact request Send sent (%+v)", gotReq, req)
 	}
 
 	if err := <-serveErr; err != nil {
@@ -140,8 +145,12 @@ func TestServeExitsNonZeroWhenNobodyConnectsBeforeTheDeadline(t *testing.T) {
 	}
 }
 
-// TestARequestLargerThanTheLimitIsRefused: a request whose encoded body
-// exceeds maxMessageSize must never reach the handler.
+// TestARequestLargerThanTheLimitIsRefused: a message exceeding
+// maxMessageSize must never reach the handler. Request no longer has any
+// field big enough to build one from (it is a single bool), so this dials
+// the socket directly and writes raw oversized bytes the way a malformed or
+// hostile peer would -- serveOne's size check runs before JSON decoding, so
+// this still exercises exactly the guard the old test did.
 func TestARequestLargerThanTheLimitIsRefused(t *testing.T) {
 	path := socketPath(t)
 	handlerCalled := false
@@ -154,11 +163,21 @@ func TestARequestLargerThanTheLimitIsRefused(t *testing.T) {
 	}()
 	waitForSocket(t, path)
 
-	oversized := Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: strings.Repeat("x", maxMessageSize+1024)}
-	_, sendErr := Send(context.Background(), path, 5*time.Second, oversized)
-	if sendErr == nil {
-		t.Fatal("Send of an oversized request succeeded, want a refusal surfaced to the sender")
+	var d net.Dialer
+	conn, err := d.DialContext(context.Background(), "unix", path)
+	if err != nil {
+		t.Fatalf("dialing the socket: %v", err)
 	}
+	oversized := bytes.Repeat([]byte("x"), maxMessageSize+1024)
+	if _, err := conn.Write(oversized); err != nil {
+		t.Fatalf("writing an oversized message: %v", err)
+	}
+	if uc, ok := conn.(*net.UnixConn); ok {
+		if err := uc.CloseWrite(); err != nil {
+			t.Fatalf("closing the write side: %v", err)
+		}
+	}
+	conn.Close()
 
 	if err := <-serveErr; err == nil {
 		t.Fatal("Serve accepted an oversized request, want a refusal")
@@ -167,33 +186,6 @@ func TestARequestLargerThanTheLimitIsRefused(t *testing.T) {
 	}
 	if handlerCalled {
 		t.Fatal("the handler was called with an oversized request")
-	}
-}
-
-// TestTheRequestNeverRendersItsValue is the single most important test in
-// this package (per the task brief): a stray %v or %+v anywhere must not
-// be the leak.
-func TestTheRequestNeverRendersItsValue(t *testing.T) {
-	req := Request{PublishValue: true, Item: "cf-infra-admin", Field: "password", Value: sentinelValue, Expires: "2027-01-01"}
-
-	rendered := fmt.Sprintf("%v", req)
-	if strings.Contains(rendered, sentinelValue) {
-		t.Errorf("%%v of a Request contains its Value: %q", rendered)
-	}
-	renderedPlus := fmt.Sprintf("%+v", req)
-	if strings.Contains(renderedPlus, sentinelValue) {
-		t.Errorf("%%+v of a Request contains its Value: %q", renderedPlus)
-	}
-	explicit := req.String()
-	if strings.Contains(explicit, sentinelValue) {
-		t.Errorf("Request.String() contains its Value: %q", explicit)
-	}
-
-	// A zero-value (nothing to publish) Request must also render safely
-	// and legibly -- this is the common case, sent on 44 of every 45
-	// passes.
-	if got := (Request{}).String(); !strings.Contains(got, "nothing to publish") {
-		t.Errorf("zero-value Request.String() = %q, want it to say there is nothing to publish", got)
 	}
 }
 
