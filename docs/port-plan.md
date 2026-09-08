@@ -375,6 +375,29 @@ Do not use `encoding/json`'s marshaller. Measured rules:
   `1.5e-3`→`0.0015`, `2.5e+1`→`25`, `1e21`→`1E+21`, and a 39-digit integer unchanged.
 - `null`, `true`, `false` verbatim; no whitespace anywhere.
 
+⚠️ **FOUR CORRECTIONS, FOUND BY MEASURING AGAINST REAL jq DURING IMPLEMENTATION.** The first
+would have made every digest wrong:
+
+1. **`jq -S -c` writes a trailing newline, and `sha256sum` hashes it.** Verified:
+   `sha256(bytes + "\n")` matches the reference pipeline and `sha256(bytes)` does not. This
+   was absent from the specification entirely; an implementer following it literally would
+   have produced a digest disagreeing with every value already recorded in the bucket, and the
+   failure would have surfaced in production as a refusal reading like tampering.
+2. **`{"resource_changes": false}` also yields `[]`.** jq's `//` treats an explicit `false` as
+   absent, so "absent or null" undersold it.
+3. **A `null` element of `resource_changes` is not an error.** Indexing `null` yields `null` in
+   jq, so only a non-null non-object element errors.
+4. **jq's sort order for non-string `.address` values is undocumented** and was reverse-engineered:
+   compare sorted-key arrays first, then values in that key order.
+
+Two divergences were found by fuzzing and deliberately NOT fixed, each documented in the test
+file with its triggering input: jq's parser accepts non-RFC-8259 numbers (leading zeros, a bare
+`.5`, `NaN`) that `encoding/json` refuses, and jq has a hard exponent ceiling at exactly
+999,999,999 beyond which it clamps. Neither is reachable from real `tofu show -json`, because
+OpenTofu's own encoder cannot emit either shape. One WAS fixed: a lone UTF-16 high surrogate,
+which `encoding/json` accepts and jq's parser refuses — a document the reference pipeline
+rejects must not silently produce a digest here.
+
 **Error semantics.** Malformed JSON, a `resource_changes` element that is not an object, or a
 `change` present and not an object or null → error and no digest. An element with **no**
 `change` key yields `actions/before/after` as `null` and is not an error.
@@ -566,58 +589,177 @@ Write the private key to disk. Interpolate an unescaped repo or branch into a UR
 - `TestARepoNameCannotTraverseTheURLPath`
 - `TestProtectionIsReadOncePerPass`
 
-### 4.7 `internal/secrets`
+### 4.7 `internal/secrets` — respecified against Vault (decision 4)
+
+**What this replaces.** The earlier version specified a `Vault` interface, a `CLI` shelling to
+`op`, and a sweep over two 1Password vaults. Decision 4 supersedes it: Vault is authoritative
+for credential lifetimes and `op` leaves the image. Decision 5 retires the
+`service-account ratelimit` diagnostic that was the only reason `RateLimits` existed. The file
+reader survives untouched; everything behind it is replaced.
 
 ```go
+// Unchanged. This is what secret_field/secret_field_if_present already are.
 type Dir struct{ Root string }
 func (d Dir) Field(item, field string) (string, error)
 func (d Dir) FieldIfPresent(item, field string) (string, bool, error)
 
-type Vault interface {
-    ListItems(ctx, vault string) ([]string, error)
-    ReadField(ctx, vault, item, field string) (string, error)
-    RateLimits(ctx) string
+// Replaces the Vault interface and CLI. Metadata only: it cannot return a value.
+type Store interface {
+    Name() string
+    List(ctx context.Context) ([]string, error)
+    Expiry(ctx context.Context, item string) (raw string, recorded bool, err error)
 }
-type CLI struct{ Bin, Token string; Sleep func(time.Duration) }
 
-type Sweep struct{ Vault Vault; Vaults, Probed []string; WarnDays int; Now func() time.Time }
-func (s Sweep) Run(ctx, probes map[string]string) ([]Expiring, error)
+type KVConfig struct{ Addr, Mount, Role, JWTPath string; HTTP *http.Client }
+func NewKV(cfg KVConfig) (*KV, error)
+
+type Probe interface{ Expiry(ctx context.Context) (time.Time, bool, error) }
+type CloudflareToken struct{ BaseURL, Token string; HTTP *http.Client }
+
+type Sweep struct {
+    Stores   []Store
+    Probes   map[string]Probe
+    WarnDays int
+    Now      func() time.Time
+}
+func (s Sweep) Run(ctx context.Context) ([]Expiring, error)
+
 type Expiring struct{ Name string `json:"name"`; DaysLeft *int `json:"days_left"` }
+func DaysUntil(now time.Time, raw string) (days int, ok bool)
 ```
 
-**Behaviours preserved.** `Field` fails on a missing **or** empty file, with the two distinct
-messages the bash uses — "refusing to continue: … is not mounted" and "… is empty" — and
-specifically not "refusing to start", because it is also called mid-run (136-142).
-`FieldIfPresent` is for `cf-infra-admin` alone (145-159). The sweep lists both vaults, skips
-items in `PROBED_ITEMS`, treats `expires: never` as an opt-out, and reports an item with **no**
-`expires` with `days_left: null` rather than skipping it (929-990). One retry, 5 seconds, on a
-rate limit, then failure (50-71).
+**`Dir` does not change.** The `vault-secrets` init container renders `$SECRETS_DIR/<item>/<field>`
+and exits; `docs/decisions/vault.md` calls the file interface "the seam, backend-agnostic on
+purpose", and it already survived the ESO-to-Vault change without moving. Decision 4 does not
+reach it.
 
-**Error semantics.** A vault listing that fails returns an error carrying the rate-limit table
-and the two-case explanation of *which* allowance ran out (976-979). The sweep never terminates
-the process (956-975).
+**The sweep reads KV v2 custom metadata over `net/http`.** Three options were weighed.
 
-**Refuses to.** Fall back to the CLI when a mounted file is missing (129-132). Treat a failed
-listing as an empty vault. Log or return any value. Read any field other than `expires` from a
-runtime vault.
+1. *Init container renders expiry as files.* Rejected: it renders a HARDCODED list of twelve
+   fields, which destroys the sweep's premise — the bash's own comment is "there is no list of
+   names to keep in step with the runbook; the vault is the list", and a credential nobody put
+   in the manifest is exactly the one the sweep exists to catch. And `set -eu` plus `need`
+   turns "no expiry recorded" — which §2.16 requires be *reported* — into a pod that will not
+   start.
+2. *`hashicorp/vault/api`.* Rejected on decision 1's own argument: ~40 transitive modules and
+   an exception to a rule made uniform for a reason, to save ~120 lines against an API surface
+   of three endpoints.
+3. *A `vault` binary in the image.* Replaces a 41 MB binary with a larger one. Rejected.
+
+⚠️ **Expiry is read from `<mount>/metadata/<item>`, never `<mount>/data/`.** That makes "reads
+nothing but the expiry" a property of the URL and of the policy the applier already has
+(`read, list` on `platform/metadata/*`) rather than an honour-system rule in a comment. A sweep
+that issues no request under `data/` is one no credential can leak through, and it is testable
+as a request-path assertion rather than as a promise.
+
+**⚠️ BLOCKED: nothing writes `expires` into Vault.** `credentials/` mints through the
+1Password provider and writes each generation's expiry as a section field there;
+`providers.allow` carries no Vault provider; Vault's `platform/` KV was seeded once by
+`bootstrap-vault.sh`, which writes values and no metadata. Nothing re-seeds it. This is
+order-of-work step 7 of `docs/decisions/vault.md`, it lives in the platform repo, and it is
+five pieces: `providers.allow` gains the Vault provider by hand and CI's mirror is rebuilt;
+`credentials/versions.tf` declares it; each `onepassword_item` gains a paired
+`vault_kv_secret_v2` carrying `custom_metadata.expires`; `bootstrap-vault.sh` seeds
+`expires = "never"` on the hand-made roots; and `credentials/` acquires a Vault identity that
+can write.
+
+⚠️ **That last piece is an owner decision.** `credentials/` runs inside the applier pod, whose
+Vault role is read-only by explicit design — "a compromised applier pod cannot rewrite the
+store it reads from" — and the pod has one ServiceAccount. Granting write from inside it undoes
+that claim unless the write happens under a second identity.
+
+**⚠️ A SECOND GAP, LARGER THAN DECISION 4 STATES.** The bash sweeps `platform` AND
+`recipes-runtime`. Vault has one mount holding seven items. `gcp-plan` and `github-plan-app`
+live in the 1Password `platform` vault and were never seeded into Vault; the whole
+`recipes-runtime` vault — `nyt-cookie`, `claude-token`, `telegram`, `registry-pull`,
+`r2-publish`, `r2-uploads`, `r2-archive`, plus the minted `r2-*` and `cf-images` — is served by
+ESO and has no Vault mount at all. **Cutting over as things stand deletes expiry coverage of
+ten items, including every credential that actually rotates.** `Sweep.Stores` is a slice and no
+mount name appears in this package, so the fix is configuration once a second mount exists —
+but until then the cutover is a reduction in the alarm and must be recorded as one.
+
+**Fail closed, and "closed" is exact.** Not `die`, and not an empty list. The sweep runs at the
+end of the daily pass, after rotation and drift, so exiting there discards the drift result —
+the only tamper alarm the system has — while the frequent job goes on reporting "nothing to
+apply" and the channel looks alive. Closed means: `Run` RETURNS its error, `cmd/truss expiry`
+sets `failure`, the heartbeat is written, the alert is sent, exit 1.
+
+Three states are errors and not results: a login, list or metadata read that fails; a partial
+sweep (findings AND an error, never findings alone); and a mount that lists successfully in
+which not one item records an `expires`. The last is the prerequisite's own alarm — a store
+where nothing writes expiry is indistinguishable, item by item, from a store of legitimate
+gaps, and seven permanent "no expiry recorded" lines are read by nobody after the third day.
+One error naming the missing write is loud, and disarms itself the moment one item carries the
+field.
+
+**Can it be built now? Built, tested and released — not wired.** Every dependency is behind an
+interface and an `httptest` server. What cannot happen before step 7 is the cutover, which
+would turn every daily pass red on day one. So §1's step 4 splits: `secrets`, `notify` and
+`config` land and delete `curl`; `op` leaves only after step 7.
+
+**Two facts to measure, not guess.** The applier CONTAINER does not mount the `vault-token`
+projected volume today — only the init container does, and `automountServiceAccountToken` is
+false — so there is no JWT to log in with; that is one line in `20-cronjob.yaml`. And whether
+`path "platform/metadata/*"` authorises a LIST at the mount root.
+
+**Behaviours preserved.** `Field` fails on a missing OR empty file, with the bash's two
+distinct messages, and says "continue" rather than "start" because it is also called mid-run.
+`FieldIfPresent` is for `cf-infra-admin` alone. The Cloudflare probe runs FIRST and its result
+survives a mount that cannot be read. Probed items never have their `expires` read. `never` is
+an opt-out. An item with no `expires`, or an unparseable one, is reported with `days_left: null`
+rather than skipped. An item comfortably in date is not reported. `DaysUntil` truncates toward
+zero, matching bash arithmetic, so a date twelve hours past reads 0 and not -1; a bare date and
+an RFC3339 instant both parse. Mounts sweep in order and a title in two mounts is reported
+twice — the bash does not dedupe.
+
+**Deliberately gone.** The one-retry-on-rate-limit loop and `quota_detail`: they exist for a
+daily account-wide 1Password allowance, Vault has none, and retrying against a Vault that is
+down only makes a failing pass slower.
+
+**Refuses to.** Fall back to a network call when a mounted file is missing. Issue any request
+under `<mount>/data/`. Treat a failed login, listing or metadata read as absence. Terminate the
+process. Log or return any credential value, the Vault token, or the JWT. Hardcode a mount,
+role, address, item name or threshold. Report a clean bill for a mount where nothing has ever
+recorded an expiry. Retry a login or listing. Cache a token beyond one `Run`. Import anything
+outside the standard library.
 
 **Named tests.**
 - `TestFieldRefusesAMissingMount`
 - `TestAnEmptyFieldIsAsFatalAsAMissingOne`
-- `TestFieldNeverFallsBackToTheCLI`
+- `TestFieldSaysContinueNotStart`
+- `TestFieldNeverFallsBackToAnyRemoteCall`
 - `TestFieldIfPresentDistinguishesAbsentFromUnreadable`
 - `TestAnEmptyOptionalFieldReadsAsAbsent`
 - `TestNoValueAppearsInAnError`
+- `TestNewKVRefusesAnEmptyAddressRoleOrMount`
+- `TestExactlyOneLoginPerRun`
+- `TestALoginFailureIsAnErrorNotAnEmptySweep`
 - `TestListRefusesToReportAnEmptyVaultItCouldNotRead`
-- `TestOneRetryOnRateLimitThenGiveUp`
-- `TestTheSweepFailureNamesWhichAllowanceRanOut`
+- `TestAMetadataReadFailureIsNeverNoExpiryRecorded`
+- `TestTheSweepReadsNoSecretData`
+- `TestTheClientTokenAndTheJWTNeverAppearInAnError`
 - `TestTheSweepFailureIsReturnedNotFatal`
+- `TestTheSweepFailureNamesTheMountAndTheCallThatFailed`
+- `TestAPartialSweepReturnsBothItsFindingsAndItsError`
+- `TestAMountWhereNothingRecordsAnExpiryIsAnErrorNotAListOfNulls`
+- `TestOneRecordedExpiryDisarmsThatRefusal`
 - `TestProbedItemsAreSkippedInTheVaultScan`
+- `TestTheProbeStillReportsWhenTheMountIsUnreadable`
+- `TestAProbeFailureIsNoExpiryRecordedNotAnError`
 - `TestNeverIsAnOptOut`
 - `TestAnAbsentExpiryIsReportedWithNullDays`
 - `TestAnUnparseableDateIsReportedNotSkipped`
+- `TestABareDateAndAnRFC3339InstantBothParse`
 - `TestDaysUntilIsNegativeForThePast`
+- `TestDaysUntilTruncatesTowardZeroLikeTheBash`
+- `TestAnItemComfortablyInDateIsNotReported`
+- `TestWarnDaysIsTheBoundaryInclusive`
 - `TestOnlyExpiresIsEverReadFromARuntimeVault`
+- `TestEachMountIsSweptInOrder`
+- `TestTheSameTitleInTwoMountsIsReportedTwice`
+- `TestNoMountRoleOrItemNameIsHardcoded`
+- `TestSecretsImportsOnlyTheStandardLibrary`
+- `TestAgainstTheRealVault` (opt-in, `TRUSS_VAULT_LIVE=1`, metadata reads only)
 
 ### 4.8 `internal/notify`
 
