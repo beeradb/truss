@@ -52,13 +52,18 @@ type signedRequest struct {
 // something the signature never vouched for. There is no code path here that
 // sends an unsigned header.
 //
-// It is also load-bearing rather than merely tidy. Google's XML API rejects
-// an x-goog-* header that is not in SignedHeaders with a bare 400: measured
-// in-cluster 2026-09-08, x-goog-if-generation-match sent unsigned returned
-// 400 on every attempt, and signed it works. That header is how
-// create-if-absent is expressed against this endpoint, because the same
-// measurement showed If-None-Match: * being accepted and then ignored --
-// both writes 200, the second overwriting the first.
+// It is also load-bearing rather than merely tidy: an x-goog-* header left
+// out of SignedHeaders is rejected with a bare 400, so anything this client
+// ever adds has to be inside the signature to be usable at all.
+//
+// It does NOT buy create-if-absent, and an earlier version of this comment
+// said it did. Measured in-cluster 2026-09-08: If-None-Match: * is accepted
+// and then ignored (both writes 200, the second overwriting the first), and
+// x-goog-if-generation-match: 0 is refused whether signed or not, with
+// "ExcessHeaderValues: Requests cannot specify both x-amz and x-goog
+// headers" -- and SigV4 forces the x-amz ones. There is no conditional-write
+// primitive available to an S3-compatible client on this endpoint, which is
+// why PutIfAbsent was deleted rather than fixed.
 //
 // Still deliberately absent, always: x-amz-checksum-*,
 // x-amz-sdk-checksum-algorithm and x-amz-trailer (§4.2 "Checksums off unless

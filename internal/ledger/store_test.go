@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newStoreWithHandler(t *testing.T, handler http.HandlerFunc) (*Store, *httptest.Server) {
@@ -280,4 +281,55 @@ func TestAddressingStyleControlsTheRequestURL(t *testing.T) {
 			t.Errorf("virtual-host request path = %s, want /applier/head with no bucket segment", fb.lastReq.URL.Path)
 		}
 	})
+}
+
+// TestTheSignedPathIsThePathOnTheWire covers a bug that shipped and that no
+// test could see. requestURL assigned its own percent-encoding to
+// url.URL.Path, but Path holds the DECODED path and URL.String() escapes it
+// again -- so a key containing a space was signed as %20 and sent as %2520,
+// and the signature covered a path the server never received. It failed
+// closed (SignatureDoesNotMatch, never a wrong object) and it was invisible
+// because every key in production today is unreserved characters only. Root
+// names reach DigestKey, so a root directory named with a space is all it
+// would have taken.
+//
+// The assertion is deliberately end-to-end rather than a property of
+// requestURL: it re-signs the path the SERVER received and requires that to
+// reproduce the Authorization header the client sent. A test that only
+// checked requestURL for internal consistency passed with the bug in place.
+func TestTheSignedPathIsThePathOnTheWire(t *testing.T) {
+	fixed := time.Date(2015, 8, 30, 12, 36, 0, 0, time.UTC)
+
+	for _, key := range []string{
+		"applier/plans/abc123/credentials.digest", // the ordinary case
+		"applier/plans/abc/root with space.digest",
+		"applier/plans/abc/a+b.digest",
+		"applier/plans/abc/tilde~ok.digest",
+	} {
+		t.Run(key, func(t *testing.T) {
+			var gotPath, gotAuth, gotHost string
+			store, srv := newStoreWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.EscapedPath()
+				gotAuth = r.Header.Get("Authorization")
+				gotHost = r.Host
+				w.WriteHeader(http.StatusOK)
+			})
+			defer srv.Close()
+			store.now = func() time.Time { return fixed }
+
+			body := []byte(`{"digest":"deadbeef"}`)
+			if err := store.Put(context.Background(), key, body); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if gotAuth == "" {
+				t.Fatal("no Authorization header reached the server")
+			}
+
+			want := sign(store.cfg, fixed, http.MethodPut, gotHost, gotPath, body, nil).authorization
+			if gotAuth != want {
+				t.Errorf("the signature does not cover the path the server received (%s)\n sent %s\nover-received-path %s",
+					gotPath, gotAuth, want)
+			}
+		})
+	}
 }

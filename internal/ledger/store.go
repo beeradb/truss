@@ -75,26 +75,40 @@ func (s *Store) requestURL(key string) (*url.URL, string, error) {
 	}
 
 	u := *base
+	// Path and RawPath are set as a pair, and that is load-bearing rather
+	// than belt-and-braces. url.URL.Path holds the DECODED path and
+	// URL.String() re-escapes it, so assigning our own percent-encoding to
+	// Path alone gets it encoded a second time on the wire -- a key
+	// containing a space is signed as %20 and sent as %2520, and the
+	// signature then covers a path the server never saw. Setting RawPath
+	// makes EscapedPath() hand back our encoding verbatim, so the bytes we
+	// sign are the bytes we send. Measured 2026-09-08: without this,
+	// "root with space" and "a+b" both mismatch and only unreserved keys
+	// work, which is why nothing had caught it.
 	switch s.cfg.Addressing {
 	case VirtualHostStyle:
 		u.Host = s.cfg.Bucket + "." + base.Host
-		u.Path = "/" + uriEncodePath(key)
+		u.Path = "/" + key
+		u.RawPath = "/" + uriEncodePath(key)
 	default: // PathStyle
-		u.Path = "/" + uriEncodePath(s.cfg.Bucket) + "/" + uriEncodePath(key)
+		u.Path = "/" + s.cfg.Bucket + "/" + key
+		u.RawPath = "/" + uriEncodePath(s.cfg.Bucket) + "/" + uriEncodePath(key)
 	}
 	return &u, u.Host, nil
 }
 
 // do signs and sends one request, with body already computed so its hash
-// can be signed. extraHeaders are attached but not part of the signature
-// (see signedRequest's doc).
+// can be signed. extraHeaders are attached AND signed -- see sign, which
+// covers every header this client sends. There is no unsigned header here.
 func (s *Store) do(ctx context.Context, method, key string, body []byte, extraHeaders map[string]string) (*http.Response, error) {
 	u, host, err := s.requestURL(key)
 	if err != nil {
 		return nil, err
 	}
 
-	sig := sign(s.cfg, s.now(), method, host, u.Path, body, extraHeaders)
+	// EscapedPath(), not Path: the signature must cover the encoded path
+	// that u.String() puts on the wire. See requestURL.
+	sig := sign(s.cfg, s.now(), method, host, u.EscapedPath(), body, extraHeaders)
 
 	var bodyReader io.Reader
 	if body != nil {
