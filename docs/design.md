@@ -1,17 +1,7 @@
 # Design
 
-**This document is the design, and it is ahead of the code.** It describes
-the system as the reference bash implementation runs it today — read it as
-the specification the Go port is aimed at, not as a description of what's in
-this repository yet. Where the two disagree, the bash version is the truth
-and this file is the target.
-
-915 lines of bash, in a private repository, are what's actually running this
-in production. `internal/gates` is the first real package ported: every
-refusal in the system, written as pure functions over fetched state, so
-*"an approval on an earlier push does not count"* is a function call now
-instead of a whole script driven against stub binaries. Everything else below
-is still the target, not the implementation.
+How a change travels from a pull request to applied infrastructure, and every
+gate it has to pass on the way.
 
 ## Terms
 
@@ -40,26 +30,13 @@ Truss is not backend-agnostic and does not pretend to be. Today it assumes:
 Making any of those swappable is a later problem. Naming them is the honest
 alternative to a pluggability claim nothing has ever tested.
 
-That ledger row used to say the storage layer enforces a create-not-overwrite
-grant. Measured against the real bucket on 2026-09-08 (`internal/ledger/
-sigv4.go`, `store.go`): it doesn't. `If-None-Match: *` is accepted and
-silently ignored — two writes to the same key both return 200, the second
-overwriting the first — and the endpoint refuses to mix `x-amz` headers,
-which SigV4 requires, with GCS's own `x-goog-if-generation-match`. No
-conditional-write primitive is reachable from this client at all. Mutual
-exclusion instead comes from the applier itself: one pass runs at a time,
-and OpenTofu holds its own state lock. Nothing the bucket enforces.
-
-Whether Cloudflare R2 would actually fix that gap, rather than just relocate
-it, is a live question — not answered here. R2's S3 API documents real
-conditional-write support: `PutObject` honours `If-Match`/`If-None-Match`
-with a `412` on failure, through the standard S3 API, not a Workers-only
-feature, so switching could plausibly deliver the create-if-absent this
-client doesn't have today. R2 has no bucket or object versioning at all,
-but nothing here uses that. None of this has been tested against a real R2
-bucket with this exact SigV4 client — it's desk research against Cloudflare's
-own docs, not a measurement, and deserves the same in-cluster test that found
-the GCS gap before anyone relies on it.
+The ledger row claims durable storage and nothing more. It does **not** assume
+a conditional write: no create-if-absent primitive is reachable from an
+S3-compatible client against this endpoint, which is a measurement rather than
+an oversight — see the comment above `Put` in `internal/ledger/store.go` for
+what was tried and what the bucket answered. Mutual exclusion comes from the
+layer that actually has it: the applier runs one pass at a time, and OpenTofu
+holds its own state lock.
 
 ## The change path
 

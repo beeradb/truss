@@ -14,41 +14,48 @@ demand, while a PAT expires on its own and nothing can renew it via API.
 Every item in the vault carries an **`expires`** field: a real date, or
 `never`. The applier reads every one of them, every run.
 
-## What's actually rotated today
+## The seven credentials
 
-Seven credentials, one rotated:
-
-| Credential | What it is | Rotated? |
+| Credential | What it is | Kind |
 | --- | --- | --- |
-| `cf-infra-admin` | the Cloudflare token every non-credentials root applies under | **Yes** — minted and rotated on the two-generation clock |
-| `cf-token-mint` | the one Cloudflare token that can mint others | No — root, hand-made, by definition: it's the thing minting depends on |
-| `github-app` private key | signs the GitHub App's identity | No — root, hand-made |
-| `gcs-ledger` access/secret key | the ledger bucket's own credentials | No — root, hand-made |
-| `gcp-apply` | the GCP service account key every root's Google provider and the ledger backend use | No — root, hand-made |
-| `tofu-encryption` passphrase | encrypts the credentials root's own state | No — root, hand-made, and harder to fix than the rest (see below) |
-| `telegram-alert` bot token | where alerts go | No — root, hand-made |
+| `cf-infra-admin` | the Cloudflare token every non-credentials root applies under | **Minted** — on the two-generation clock |
+| `cf-token-mint` | the one Cloudflare token that can mint others | Root, by definition: it's the thing minting depends on |
+| `github-app` private key | signs the GitHub App's identity | Root — no API mints one |
+| `gcs-ledger` access/secret key | the ledger bucket's own credentials | Root |
+| `gcp-apply` | the GCP service account key every root's Google provider and the ledger backend use | Root — but it needn't be, see below |
+| `tofu-encryption` passphrase | encrypts the credentials root's own state | Root, and the hardest of them to change |
+| `telegram-alert` bot token | where alerts go | Root |
 
-`gcp-apply` doesn't have to stay that way. GCP's IAM API supports creating and
-deleting a service account's keys without touching what the account is
-allowed to do — rotating the key doesn't change any IAM binding, so there's
-none of the re-encryption problem `tofu-encryption` has. What's missing is
-the same minter/worker split Cloudflare already has: a dedicated, hand-made
-"key-minter" identity with `iam.serviceAccountKeys.admin` on the `gcp-apply`
-service account, separate from `gcp-apply` itself, so the credential being
-rotated is never the one doing the rotating. Buildable, not built — the
-actual GCP IAM setup lives in `beeradb/platform`, not this repo, so there's
-nothing here to point at yet.
+The one that applies everything is the one that most needs to rotate, so it is
+minted like anything else, and only the token that mints it is made by hand.
+That widens nothing: a credential that can mint any credential could always
+have minted this one.
 
-`tofu-encryption` is different in kind, not just degree. Rotating an API
+The rest are roots because no API exists to mint them — which is the design,
+not a shortfall. What it costs is that they can only be *watched*, so every one
+of them carries a real expiry and gets swept on every pass.
+
+Two of them are exceptions worth naming, because in both cases the obstacle is
+effort rather than the absence of an API.
+
+**`gcp-apply` could be minted.** GCP's IAM API creates and deletes a service
+account's keys without touching what the account is allowed to do, so rotating
+the key changes no IAM binding and there's none of the re-encryption problem
+below. What it needs is the same minter/worker split Cloudflare already has: a
+dedicated, hand-made key-minter identity holding
+`iam.serviceAccountKeys.admin` on the `gcp-apply` service account and separate
+from it, so the credential being rotated is never the one doing the rotating.
+The IAM setup lives in the platform repository rather than here.
+
+**`tofu-encryption` is different in kind**, not just degree. Rotating an API
 token works because the old and new can coexist — they're two valid keys to
 the same door. Rotating this passphrase means state already encrypted with
 the old one has to get re-encrypted with the new one, or it becomes
 permanently unreadable, and this is the one state file that defines every
 other credential in the system. OpenTofu's own encryption feature supports
 multiple decryption methods, so a safe two-phase rotation — accept either
-during a transition, then drop the old one — is buildable the same way. It's
-just a harder kind of rotation, a migration rather than a re-mint, and
-nobody's built it either.
+during a transition, then drop the old one — is reachable the same way. It is
+a migration rather than a re-mint, and that is the whole of the difference.
 
 ## Rotation is the applier's job, not a calendar's
 
