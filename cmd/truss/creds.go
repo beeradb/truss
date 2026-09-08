@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/beeradb/truss/internal/forge"
 	"github.com/beeradb/truss/internal/ledger"
@@ -114,10 +115,12 @@ func loadForgeConfig(dir secrets.Dir, repo, baseURL string) (forge.Config, error
 }
 
 // loadTelegram builds a notify.Telegram from the telegram-alert item.
-// HTTP is set explicitly to http.DefaultClient: notify.Telegram.Send does
-// not default a nil HTTP client itself (unlike ledger.Store and
-// forge.Client, which do) -- it dereferences it directly, so a
-// notify.Telegram built with a nil HTTP panics on the first Send.
+// HTTP is set explicitly because notify.Telegram.Send does not default a
+// nil client itself (unlike ledger.Store and forge.Client, which do) -- it
+// dereferences it directly, so a notify.Telegram built with a nil HTTP
+// panics on the first Send. That is not hypothetical: this constructor
+// shipped without it, and every alert would have panicked in production, on
+// the one path whose job is saying something went wrong.
 func loadTelegram(dir secrets.Dir) (notify.Telegram, error) {
 	token, err := dir.Field(itemTelegram, fieldTelegramBotToken)
 	if err != nil {
@@ -127,7 +130,15 @@ func loadTelegram(dir secrets.Dir) (notify.Telegram, error) {
 	if err != nil {
 		return notify.Telegram{}, err
 	}
-	return notify.Telegram{BotToken: token, ChatID: chatID, HTTP: http.DefaultClient}, nil
+	// Bounded, like every other client here: http.DefaultClient has no
+	// timeout, and a Telegram that accepts a connection and never answers
+	// would hang the pass on its very last step -- after everything else
+	// succeeded.
+	return notify.Telegram{
+		BotToken: token,
+		ChatID:   chatID,
+		HTTP:     &http.Client{Timeout: 30 * time.Second},
+	}, nil
 }
 
 // loadCFMintToken reads the one hand-made Cloudflare token that can mint

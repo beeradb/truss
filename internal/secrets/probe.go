@@ -39,7 +39,7 @@ func (c CloudflareToken) Expiry(ctx context.Context) (time.Time, bool, error) {
 	}
 	client := c.HTTP
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: httpTimeout}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/client/v4/user/tokens/verify", nil)

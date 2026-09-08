@@ -114,3 +114,50 @@ func TestAGitDriverWithNoTokenSendsNoAuthHeader(t *testing.T) {
 		t.Error("an untokened driver still set the auth header, so the other test proves nothing")
 	}
 }
+
+// TestNoHTTPClientIsUnbounded: http.DefaultClient has NO timeout, so a
+// server that accepts a connection and then never answers hangs the caller
+// forever. The caller here is a CronJob firing every five minutes, so a hung
+// pass is a growing pile of pods rather than one stuck process. internal/forge
+// was the only package that had bounded itself; the 2026-09-08 security review
+// raised the rest as an inconsistency.
+//
+// Enforced as a source scan rather than by inspecting a constructed client,
+// because the defect is a package DEFAULTING to http.DefaultClient -- which is
+// invisible from outside once the struct is built.
+func TestNoHTTPClientIsUnbounded(t *testing.T) {
+	roots := []string{"..", "../../internal"}
+	scanned := 0
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			scanned++
+			for i, line := range strings.Split(string(src), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "//") {
+					continue // the comments explaining this rule name it
+				}
+				if strings.Contains(line, "http.DefaultClient") {
+					t.Errorf("%s:%d uses http.DefaultClient, which has no timeout:\n\t%s",
+						path, i+1, trimmed)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", root, err)
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no files, so this check could not have failed")
+	}
+}

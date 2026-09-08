@@ -31,6 +31,15 @@ type Store struct {
 // empty (see the comment on Config.Region); Addressing defaults to
 // PathStyle, its zero value, which is what was measured against the real
 // bucket.
+// httpTimeout bounds every request this package makes. http.DefaultClient
+// has NO timeout, so a server that accepts a connection and then never
+// answers hangs the caller forever -- and the caller here is a CronJob that
+// fires every five minutes, so a hung pass is a pile of pods rather than one
+// stuck process. 30s matches internal/forge, which was the only package that
+// had bounded itself. Raised as an inconsistency by the 2026-09-08 security
+// review.
+const httpTimeout = 30 * time.Second
+
 func New(cfg Config, opts ...Option) (*Store, error) {
 	var problems []string
 	if cfg.Endpoint == "" {
@@ -59,7 +68,7 @@ func New(cfg Config, opts ...Option) (*Store, error) {
 
 	s := &Store{
 		cfg:        cfg,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: httpTimeout},
 		now:        time.Now,
 	}
 	for _, opt := range opts {

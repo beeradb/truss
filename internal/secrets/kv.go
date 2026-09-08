@@ -9,7 +9,17 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
+
+// httpTimeout bounds every request this package makes. http.DefaultClient
+// has NO timeout, so a server that accepts a connection and then never
+// answers hangs the caller forever -- and the caller here is a CronJob that
+// fires every five minutes, so a hung pass is a pile of pods rather than one
+// stuck process. 30s matches internal/forge, which was the only package that
+// had bounded itself. Raised as an inconsistency by the 2026-09-08 security
+// review.
+const httpTimeout = 30 * time.Second
 
 // Store is one Vault mount's worth of expiry metadata. It replaces the
 // Vault interface and the `op` CLI: metadata only, it cannot return a
@@ -94,7 +104,7 @@ func NewKV(cfg KVConfig) (*KV, error) {
 	cfg.Addr = strings.TrimRight(cfg.Addr, "/")
 	k := &KV{cfg: cfg, http: cfg.HTTP}
 	if k.http == nil {
-		k.http = http.DefaultClient
+		k.http = &http.Client{Timeout: httpTimeout}
 	}
 	return k, nil
 }
