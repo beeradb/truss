@@ -52,6 +52,15 @@ type fakePublishVault struct {
 	// GET in that state, and a data POST needs cas=0).
 	versions  map[string]int
 	patchFail map[string]int // item -> status code to answer a PATCH with, instead of 200
+	// putFail, when set for an item, answers that item's data POST with the
+	// given status and the request body echoed back into the response --
+	// modelling a Vault that reflects what it was sent, the way a real
+	// error page or a misconfigured proxy sometimes does. It exists for
+	// TestHandleNeverLeaksTheFetchedValueWhenPutValueFails: if handle() (or
+	// secrets.KV.PutValue underneath it) failed to redact the value it just
+	// fetched from 1Password before building its own error, the echo would
+	// surface it.
+	putFail map[string]int
 }
 
 func newFakePublishVault() *fakePublishVault {
@@ -63,6 +72,7 @@ func newFakePublishVault() *fakePublishVault {
 		dataWrites: map[string]map[string]string{},
 		versions:   map[string]int{},
 		patchFail:  map[string]int{},
+		putFail:    map[string]int{},
 	}
 }
 
@@ -118,6 +128,14 @@ func (f *fakePublishVault) handle(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/data/"):
 		item := path.Base(r.URL.Path)
+		f.mu.Lock()
+		failStatus := f.putFail[item]
+		f.mu.Unlock()
+		if failStatus != 0 {
+			w.WriteHeader(failStatus)
+			fmt.Fprintf(w, `{"errors":[%q]}`, string(body))
+			return
+		}
 		var parsed struct {
 			Options struct {
 				CAS int `json:"cas"`
@@ -157,6 +175,73 @@ func (f *fakePublishVault) dataWriteFor(item string) (map[string]string, bool) {
 	defer f.mu.Unlock()
 	v, ok := f.dataWrites[item]
 	return v, ok
+}
+
+// --- a fake opReader, standing in for 1Password ---------------------------
+
+// fakeOP is a test double for opReader (publish_cmd.go): the two 1Password
+// reads handle() makes when PublishValue is true. It never shells out to a
+// real `op` -- that boundary (redacting the service-account token, the
+// empty-value refusal, the missing-vs-genuinely-failed distinction) is
+// internal/secrets/opstore_test.go's job; this double exists to drive
+// publishHandler.handle() the way cmdPublish's real newOPStore would, with
+// canned answers.
+type fakeOP struct {
+	value    string
+	valueErr error
+
+	expires   string
+	recorded  bool
+	expiryErr error
+
+	mu          sync.Mutex
+	fieldCalls  []string // "item/field" pairs Field was asked for, in order
+	expiryCalls []string // items Expiry was asked for, in order
+}
+
+func (f *fakeOP) Field(ctx context.Context, item, field string) (string, error) {
+	f.mu.Lock()
+	f.fieldCalls = append(f.fieldCalls, item+"/"+field)
+	f.mu.Unlock()
+	if f.valueErr != nil {
+		return "", f.valueErr
+	}
+	return f.value, nil
+}
+
+func (f *fakeOP) Expiry(ctx context.Context, item string) (string, bool, error) {
+	f.mu.Lock()
+	f.expiryCalls = append(f.expiryCalls, item)
+	f.mu.Unlock()
+	if f.expiryErr != nil {
+		return "", false, f.expiryErr
+	}
+	return f.expires, f.recorded, nil
+}
+
+// asOPFactory adapts a fixed fakeOP into the func(secrets.OPConfig)
+// (opReader, error) shape publishHandler.newOP expects, ignoring cfg --
+// this double's whole point is to skip 1Password entirely, so what would
+// have configured a real one is irrelevant here.
+func (f *fakeOP) asOPFactory() func(secrets.OPConfig) (opReader, error) {
+	return func(secrets.OPConfig) (opReader, error) { return f, nil }
+}
+
+// newPublishTestKV builds a *secrets.KV against a fresh fakePublishVault,
+// constructed the same way cmdPublish's real one is: WritableItem is
+// always itemCFInfraAdmin, because that is the only item this publisher is
+// ever built to write.
+func newPublishTestKV(t *testing.T, fv *fakePublishVault, srv *httptest.Server) *secrets.KV {
+	t.Helper()
+	jwtPath := writePublishJWT(t)
+	kv, err := secrets.NewKV(secrets.KVConfig{
+		Addr: srv.URL, Mount: "platform", Role: "publisher", JWTPath: jwtPath, HTTP: srv.Client(),
+		WritableItem: itemCFInfraAdmin,
+	})
+	if err != nil {
+		t.Fatalf("NewKV: %v", err)
+	}
+	return kv
 }
 
 // --- fixtures ---
@@ -341,44 +426,41 @@ func TestCmdPublishRefusesArguments(t *testing.T) {
 
 // --- end-to-end tests, driving cmdPublish exactly as the manifest would:
 // real env vars, a real socket, a real (fake) Vault over HTTP. ---
+//
+// ⚠️ ONLY THE PublishValue==false PATH IS DRIVEN THIS WAY NOW. A value
+// publish also needs 1Password, and there is no way to fake `op` through
+// cmdPublish's own env-driven construction without a second exec path this
+// project's design explicitly refuses (opstore.go owns the only one). The
+// tests below that exercise a value publish instead build a publishHandler
+// directly -- the same style TestAPublishThatDidNothingIsRefusedNotReportedAsSuccess
+// already used before this file had anything else that needed it -- with a
+// real *secrets.KV against fakePublishVault (so the Vault interaction is
+// still exercised for real) and a fakeOP standing in for 1Password.
 
-func TestCmdPublishEndToEndPatchesExpiriesAndWritesTheValue(t *testing.T) {
+func TestHandlePublishesTheFetchedValueAndExpiry(t *testing.T) {
 	fv := newFakePublishVault()
 	srv := fv.server()
 	defer srv.Close()
 	fv.seedVersion(itemCFInfraAdmin, 4) // pre-existing item, version 4
+	kv := newPublishTestKV(t, fv, srv)
 
-	jwtPath := writePublishJWT(t)
-	expiriesPath := writeExpiriesFile(t, map[string]string{
-		itemGitHubApp:      "2027-01-01",
-		itemTelegram:       "never",
-		itemGCPApply:       "2027-06-15",
-		itemLedger:         "2027-06-15",
-		itemTofuEncryption: "2027-06-15",
-	})
-	socket := filepath.Join(t.TempDir(), "publish.sock")
-
-	getenv := publishEnv(srv.URL, jwtPath, socket, expiriesPath, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	exitCode, stderrOut := runPublishAsync(ctx, getenv)
-	waitForPublishSocket(t, socket)
-
-	req := handoff.Request{
-		PublishValue: true,
-		Item:         itemCFInfraAdmin,
-		Field:        fieldCFPassword,
-		Value:        "gen2-cloudflare-token",
-		Expires:      "2026-12-01",
-	}
-	resp, err := handoff.Send(context.Background(), socket, 5*time.Second, req)
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	op := &fakeOP{value: "gen2-cloudflare-token", expires: "2026-12-01", recorded: true}
+	h := publishHandler{
+		publisher: kv,
+		versions:  kv,
+		table: secrets.Expiries{
+			itemGitHubApp:      "2027-01-01",
+			itemTelegram:       "never",
+			itemGCPApply:       "2027-06-15",
+			itemLedger:         "2027-06-15",
+			itemTofuEncryption: "2027-06-15",
+		},
+		item:  itemCFInfraAdmin,
+		field: fieldCFPassword,
+		newOP: op.asOPFactory(),
 	}
 
-	if code := <-exitCode; code != 0 {
-		t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
-	}
+	resp := h.handle(handoff.Request{PublishValue: true})
 
 	if resp.Value != handoff.ValueWritten {
 		t.Errorf("resp.Value = %q, want %q (resp: %+v)", resp.Value, handoff.ValueWritten, resp)
@@ -394,12 +476,23 @@ func TestCmdPublishEndToEndPatchesExpiriesAndWritesTheValue(t *testing.T) {
 		t.Errorf("resp.Error = %q, want empty", resp.Error)
 	}
 
+	// The value and expiry were fetched under the compiled-in names, never
+	// anything the request could have named (it cannot name anything: the
+	// request is a single bool).
+	wantFieldCall := itemCFInfraAdmin + "/" + fieldCFPassword
+	if len(op.fieldCalls) != 1 || op.fieldCalls[0] != wantFieldCall {
+		t.Errorf("op.fieldCalls = %v, want exactly [%q]", op.fieldCalls, wantFieldCall)
+	}
+	if len(op.expiryCalls) != 1 || op.expiryCalls[0] != itemCFInfraAdmin {
+		t.Errorf("op.expiryCalls = %v, want exactly [%q]", op.expiryCalls, itemCFInfraAdmin)
+	}
+
 	written, ok := fv.dataWriteFor(itemCFInfraAdmin)
 	if !ok {
 		t.Fatal("the fake vault never recorded a data write for cf-infra-admin")
 	}
 	if written[fieldCFPassword] != "gen2-cloudflare-token" {
-		t.Errorf("written value = %v, want the %s field set to the minted value", written, fieldCFPassword)
+		t.Errorf("written value = %v, want the %s field set to the fetched value", written, fieldCFPassword)
 	}
 
 	// The write must have used cas=4 (the version this test seeded), not 0
@@ -430,7 +523,7 @@ func TestCmdPublishEndToEndPatchesExpiriesAndWritesTheValue(t *testing.T) {
 			t.Errorf("%s was never PATCHed", item)
 		}
 	}
-	// The sentinel value must never have reached the fake server in any
+	// The fetched value must never have reached the fake server in any
 	// PATCH body (it belongs only in the one data POST above).
 	for _, r := range fv.recordedRequests() {
 		if r.Method == http.MethodPatch && strings.Contains(r.Body, "gen2-cloudflare-token") {
@@ -479,81 +572,124 @@ func TestCmdPublishReportsSkippedWhenPublishValueIsFalse(t *testing.T) {
 	}
 }
 
-func TestCmdPublishRefusesAnItemOtherThanTheWritableOne(t *testing.T) {
+// TestHandleFailsClosedWhenTheOPTokenFileIsUnreadable exercises newOPStore
+// -- the REAL production wrapper around secrets.NewOP, not fakeOP -- with
+// $OP_TOKEN_FILE pointing at a path that does not exist. loadPublishConfig
+// deliberately never validates this at startup (see its own doc); this is
+// the point at which it must, loudly, with no fallback to any other
+// credential.
+func TestHandleFailsClosedWhenTheOPTokenFileIsUnreadable(t *testing.T) {
 	fv := newFakePublishVault()
 	srv := fv.server()
 	defer srv.Close()
+	kv := newPublishTestKV(t, fv, srv)
 
-	jwtPath := writePublishJWT(t)
-	expiriesPath := writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"})
-	socket := filepath.Join(t.TempDir(), "publish.sock")
-
-	getenv := publishEnv(srv.URL, jwtPath, socket, expiriesPath, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	exitCode, stderrOut := runPublishAsync(ctx, getenv)
-	waitForPublishSocket(t, socket)
-
-	resp, err := handoff.Send(context.Background(), socket, 5*time.Second, handoff.Request{
-		PublishValue: true, Item: "some-other-item", Field: "password", Value: "x",
-	})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	missingTokenPath := filepath.Join(t.TempDir(), "does-not-exist", "token")
+	h := publishHandler{
+		publisher: kv,
+		versions:  kv,
+		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		item:      itemCFInfraAdmin,
+		field:     fieldCFPassword,
+		opCfg:     secrets.OPConfig{Vault: "platform", TokenFile: missingTokenPath},
+		newOP:     newOPStore, // the real constructor -- no fake here
 	}
-	if code := <-exitCode; code != 0 {
-		t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
+
+	resp := h.handle(handoff.Request{PublishValue: true})
+
+	if resp.Value != handoff.ValueFailed {
+		t.Errorf("resp.Value = %q, want %q", resp.Value, handoff.ValueFailed)
 	}
+	if !strings.Contains(resp.Error, missingTokenPath) {
+		t.Errorf("resp.Error = %q, want it to name the unreadable token path", resp.Error)
+	}
+	// The table patch needs no 1Password at all and must still have
+	// happened -- an absent value credential must not undo the half of
+	// this pass that did not need one.
+	if resp.Expiries != 1 {
+		t.Errorf("resp.Expiries = %d, want 1 -- the table patch must still have run", resp.Expiries)
+	}
+	if _, wrote := fv.dataWriteFor(itemCFInfraAdmin); wrote {
+		t.Error("a data write happened despite the OP token file being unreadable")
+	}
+}
+
+// TestHandleFailsClosedWhenOPConfigIsEmpty covers the deploy-time-default
+// shape: $OP_TOKEN_FILE and the vault name both unset (loadPublishConfig
+// never required them). secrets.NewOP itself refuses that config; handle()
+// must surface the refusal rather than silently skipping the value publish
+// or falling back to anything else.
+func TestHandleFailsClosedWhenOPConfigIsEmpty(t *testing.T) {
+	fv := newFakePublishVault()
+	srv := fv.server()
+	defer srv.Close()
+	kv := newPublishTestKV(t, fv, srv)
+
+	h := publishHandler{
+		publisher: kv,
+		versions:  kv,
+		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		item:      itemCFInfraAdmin,
+		field:     fieldCFPassword,
+		opCfg:     secrets.OPConfig{}, // both Vault and TokenFile empty
+		newOP:     newOPStore,
+	}
+
+	resp := h.handle(handoff.Request{PublishValue: true})
 
 	if resp.Value != handoff.ValueFailed {
 		t.Errorf("resp.Value = %q, want %q", resp.Value, handoff.ValueFailed)
 	}
 	if resp.Error == "" {
-		t.Error("resp.Error is empty, want a refusal naming the item")
+		t.Error("resp.Error is empty, want a refusal naming the empty 1Password config")
 	}
-	if _, wrote := fv.dataWriteFor("some-other-item"); wrote {
-		t.Error("a write for the refused item reached the fake vault")
-	}
-	for _, r := range fv.recordedRequests() {
-		if strings.Contains(r.Path, "/data/") {
-			t.Errorf("a refused item still reached a /data/ path: %+v", r)
-		}
+	if _, wrote := fv.dataWriteFor(itemCFInfraAdmin); wrote {
+		t.Error("a data write happened despite an empty 1Password config")
 	}
 }
 
-// TestCmdPublishRefusesAnEmptyFieldOrValue: secrets.KV.PutValue refuses an
-// empty or whitespace VALUE on its own, but does not validate the FIELD
-// name -- a request with an empty Field and a non-empty Value would
-// otherwise reach Vault as a write to a field literally named "", which
-// nothing downstream expects. This is handle()'s own guard, and it must
-// refuse before ever calling currentVersion or PutValue.
-func TestCmdPublishRefusesAnEmptyFieldOrValue(t *testing.T) {
-	cases := map[string]handoff.Request{
-		"empty field": {PublishValue: true, Item: itemCFInfraAdmin, Field: "", Value: "some-value"},
-		"empty value": {PublishValue: true, Item: itemCFInfraAdmin, Field: fieldCFPassword, Value: ""},
+// TestHandleRefusesAnEmptyOrUnrecordedFetch covers the two ways a
+// PublishValue-true request can find nothing usable in 1Password: Field
+// returning an error (op.Field itself already refuses an empty value --
+// this pins that handle() surfaces that refusal rather than writing
+// nothing silently) and Expiry finding nothing recorded for the item.
+// Neither is a legitimate reason to skip -- design's own rule, "a fetch
+// that returns an empty value is an error, never a silent skip."
+func TestHandleRefusesAnEmptyOrUnrecordedFetch(t *testing.T) {
+	cases := []struct {
+		name string
+		op   *fakeOP
+	}{
+		{
+			name: "Field fails",
+			op:   &fakeOP{valueErr: fmt.Errorf("secrets: %q.%q in 1Password vault %q is empty", itemCFInfraAdmin, fieldCFPassword, "platform")},
+		},
+		{
+			name: "Expiry fails",
+			op:   &fakeOP{value: "gen2-cloudflare-token", expiryErr: fmt.Errorf("secrets: rate-limited")},
+		},
+		{
+			name: "Expiry not recorded",
+			op:   &fakeOP{value: "gen2-cloudflare-token", recorded: false},
+		},
 	}
-	for name, req := range cases {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			fv := newFakePublishVault()
 			srv := fv.server()
 			defer srv.Close()
+			kv := newPublishTestKV(t, fv, srv)
 
-			jwtPath := writePublishJWT(t)
-			expiriesPath := writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"})
-			socket := filepath.Join(t.TempDir(), "publish.sock")
-
-			getenv := publishEnv(srv.URL, jwtPath, socket, expiriesPath, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			exitCode, stderrOut := runPublishAsync(ctx, getenv)
-			waitForPublishSocket(t, socket)
-
-			resp, err := handoff.Send(context.Background(), socket, 5*time.Second, req)
-			if err != nil {
-				t.Fatalf("Send: %v", err)
+			h := publishHandler{
+				publisher: kv,
+				versions:  kv,
+				table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+				item:      itemCFInfraAdmin,
+				field:     fieldCFPassword,
+				newOP:     tc.op.asOPFactory(),
 			}
-			if code := <-exitCode; code != 0 {
-				t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
-			}
+
+			resp := h.handle(handoff.Request{PublishValue: true})
 
 			if resp.Value != handoff.ValueFailed {
 				t.Errorf("resp.Value = %q, want %q", resp.Value, handoff.ValueFailed)
@@ -562,14 +698,52 @@ func TestCmdPublishRefusesAnEmptyFieldOrValue(t *testing.T) {
 				t.Error("resp.Error is empty, want a refusal")
 			}
 			if _, wrote := fv.dataWriteFor(itemCFInfraAdmin); wrote {
-				t.Error("a write reached the fake vault despite an empty field or value")
+				t.Error("a write reached the fake vault despite an empty or unrecorded fetch")
 			}
 			for _, r := range fv.recordedRequests() {
-				if strings.Contains(r.Path, "/data/") || (strings.Contains(r.Path, "/metadata/"+itemCFInfraAdmin) && r.Method == http.MethodGet) {
-					t.Errorf("the refused request still reached Vault: %+v", r)
+				if strings.Contains(r.Path, "/data/") {
+					t.Errorf("a refused fetch still reached a /data/ path: %+v", r)
 				}
 			}
 		})
+	}
+}
+
+// TestHandleNeverLeaksTheFetchedValueWhenPutValueFails: fv.putFail makes
+// the fake echo the request body back into a 500, the same technique
+// internal/secrets' own TestTheMintedValueNeverAppearsInAPublishError uses
+// against secrets.KV directly. Driving it through handle() proves the
+// integration -- a value that came from 1Password, not from a request --
+// never reaches a Response by a path this package's own code controls.
+func TestHandleNeverLeaksTheFetchedValueWhenPutValueFails(t *testing.T) {
+	const sentinel = "SENTINEL-FETCHED-CF-TOKEN-DO-NOT-LEAK"
+	fv := newFakePublishVault()
+	fv.putFail[itemCFInfraAdmin] = http.StatusInternalServerError
+	srv := fv.server()
+	defer srv.Close()
+	kv := newPublishTestKV(t, fv, srv)
+
+	op := &fakeOP{value: sentinel, expires: "2027-01-01", recorded: true}
+	h := publishHandler{
+		publisher: kv,
+		versions:  kv,
+		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		item:      itemCFInfraAdmin,
+		field:     fieldCFPassword,
+		newOP:     op.asOPFactory(),
+	}
+
+	resp := h.handle(handoff.Request{PublishValue: true})
+
+	if resp.Value != handoff.ValueFailed {
+		t.Fatalf("resp.Value = %q, want %q (resp: %+v)", resp.Value, handoff.ValueFailed, resp)
+	}
+	if strings.Contains(resp.Error, sentinel) {
+		t.Errorf("resp.Error contains the fetched value: %q", resp.Error)
+	}
+	encoded, _ := json.Marshal(resp)
+	if strings.Contains(string(encoded), sentinel) {
+		t.Errorf("the encoded Response contains the fetched value: %s", encoded)
 	}
 }
 
@@ -584,35 +758,29 @@ func TestPartialPublishReportsBothItsWritesAndItsError(t *testing.T) {
 	// so currentVersion must see it as absent (404) and PutValue must use
 	// cas:0 to create it.
 	fv.patchFail[itemGitHubApp] = http.StatusInternalServerError
+	kv := newPublishTestKV(t, fv, srv)
 
-	jwtPath := writePublishJWT(t)
-	expiriesPath := writeExpiriesFile(t, map[string]string{
-		itemGitHubApp: "2027-01-01", // will fail to patch
-		itemTelegram:  "never",      // will succeed
-	})
-	socket := filepath.Join(t.TempDir(), "publish.sock")
-
-	getenv := publishEnv(srv.URL, jwtPath, socket, expiriesPath, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	exitCode, stderrOut := runPublishAsync(ctx, getenv)
-	waitForPublishSocket(t, socket)
-
-	resp, err := handoff.Send(context.Background(), socket, 5*time.Second, handoff.Request{
-		PublishValue: true, Item: itemCFInfraAdmin, Field: fieldCFPassword, Value: "gen1-token",
-	})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	op := &fakeOP{value: "gen1-token", expires: "2027-01-01", recorded: true}
+	h := publishHandler{
+		publisher: kv,
+		versions:  kv,
+		table: secrets.Expiries{
+			itemGitHubApp: "2027-01-01", // will fail to patch
+			itemTelegram:  "never",      // will succeed
+		},
+		item:  itemCFInfraAdmin,
+		field: fieldCFPassword,
+		newOP: op.asOPFactory(),
 	}
-	if code := <-exitCode; code != 0 {
-		t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
-	}
+
+	resp := h.handle(handoff.Request{PublishValue: true})
 
 	if resp.Value != handoff.ValueWritten {
 		t.Errorf("resp.Value = %q, want %q -- a value write that succeeded must still say so", resp.Value, handoff.ValueWritten)
 	}
-	if resp.Expiries != 1 {
-		t.Errorf("resp.Expiries = %d, want 1 (only telegram-alert succeeded)", resp.Expiries)
+	// telegram-alert (table) + cf-infra-admin's own fetched expiry.
+	if resp.Expiries != 2 {
+		t.Errorf("resp.Expiries = %d, want 2 (telegram-alert plus cf-infra-admin's own expiry)", resp.Expiries)
 	}
 	if len(resp.Skipped) != 1 || !strings.Contains(resp.Skipped[0], itemGitHubApp) {
 		t.Errorf("resp.Skipped = %v, want one entry naming %s", resp.Skipped, itemGitHubApp)
@@ -723,64 +891,14 @@ func TestPublishRefusesWhenItsJWTIsNotMounted(t *testing.T) {
 	}
 }
 
-// TestNoResponseErrorEverContainsTheRequestValue is this file's own
-// redaction proof for the boundary internal/handoff's tests cannot see:
-// internal/secrets already proves PatchExpiry and PutValue redact the
-// value out of THEIR OWN errors, but publishHandler.handle builds several
-// of its own error messages (the wrong-item refusal, the empty-field
-// refusal, the vacuous-pass refusal) that never touch internal/secrets at
-// all, and any one of them could be written carelessly to interpolate
-// req.Value directly. This drives every failure branch handle() has with a
-// sentinel-shaped value and asserts it never appears in the Response that
-// crosses the socket -- the actual boundary a leak would cross to reach a
-// log or a Telegram alert.
-func TestNoResponseErrorEverContainsTheRequestValue(t *testing.T) {
-	const sentinel = "SENTINEL-HANDLER-MUST-NOT-LEAK-4b7e91"
-
-	fv := newFakePublishVault()
-	srv := fv.server()
-	defer srv.Close()
-	fv.patchFail[itemGitHubApp] = http.StatusInternalServerError // force the expiry-patch failure branch
-
-	jwtPath := writePublishJWT(t)
-	expiriesPath := writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"})
-
-	cases := []handoff.Request{
-		{PublishValue: false}, // the "nothing to publish" branch
-		{PublishValue: true, Item: "wrong-item", Field: "password", Value: sentinel},          // the wrong-item refusal
-		{PublishValue: true, Item: itemCFInfraAdmin, Field: "", Value: sentinel},              // the empty-field refusal
-		{PublishValue: true, Item: itemCFInfraAdmin, Field: fieldCFPassword, Value: sentinel}, // the ordinary write path, with the expiry patch failing alongside it
-	}
-
-	for i, req := range cases {
-		t.Run(fmt.Sprintf("case%d", i), func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "publish.sock")
-			getenv := publishEnv(srv.URL, jwtPath, socket, expiriesPath, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			exitCode, stderrOut := runPublishAsync(ctx, getenv)
-			waitForPublishSocket(t, socket)
-
-			resp, err := handoff.Send(context.Background(), socket, 5*time.Second, req)
-			if err != nil {
-				t.Fatalf("Send: %v", err)
-			}
-			if code := <-exitCode; code != 0 {
-				t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
-			}
-
-			if strings.Contains(resp.Error, sentinel) {
-				t.Errorf("resp.Error contains the request value: %q", resp.Error)
-			}
-			for _, s := range resp.Skipped {
-				if strings.Contains(s, sentinel) {
-					t.Errorf("resp.Skipped entry contains the request value: %q", s)
-				}
-			}
-			encoded, _ := json.Marshal(resp)
-			if strings.Contains(string(encoded), sentinel) {
-				t.Errorf("the encoded Response contains the request value: %s", encoded)
-			}
-		})
-	}
-}
+// TestNoResponseErrorEverContainsTheRequestValue used to drive four
+// branches of handle() through a request built with Item/Field/Value --
+// the wrong-item refusal, the empty-field refusal, and the ordinary write
+// path. The first two no longer exist: a request cannot name an item or a
+// field any more (handoff.Request carries only PublishValue), so there is
+// nothing left for those branches to refuse. The "nothing to publish"
+// case's redaction is trivial by construction (there is no value anywhere
+// on that path), and the ordinary-write-path case is now
+// TestHandleNeverLeaksTheFetchedValueWhenPutValueFails above, which proves
+// the same thing about the value handle() actually handles today: one
+// fetched from 1Password, not one carried in the request.

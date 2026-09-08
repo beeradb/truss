@@ -82,7 +82,7 @@ func TestOneCredentialCachePerPass(t *testing.T) {
 		t.Fatalf("runCommitLoop applied %d commits, want 1 -- the credentials root never got exercised", applied)
 	}
 
-	if _, _, err := runRotation(ctx, deps, newLast, cc); err != nil {
+	if _, _, _, err := runRotation(ctx, deps, newLast, cc); err != nil {
 		t.Fatalf("runRotation: %v", err)
 	}
 
