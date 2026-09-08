@@ -996,9 +996,9 @@ should guess them and nobody needs to decide them.
   the working production requests were signed with whatever botocore defaults to — and
   whether the endpoint honours a **create-if-absent precondition** under HMAC auth. All three
   are now answered below.
-- **Which jq version produced the digests currently in the bucket**, and whether CI's and the
-  image's are the same today. Decision 7 removes the question going forward; it still needs
-  answering for digests already recorded against commits that have not applied.
+- ~~**Which jq version produced the digests currently in the bucket.**~~ Answered 2026-09-08,
+  and the answer is that it does not matter: **no recorded digest gates a commit that can
+  still apply.** See below.
 
 ### Measured 2026-09-08
 
@@ -1051,3 +1051,33 @@ signature never vouched for. There is no code path left that sends an unsigned h
 
 That result also confirms the trailer hazard is **live today** rather than a note from
 2026-09-06, which is why the fake server in that package rejects trailer headers on sight.
+
+### The stale-digest question: SETTLED, and it is moot
+
+Measured 2026-09-08 against the live bucket and the real repository.
+
+The image carries **jq-1.7**. `applier/plans/` holds digests for exactly three commits, and
+the applier's `applied/HEAD` is `5629d88a`, which is **also the tip of `main`** — the applier
+is fully caught up. The three commits carrying digests are not on `main` at all:
+
+| Commit | What it is |
+| --- | --- |
+| `d9bf2dec` | `refs/pull/1/head` |
+| `e34be81c` | `refs/pull/2/head` |
+| `eda5c465` | `refs/pull/12/head` and `refs/pull/14/head` |
+
+CI plans PR head commits, so every digest in the bucket belongs to a PR head that was never
+what got merged. Nothing unapplied is gated by a digest whose jq provenance is unknown, so
+there is nothing to re-derive or invalidate. Decision 7 removes the question going forward by
+computing the digest in Go.
+
+⚠️ **The first version of this check was VACUOUS and said the opposite.** It ran
+`git merge-base --is-ancestor <sha> <head>` and read a non-zero exit as "not an ancestor" —
+but that command also exits non-zero when the object is simply **not in the clone**, which was
+the actual situation for all three. It reported "digest still live" for three commits while
+proving only that a bare clone does not fetch `refs/pull/*`. The corrected check asks
+`git cat-file -t` first, and the conclusion inverted.
+
+That is the third time in this project a check has passed or failed for a reason unrelated to
+what it claimed to test. The rule stands: **a check is only a check if you know what its
+failure would mean.**
