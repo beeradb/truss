@@ -86,6 +86,22 @@ func (d applyDeps) now() time.Time {
 	return time.Now()
 }
 
+// logf narrates one step of the pass to stderr. The deployed bash applier
+// emits the same nine lines, and they are the only per-step visibility into a
+// pass that runs unattended every five minutes -- without them a hung
+// `tofu apply` and a pass that did nothing look identical in a pod log.
+//
+// ⚠️ STDERR, NOT STDOUT, WHICH IS A DELIBERATE DIVERGENCE FROM THE BASH.
+// apply.sh's log() writes to stdout; truss's stdout carries the notify
+// payload (apply_cmd.go prints result.notifyText there), so narration on
+// stdout would contaminate a machine-readable channel. internal/parity
+// compares ledger writes and exec calls, never stdio, so nothing in the
+// corpus depends on this.
+func (d applyDeps) logf(format string, args ...any) {
+	fmt.Fprintf(d.Stderr, "[%s] %s\n", d.now().UTC().Format("15:04:05"),
+		fmt.Sprintf(format, args...))
+}
+
 // cmdApply replaces apply.sh in full (§4.9, landing at step 5). Everything
 // up to and including finding HEAD is a boot-time refusal with no
 // heartbeat -- §2 item 5, "applied/HEAD is never guessed", is a refusal to
@@ -462,6 +478,8 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	}
 
 	for _, sha := range commits {
+		d.logf("considering %s", sha)
+
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
 			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), credentialsAppliedAt, false
@@ -473,6 +491,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		roots := repo.TouchedRoots(changedFiles, treeRoots)
 
 		if len(roots) == 0 {
+			d.logf("noop: %s touches no root", sha)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
 				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), credentialsAppliedAt, false
 			}
@@ -503,8 +522,10 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 
 		summaries := map[string]ledger.RootSummary{}
 		for _, root := range roots {
+			d.logf("applying %s at %s (head %s)", root, sha, headSHA)
 			summary, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, headSHA, root)
 			if lockBusy {
+				d.logf("state lock held elsewhere; ending this pass without recording a failure")
 				return last, applied, noop, "", credentialsAppliedAt, true
 			}
 			if reason != "" {
@@ -737,6 +758,7 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		if problems := gates.CheckPlanDigest(root, headSHA, d.Journal.Layout.DigestKey(headSHA, root), mine, approved, approvedFound); len(problems) > 0 {
 			return ledger.RootSummary{}, false, strings.Join(problems, "; ")
 		}
+		d.logf("plan for %s matches the one approved at %s", root, headSHA)
 	}
 
 	if err := runner.Apply(ctx, rootDir, planFile); err != nil {
@@ -793,6 +815,7 @@ func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt st
 		return map[string]string{"failed": err.Error()}, 0, fmt.Errorf("could not check out %s for rotation: %w", last, err)
 	}
 	if !d.Git.HasDir("credentials") {
+		d.logf("rotation: no credentials root at %s, nothing to rotate", last)
 		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, nil
 	}
 
@@ -800,8 +823,10 @@ func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt st
 	if err != nil {
 		return map[string]string{"failed": err.Error()}, 0, err
 	}
+	d.logf("rotation: re-planning credentials at %s", last)
 	result, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, last, "credentials")
 	if lockBusy {
+		d.logf("rotation: state lock held elsewhere; next pass will re-plan")
 		return map[string]string{"skipped": "state lock held elsewhere"}, 0, nil
 	}
 	if reason != "" {
@@ -861,6 +886,7 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 
 	for _, root := range roots {
 		rootDir := filepath.Join(d.Cfg.Workdir, root)
+		d.logf("drift: planning %s at %s", root, last)
 		runner := d.NewTofu(env)
 		if err := runner.Init(ctx, rootDir); err != nil {
 			errored = append(errored, root)
