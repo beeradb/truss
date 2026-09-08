@@ -1,9 +1,12 @@
 # Credentials: root or minted, never a third kind
 
 A credential is **a root** when nobody can mint it — no API for it exists, so
-it's made by hand, dropped in the vault, and given no expiry at all.
-Everything else is **minted**: born from a root with a short life, re-minted
-by the applier on schedule, and written wherever whatever's using it actually
+it's made by hand and dropped in the vault. Nothing can rotate it
+automatically, which is exactly why it should still carry a real expiry
+rather than `never`: the expiry is what stands between a credential nobody's
+touched in years and one somebody's actually renewed recently. Everything
+else is **minted**: born from a root with a short life, re-minted by the
+applier on schedule, and written wherever whatever's using it actually
 reads it. That's why the forge identities here are GitHub Apps rather than
 PATs — an App's private key never expires and mints hour-long tokens on
 demand, while a PAT expires on its own and nothing can renew it via API.
@@ -52,6 +55,12 @@ heartbeat and every daily alert until it is renewed. The nag is daily on
 purpose — a hand-made credential lapsing takes the applier down with it, and a
 warning sent once is a warning sent while somebody was asleep.
 
+`never` skips the watch entirely, and it should be rare. Most hand-made
+credentials aren't the kind that should genuinely outlive every renewal
+cycle — they're the kind that should carry a real date and let the 30-day
+window do its job: a month's notice to renew, instead of nothing until it's
+already down.
+
 ## Revocation is a commit, not a dashboard
 
 Rotation is a clock: a token lives two periods however badly its day is going.
@@ -69,10 +78,20 @@ them. **Absence rather than a flag, deliberately**: a flag would have to be
 honoured by each of the resources that iterate, and the one that forgot would
 keep minting the burnt key.
 
-Revoking the **current** generation is an outage waiting to happen —
-consumers still hold it — so it fails loudly unless the epoch moves in the
-same commit. The ordinary response to a leak is to burn the *previous*
-generation instead, the one nothing should still be using.
+Revoking the **previous** generation is the ordinary response to a leak,
+because nothing should still be using it — everything already picked up the
+current one during its overlap window, so destroying the previous one costs
+nothing and mints nothing to replace it, on purpose.
+
+The current generation is different: revoking it with nothing else in the
+commit is an outage waiting to happen, consumers still hold it, so that's
+refused outright. What a leaked *current* generation actually needs is the
+same thing rotation always does when a boundary passes — mint a fresh
+generation to replace it — just forced early instead of waiting for the
+45-day clock. That's what moving the epoch in the same commit does: the
+apply that destroys the compromised tokens is the same apply that mints
+their non-compromised replacement, so the service comes back up on a key
+nobody's seen.
 
 ## The credentials root is the one CI never plans
 

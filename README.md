@@ -47,14 +47,17 @@ so what it produces is a witness, not an instruction — a compromised CI can
 force a refusal and can never cause an apply. Handing the applier a plan file
 to execute instead of a digest to verify would invert exactly that.
 
-Five more things worth stealing:
+There's more worth taking from this design:
 
 - **Every credential is either hand-made or minted by code — nothing sits in
   between.** A hand-made one exists because its issuer has no API to mint it,
-  and it never expires; give a hand-made credential an expiry instead and
-  you've built the kind that lapses at 3 a.m. with nobody watching. Everything
-  else gets minted and rotated on a clock, in two overlapping generations, so
-  swapping one out never means restarting whatever's using it.
+  so nothing can rotate it automatically. That's not a reason to let it run
+  forever unwatched: it should still carry a real expiry, with enough lead
+  time that a human renews it instead of discovering it lapsed. `never` is
+  available, and it's the wrong default — a credential that never expires
+  also never forces anyone to look at it again. Everything else gets minted
+  and rotated on a clock, in two overlapping generations, so swapping one out
+  never means restarting whatever's using it.
 - **A leak gets answered with a commit, not a scramble in a console.** Name
   the generation in `revoked_generations`, and the next apply destroys every
   token in it and mints nothing to replace them — reviewed, planned, and
