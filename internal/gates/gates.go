@@ -90,13 +90,25 @@ type Review struct {
 // earlier push is an approval of code nobody read; GitHub's own
 // dismiss_stale_reviews is asked for in Protection, and this checks it again
 // rather than trusting that it was on.
+//
+// A review by the approver that is NOT at the head sha is ordinary API
+// noise, not evidence of anything wrong: dismiss_stale_reviews already
+// dismisses it on push, and this gate only cares whether a valid approval
+// exists at the head. It is silently skipped rather than reported, so a PR
+// that got a second push is judged on its current approval, not wedged by
+// its history.
 func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []string {
 	var problems []string
 
 	if !pr.Merged {
 		problems = append(problems, fmt.Sprintf("PR #%d is not merged", pr.Number))
 	}
-	if pr.MergeCommitSHA != "" && pr.MergeCommitSHA != sha {
+	// ⚠️ Absent must be its own case, same as everywhere else in this file:
+	// an empty MergeCommitSHA is not "no opinion", it is "unmerged, or
+	// unreadable", and apply.sh:529 refuses it unconditionally.
+	if pr.MergeCommitSHA == "" {
+		problems = append(problems, fmt.Sprintf("PR #%d has no merge commit recorded", pr.Number))
+	} else if pr.MergeCommitSHA != sha {
 		problems = append(problems,
 			fmt.Sprintf("PR #%d's merge commit is %s, not %s", pr.Number, short(pr.MergeCommitSHA), short(sha)))
 	}
@@ -107,9 +119,6 @@ func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []str
 			continue
 		}
 		if r.CommitID != pr.HeadSHA {
-			problems = append(problems,
-				fmt.Sprintf("approval by %s is at %s, but the PR head is %s: it approved a different tree",
-					r.User, short(r.CommitID), short(pr.HeadSHA)))
 			continue
 		}
 		approved = true
@@ -117,6 +126,65 @@ func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []str
 	if !approved {
 		problems = append(problems,
 			fmt.Sprintf("no approval by %s at the PR head %s", approver, short(pr.HeadSHA)))
+	}
+	return problems
+}
+
+// Commit is the merge commit itself, from the forge's commit-detail
+// endpoint.
+type Commit struct {
+	SHA            string
+	Verified       *bool
+	CommitterLogin *string
+}
+
+// CheckMergeCommit refuses a merge commit that the forge did not create
+// itself. "Approved by a human, applied by us" only means something if the
+// tree at sha is the tree the PR's approval covered, and the only party who
+// can vouch for that is GitHub performing its own merge (web-flow) with a
+// verified signature (545-556).
+//
+// ⚠️ Same absent-is-not-compliant shape as Protection and PullRequest: a
+// commit whose verification status or committer could not be read is
+// refused, never defaulted to true.
+func CheckMergeCommit(c Commit) []string {
+	var problems []string
+	if !isTrue(c.Verified) {
+		problems = append(problems, fmt.Sprintf("merge commit %s is not verified", short(c.SHA)))
+	}
+	committer := "absent"
+	if c.CommitterLogin != nil {
+		committer = *c.CommitterLogin
+	}
+	if committer != "web-flow" {
+		problems = append(problems,
+			fmt.Sprintf("merge commit %s was committed by %s, not github's own web-flow merge -- a merge github did not perform itself is not trustworthy as \"what the approved PR contained\"", short(c.SHA), committer))
+	}
+	return problems
+}
+
+// CheckPlanDigest refuses to apply a plan whose digest does not match the
+// one recorded as approved at headSHA -- "mine" is the digest of the plan
+// about to run, "approved" is what was recorded when the PR was reviewed,
+// and approvedFound distinguishes "recorded and empty" (impossible in
+// practice, but not this function's business to assume) from "nothing was
+// ever recorded".
+//
+// The credentials root is the one exemption (631, and §2.10): CI never
+// plans it, so there is never anything to compare against.
+func CheckPlanDigest(root, headSHA, mine string, approved string, approvedFound bool) []string {
+	if root == "credentials" {
+		return nil
+	}
+	var problems []string
+	if !approvedFound {
+		problems = append(problems,
+			fmt.Sprintf("no approved plan recorded for %s at %s: refusing to apply a plan nobody reviewed", root, short(headSHA)))
+		return problems
+	}
+	if mine != approved {
+		problems = append(problems,
+			fmt.Sprintf("the plan for %s does not match the one approved at %s (approved %s, ours %s): the world moved between review and apply", root, short(headSHA), approved, mine))
 	}
 	return problems
 }
