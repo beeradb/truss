@@ -1,13 +1,13 @@
 {
   "bash": {
-    "alert_b64": "cGxhdGZvcm0gYXBwbGllcjogbm90aGluZyB0byBhcHBseTsgRVhQSVJJTkc6IHRlbGVncmFtLWFsZXJ0IChubyBleHBpcnkgcmVjb3JkZWQp",
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogdGhlIGV4cGlyeSBzd2VlcCBjb3VsZCBub3QgbGlzdCB0aGUgJ3BsYXRmb3JtJyB2YXVsdCwgc28gaXQgY2Fubm90IHNheSB3aGV0aGVyIGFueXRoaW5nIGlzIGV4cGlyaW5nLgogIChyYXRlIGxpbWl0cyBjb3VsZCBub3QgYmUgcmVhZCkKUmVhZCB0aGUgdGFibGU6IFRZUEU9dG9rZW4gbmVhciBpdHMgTElNSVQgbWVhbnMgdGhpcyBhcHBsaWVyIGlzIHNwZW5kaW5nIHRvbyBtdWNoIGFuZCBpdHMgc2NoZWR1bGUgaXMgdGhlIHRoaW5nIHRvIGNoYW5nZTsgVFlQRT10b2tlbiBsb3cgd2hpbGUgVFlQRT1hY2NvdW50IGlzIGV4aGF1c3RlZCBtZWFucyBhbm90aGVyIGNvbnN1bWVyIG9uIHRoZSAxUGFzc3dvcmQgYWNjb3VudCBzcGVudCBpdCwgYW5kIG5vdGhpbmcgaW4gdGhpcyByZXBvIHdpbGwgZml4IHRoYXQuIChhcHBsaWVkPTAgbm9vcD0wKQ==",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTZaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6IG51bGwsCiAgInJvdGF0aW9uIjogewogICAgInJlc291cmNlX2NoYW5nZXMiOiAwCiAgfSwKICAiZHJpZnQiOiB7CiAgICAiZHJpZnRlZCI6IFtdLAogICAgImVycm9yZWQiOiBbXQogIH0sCiAgImV4cGlyaW5nIjogWwogICAgewogICAgICAibmFtZSI6ICJ0ZWxlZ3JhbS1hbGVydCIsCiAgICAgICJkYXlzX2xlZnQiOiBudWxsCiAgICB9CiAgXQp9"
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDc6MDZaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJ0aGUgZXhwaXJ5IHN3ZWVwIGNvdWxkIG5vdCBsaXN0IHRoZSAncGxhdGZvcm0nIHZhdWx0LCBzbyBpdCBjYW5ub3Qgc2F5IHdoZXRoZXIgYW55dGhpbmcgaXMgZXhwaXJpbmcuXG4gIChyYXRlIGxpbWl0cyBjb3VsZCBub3QgYmUgcmVhZClcblJlYWQgdGhlIHRhYmxlOiBUWVBFPXRva2VuIG5lYXIgaXRzIExJTUlUIG1lYW5zIHRoaXMgYXBwbGllciBpcyBzcGVuZGluZyB0b28gbXVjaCBhbmQgaXRzIHNjaGVkdWxlIGlzIHRoZSB0aGluZyB0byBjaGFuZ2U7IFRZUEU9dG9rZW4gbG93IHdoaWxlIFRZUEU9YWNjb3VudCBpcyBleGhhdXN0ZWQgbWVhbnMgYW5vdGhlciBjb25zdW1lciBvbiB0aGUgMVBhc3N3b3JkIGFjY291bnQgc3BlbnQgaXQsIGFuZCBub3RoaW5nIGluIHRoaXMgcmVwbyB3aWxsIGZpeCB0aGF0LiIsCiAgInJvdGF0aW9uIjogewogICAgInJlc291cmNlX2NoYW5nZXMiOiAwCiAgfSwKICAiZHJpZnQiOiB7CiAgICAiZHJpZnRlZCI6IFtdLAogICAgImVycm9yZWQiOiBbXQogIH0sCiAgImV4cGlyaW5nIjogW10KfQ=="
     },
-    "exit_code": 0
+    "exit_code": 1
   },
-  "bash_test": "test_hand_credential_with_no_expiry_recorded_is_reported_not_skipped",
+  "bash_test": "test_a_spent_allowance_fails_the_daily_sweep_and_still_reports",
   "bucket_before": {
     "applied/HEAD": "YmFzZQ=="
   },
@@ -71,7 +71,7 @@
           "expires": "never"
         },
         "telegram-alert": {
-          "expires": null
+          "expires": "never"
         },
         "tofu-encryption": {
           "expires": "never"
@@ -96,7 +96,7 @@
     },
     "tree": {}
   },
-  "scenario": "test_hand_credential_with_no_expiry_recorded_is_reported_not_skipped",
+  "scenario": "test_a_spent_allowance_fails_the_daily_sweep_and_still_reports",
   "unset_env": [],
   "workdir_roots": [
     "credentials",

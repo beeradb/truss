@@ -1,11 +1,10 @@
 {
   "bash": {
-    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogcm90YXRpb24gb2YgY3JlZGVudGlhbHMgYXQgYmFzZTogdG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIChhcHBsaWVkPTAgbm9vcD0wKTsgRVhQSVJJTkc6IGNmLXRva2VuLW1pbnQgKG5vIGV4cGlyeSByZWNvcmRlZCk=",
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogdG9mdSBhcHBseSBmYWlsZWQgZm9yIHByb2plY3RzL3JlY2lwZXMgKGFwcGxpZWQ9MCBub29wPTAp",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "failed/rotation-<ts>": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIiwKICAiYXQiOiAiMjAyNi0wOS0wOFQwNDoyMzo0M1oiCn0=",
-      "failed/sha1": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIHByb2plY3RzL3JlY2lwZXMiLAogICJhdCI6ICIyMDI2LTA5LTA4VDA0OjIzOjQyWiIKfQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NDNaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJyb3RhdGlvbiBvZiBjcmVkZW50aWFscyBhdCBiYXNlOiB0b2Z1IGFwcGx5IGZhaWxlZCBmb3IgY3JlZGVudGlhbHMiLAogICJyb3RhdGlvbiI6IHsKICAgICJmYWlsZWQiOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIgogIH0sCiAgImRyaWZ0IjogewogICAgInNraXBwZWQiOiAibm90IGEgZHJpZnQgcnVuIgogIH0sCiAgImV4cGlyaW5nIjogWwogICAgewogICAgICAibmFtZSI6ICJjZi10b2tlbi1taW50IiwKICAgICAgImRheXNfbGVmdCI6IG51bGwKICAgIH0KICBdCn0=",
+      "failed/sha1": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIHByb2plY3RzL3JlY2lwZXMiLAogICJhdCI6ICIyMDI2LTA5LTA4VDE1OjA2OjQ5WiIKfQ==",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NDlaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJ0b2Z1IGFwcGx5IGZhaWxlZCBmb3IgcHJvamVjdHMvcmVjaXBlcyIsCiAgInJvdGF0aW9uIjogewogICAgInNraXBwZWQiOiAicm90YXRpb24gcnVucyBvbiB0aGUgZGFpbHkgcGFzcyIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogIm5vdCBhIGRyaWZ0IHJ1biIKICB9LAogICJleHBpcmluZyI6IFtdCn0=",
       "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
       "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
       "plans/headsha2/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",

@@ -1,10 +1,10 @@
 {
   "bash": {
-    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogY2YtaW5mcmEtYWRtaW4gaXMgbm90IGluIHRoZSBwbGF0Zm9ybSB2YXVsdDogaXQgaXMgbWludGVkIGJ5IGNyZWRlbnRpYWxzLywgc28gdGhhdCByb290IG11c3QgYmUgYXBwbGllZCBiZWZvcmUgcHJvamVjdHMvcmVjaXBlcyBjYW4gYmUgKGFwcGxpZWQ9MCBub29wPTAp",
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogY2YtaW5mcmEtYWRtaW4gaXMgbm90IG1vdW50ZWQ6IGl0IGlzIG1pbnRlZCBieSBjcmVkZW50aWFscy8sIHNvIHRoYXQgcm9vdCBtdXN0IGJlIGFwcGxpZWQgYmVmb3JlIHByb2plY3RzL3JlY2lwZXMgY2FuIGJlIChhcHBsaWVkPTAgbm9vcD0wKQ==",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "failed/sha1": "ewogICJyZWFzb24iOiAiY2YtaW5mcmEtYWRtaW4gaXMgbm90IGluIHRoZSBwbGF0Zm9ybSB2YXVsdDogaXQgaXMgbWludGVkIGJ5IGNyZWRlbnRpYWxzLywgc28gdGhhdCByb290IG11c3QgYmUgYXBwbGllZCBiZWZvcmUgcHJvamVjdHMvcmVjaXBlcyBjYW4gYmUiLAogICJhdCI6ICIyMDI2LTA5LTA4VDA0OjIzOjU0WiIKfQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NTRaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJjZi1pbmZyYS1hZG1pbiBpcyBub3QgaW4gdGhlIHBsYXRmb3JtIHZhdWx0OiBpdCBpcyBtaW50ZWQgYnkgY3JlZGVudGlhbHMvLCBzbyB0aGF0IHJvb3QgbXVzdCBiZSBhcHBsaWVkIGJlZm9yZSBwcm9qZWN0cy9yZWNpcGVzIGNhbiBiZSIsCiAgInJvdGF0aW9uIjogewogICAgInJlc291cmNlX2NoYW5nZXMiOiAwCiAgfSwKICAiZHJpZnQiOiB7CiAgICAic2tpcHBlZCI6ICJub3QgYSBkcmlmdCBydW4iCiAgfSwKICAiZXhwaXJpbmciOiBbXQp9",
+      "failed/sha1": "ewogICJyZWFzb24iOiAiY2YtaW5mcmEtYWRtaW4gaXMgbm90IG1vdW50ZWQ6IGl0IGlzIG1pbnRlZCBieSBjcmVkZW50aWFscy8sIHNvIHRoYXQgcm9vdCBtdXN0IGJlIGFwcGxpZWQgYmVmb3JlIHByb2plY3RzL3JlY2lwZXMgY2FuIGJlIiwKICAiYXQiOiAiMjAyNi0wOS0wOFQxNTowNjo1NFoiCn0=",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTRaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJjZi1pbmZyYS1hZG1pbiBpcyBub3QgbW91bnRlZDogaXQgaXMgbWludGVkIGJ5IGNyZWRlbnRpYWxzLywgc28gdGhhdCByb290IG11c3QgYmUgYXBwbGllZCBiZWZvcmUgcHJvamVjdHMvcmVjaXBlcyBjYW4gYmUiLAogICJyb3RhdGlvbiI6IHsKICAgICJza2lwcGVkIjogInJvdGF0aW9uIHJ1bnMgb24gdGhlIGRhaWx5IHBhc3MiCiAgfSwKICAiZHJpZnQiOiB7CiAgICAic2tpcHBlZCI6ICJub3QgYSBkcmlmdCBydW4iCiAgfSwKICAiZXhwaXJpbmciOiBbXQp9",
       "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
       "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
     },
@@ -114,7 +114,7 @@
           "expires": "@+60d"
         },
         "nyt-cookie": {
-          "expires": "@+300d!"
+          "expires": "@+299d!"
         },
         "registry-pull": {
           "expires": "@+60d"

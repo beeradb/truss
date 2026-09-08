@@ -3,7 +3,7 @@
     "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogYnJhbmNoIHByb3RlY3Rpb24gb24gbWFpbiBkb2VzIG5vdCBtZWV0IHRoZSBiYXI6IHJlcXVpcmVkX3N0YXR1c19jaGVja3Muc3RyaWN0IGlzIG9mZjogYW4gYXBwcm92YWwgYWdhaW5zdCBhIHN0YWxlIG1haW4gY2FuIG1lcmdlIChhcHBsaWVkPTAgbm9vcD0wKQ==",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjQ6MDFaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJicmFuY2ggcHJvdGVjdGlvbiBvbiBtYWluIGRvZXMgbm90IG1lZXQgdGhlIGJhcjogcmVxdWlyZWRfc3RhdHVzX2NoZWNrcy5zdHJpY3QgaXMgb2ZmOiBhbiBhcHByb3ZhbCBhZ2FpbnN0IGEgc3RhbGUgbWFpbiBjYW4gbWVyZ2UiLAogICJyb3RhdGlvbiI6IHsKICAgICJza2lwcGVkIjogImJyYW5jaCBwcm90ZWN0aW9uIGdhdGUgZmFpbGVkIgogIH0sCiAgImRyaWZ0IjogewogICAgInNraXBwZWQiOiAiYnJhbmNoIHByb3RlY3Rpb24gZ2F0ZSBmYWlsZWQiCiAgfSwKICAiZXhwaXJpbmciOiBbXQp9"
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTlaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJicmFuY2ggcHJvdGVjdGlvbiBvbiBtYWluIGRvZXMgbm90IG1lZXQgdGhlIGJhcjogcmVxdWlyZWRfc3RhdHVzX2NoZWNrcy5zdHJpY3QgaXMgb2ZmOiBhbiBhcHByb3ZhbCBhZ2FpbnN0IGEgc3RhbGUgbWFpbiBjYW4gbWVyZ2UiLAogICJyb3RhdGlvbiI6IHsKICAgICJza2lwcGVkIjogImJyYW5jaCBwcm90ZWN0aW9uIGdhdGUgZmFpbGVkIgogIH0sCiAgImRyaWZ0IjogewogICAgInNraXBwZWQiOiAiYnJhbmNoIHByb3RlY3Rpb24gZ2F0ZSBmYWlsZWQiCiAgfSwKICAiZXhwaXJpbmciOiBbXQp9"
     },
     "exit_code": 1
   },
@@ -80,7 +80,7 @@
           "expires": "@+60d"
         },
         "nyt-cookie": {
-          "expires": "@+300d!"
+          "expires": "@+299d!"
         },
         "registry-pull": {
           "expires": "@+60d"

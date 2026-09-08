@@ -6,18 +6,28 @@ package parity
 // listing: a manifest derived from the thing it guards cannot detect that
 // thing shrinking.
 //
-// The reference suite has 125 tests; 37 of them drive apply.sh end to end
-// and are the ones a whole-pass parity harness can replay. The other 94
+// The reference suite has 125 tests; 43 of them drive apply.sh end to end
+// and are the ones a whole-pass parity harness can replay. The other 82
 // assert on repository CONTENT -- the plan workflow's permissions, the
 // CronJob manifests, the Dockerfile, the commit-msg hook -- and have no
-// pass to compare. See the report handed back with this change for the
-// full accounting.
+// pass to compare. Re-recorded 2026-09-08 against origin/main (1114-line
+// apply.sh); see the report handed back with that change for the full
+// accounting, including the one scenario that dropped out because the test
+// it came from stopped calling run_apply and instead asserts on apply.sh's
+// own source (test_rotation_and_the_commit_loop_never_run_in_the_same_pass).
 var recordedScenarios = []string{
 	"test_a_changeful_apply_still_produces_valid_json",
 	"test_a_drift_run_applies_no_commits_and_mints_nothing",
 	"test_a_missing_strict_key_is_not_read_as_compliant",
+	"test_a_pass_with_no_work_never_touches_the_applying_credentials",
+	"test_a_pass_with_work_still_needs_the_applying_credentials",
 	"test_a_plan_that_differs_from_the_approved_one_is_refused",
 	"test_a_root_with_no_approved_plan_is_refused",
+	"test_a_skipped_drift_check_says_so_rather_than_looking_clean",
+	"test_a_spent_allowance_fails_the_daily_sweep_and_still_reports",
+	"test_a_spent_allowance_no_longer_stops_an_ordinary_pass",
+	"test_an_empty_credential_file_is_as_fatal_as_a_missing_one",
+	"test_an_idle_pass_reads_almost_nothing_from_1password",
 	"test_applier_reads_nothing_from_the_runtime_vault_but_expires_fields",
 	"test_approval_on_an_older_head_sha_is_refused",
 	"test_approved_pr_is_planned_and_applied_at_its_head_and_advances_head",
@@ -43,7 +53,6 @@ var recordedScenarios = []string{
 	"test_platform_root_applies_with_the_admin_github_token",
 	"test_rotation_does_not_run_when_the_branch_protection_gate_failed",
 	"test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
-	"test_rotation_is_skipped_when_the_loop_already_applied_credentials_this_run",
 	"test_rotation_never_advances_past_a_commit_the_loop_refused",
 	"test_rotation_re_plans_credentials_at_last_applied_commit_on_every_run",
 	"test_shared_input_change_plans_and_applies_every_root_in_the_tree",
