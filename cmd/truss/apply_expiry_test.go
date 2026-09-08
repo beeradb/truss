@@ -127,7 +127,7 @@ func TestEveryTofuRunCarriesTheGitHubAppIdentity(t *testing.T) {
 	dir, write := testSecretsDir(t)
 	writeGitHubAppSecret(t, write)
 
-	d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "installation-tok"}
+	d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
 	env, err := buildBaseEnv(d, d.Token)
 	if err != nil {
 		t.Fatalf("buildBaseEnv: %v", err)
