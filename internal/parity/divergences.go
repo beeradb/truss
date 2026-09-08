@@ -382,22 +382,6 @@ var Divergences = []Divergence{
 			"the heartbeat AND now in its own failed/rotation-<ts> record.",
 		Ref: "applier/apply.sh:698 vs cmd/truss/apply_cmd.go's `if rotErr != nil && failure == \"\"`",
 	},
-	{
-		ID:     "DIGEST-GATE-EMPTY-READS-AS-MISMATCH",
-		Status: StatusFinding,
-		Scenarios: []string{
-			"test_a_root_with_no_approved_plan_is_refused",
-		},
-		Accept: emptyDigestRefusal,
-		Bash:   "\"no approved plan recorded for <root> at <sha> (<the key>): refusing to apply a plan nobody reviewed\"",
-		Truss:  "\"the plan for <root> does not match the one approved at <sha> (approved , ours <digest>): the world moved between review and apply\"",
-		Why: "Two things, both message-only -- BOTH IMPLEMENTATIONS REFUSE, which is the property that matters. " +
-			"First, an EMPTY recorded digest is \"nobody reviewed this\" and truss reads it as a mismatch; " +
-			"gates.CheckPlanDigest's own comment calls that case \"impossible in practice\", and the reference " +
-			"suite has a test for it, so it is not. Second, the bash names the ledger KEY and truss does not -- " +
-			"the key is what an operator would go and look at. Nothing in §3 covers either.",
-		Ref: "applier/apply.sh:462 (`[ -z \"$theirs\" ]`); internal/gates/gates.go CheckPlanDigest",
-	},
 }
 
 // exactOrAlert accepts the same pair of strings whether it arrives as a
@@ -455,15 +439,4 @@ func firstFailureWins(d Diff) bool {
 	default:
 		return false
 	}
-}
-
-// emptyDigestRefusal matches DIGEST-GATE-EMPTY-READS-AS-MISMATCH, and
-// requires BOTH sides to be a refusal naming the same root: the difference
-// forgiven here is which sentence, never whether one was said.
-func emptyDigestRefusal(d Diff) bool {
-	return strings.Contains(d.Bash, "refusing to apply a plan nobody reviewed") &&
-		strings.Contains(d.Truss, "does not match the one approved") &&
-		strings.Contains(d.Truss, "(approved , ours ") &&
-		strings.Contains(d.Bash, "projects/recipes") &&
-		strings.Contains(d.Truss, "projects/recipes")
 }

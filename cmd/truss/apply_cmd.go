@@ -599,7 +599,7 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 				return ledger.RootSummary{}, false, fmt.Sprintf("could not read the approved plan digest for %s at %s: %v", root, headSHA, err)
 			}
 		}
-		if problems := gates.CheckPlanDigest(root, headSHA, mine, approved, approvedFound); len(problems) > 0 {
+		if problems := gates.CheckPlanDigest(root, headSHA, d.Journal.Layout.DigestKey(headSHA, root), mine, approved, approvedFound); len(problems) > 0 {
 			return ledger.RootSummary{}, false, strings.Join(problems, "; ")
 		}
 	}

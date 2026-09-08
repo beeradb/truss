@@ -295,24 +295,24 @@ func TestCheckMergeCommitRequiresTheForgesOwnMerge(t *testing.T) {
 // --- CheckPlanDigest ---------------------------------------------------------
 
 func TestCheckPlanDigestRefusesWhenNoneWasRecorded(t *testing.T) {
-	problems := CheckPlanDigest("platform", "headsha1", "minedigest", "", false)
+	problems := CheckPlanDigest("platform", "headsha1", "digests/headsha1/platform.digest", "minedigest", "", false)
 	if len(problems) == 0 {
 		t.Fatalf("a missing recorded digest was accepted")
 	}
 }
 
 func TestCheckPlanDigestRefusesAMismatchAndNamesBothValues(t *testing.T) {
-	problems := CheckPlanDigest("platform", "headsha1", "minedigest", "theirdigest", true)
+	problems := CheckPlanDigest("platform", "headsha1", "digests/headsha1/platform.digest", "minedigest", "theirdigest", true)
 	if !hasProblemContaining(problems, "minedigest") || !hasProblemContaining(problems, "theirdigest") {
 		t.Fatalf("a mismatch did not name both values: %v", problems)
 	}
 }
 
 func TestCheckPlanDigestExemptsOnlyTheCredentialsRoot(t *testing.T) {
-	if problems := CheckPlanDigest("credentials", "headsha1", "minedigest", "", false); len(problems) != 0 {
+	if problems := CheckPlanDigest("credentials", "headsha1", "digests/headsha1/platform.digest", "minedigest", "", false); len(problems) != 0 {
 		t.Fatalf("the credentials root was not exempted from the digest gate: %v", problems)
 	}
-	if problems := CheckPlanDigest("platform", "headsha1", "minedigest", "", false); len(problems) == 0 {
+	if problems := CheckPlanDigest("platform", "headsha1", "digests/headsha1/platform.digest", "minedigest", "", false); len(problems) == 0 {
 		t.Fatalf("a non-credentials root with no recorded digest was exempted")
 	}
 }
@@ -329,7 +329,7 @@ func TestEveryGateRefusesTheZeroValue(t *testing.T) {
 	if problems := CheckMergeCommit(Commit{}); len(problems) == 0 {
 		t.Errorf("CheckMergeCommit accepted the zero value")
 	}
-	if problems := CheckPlanDigest("", "", "", "", false); len(problems) == 0 {
+	if problems := CheckPlanDigest("", "", "digests/headsha1/platform.digest", "", "", false); len(problems) == 0 {
 		t.Errorf("CheckPlanDigest accepted the zero value")
 	}
 }
@@ -362,5 +362,62 @@ func TestGatesImportsNothingThatDoesIO(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestCheckPlanDigestTellsAnEmptyDigestApartFromAMismatch: an approved
+// digest that is recorded but EMPTY means nobody reviewed it, not that the
+// plan changed. It used to fall through to the mismatch branch and print
+// "(approved , ours <digest>): the world moved between review and apply" --
+// a sentence describing a race that did not happen, with a blank where a
+// digest should be. apply.sh:462 tests `[ -z "$theirs" ]` for exactly this.
+//
+// Both outcomes refuse, so nothing was unsafe; what was wrong was telling
+// the operator the wrong story. The doc comment had called this case
+// "impossible in practice", which is the kind of claim that stops anyone
+// handling it. Found by internal/parity, 2026-09-08.
+func TestCheckPlanDigestTellsAnEmptyDigestApartFromAMismatch(t *testing.T) {
+	const key = "digests/headsha1/platform.digest"
+
+	empty := CheckPlanDigest("platform", "headsha1", key, "minedigest", "", true)
+	if len(empty) == 0 {
+		t.Fatal("an empty recorded digest was accepted")
+	}
+	if !hasProblemContaining(empty, "nobody reviewed") {
+		t.Errorf("an empty recorded digest is not reported as unreviewed: %v", empty)
+	}
+	if hasProblemContaining(empty, "the world moved") {
+		t.Errorf("an empty recorded digest is reported as a mismatch: %v", empty)
+	}
+
+	mismatch := CheckPlanDigest("platform", "headsha1", key, "minedigest", "theirdigest", true)
+	if !hasProblemContaining(mismatch, "the world moved") {
+		t.Errorf("a real mismatch is no longer reported as one: %v", mismatch)
+	}
+}
+
+// TestAnUnreviewedRefusalNamesTheLedgerKey: the key is what an operator goes
+// and looks at, and apply.sh:462 names it in this refusal. Deliberately only
+// this one -- a mismatch already prints both digests, and adding the key
+// there would be a divergence in alert text that nobody asked for.
+func TestAnUnreviewedRefusalNamesTheLedgerKey(t *testing.T) {
+	const key = "digests/headsha1/platform.digest"
+	for _, tc := range []struct {
+		name     string
+		approved string
+		found    bool
+	}{
+		{"nothing recorded", "", false},
+		{"recorded but empty", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problems := CheckPlanDigest("platform", "headsha1", key, "minedigest", tc.approved, tc.found)
+			if len(problems) == 0 {
+				t.Fatal("accepted, so there is no refusal to inspect")
+			}
+			if !hasProblemContaining(problems, key) {
+				t.Errorf("the refusal does not name the ledger key: %v", problems)
+			}
+		})
 	}
 }

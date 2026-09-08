@@ -164,26 +164,42 @@ func CheckMergeCommit(c Commit) []string {
 }
 
 // CheckPlanDigest refuses to apply a plan whose digest does not match the
-// one recorded as approved at headSHA -- "mine" is the digest of the plan
+// one recorded as approved at headSHA. "mine" is the digest of the plan
 // about to run, "approved" is what was recorded when the PR was reviewed,
-// and approvedFound distinguishes "recorded and empty" (impossible in
-// practice, but not this function's business to assume) from "nothing was
-// ever recorded".
+// approvedFound says whether the ledger held the object at all, and key is
+// the ledger key it was read from -- named in the refusal because it is the
+// thing an operator then goes and looks at.
+//
+// ⚠️ AN EMPTY APPROVED DIGEST IS "NOBODY REVIEWED IT", NOT "IT DOES NOT
+// MATCH", and this used to fall through to the mismatch branch and print
+// "(approved , ours <digest>): the world moved between review and apply" --
+// a sentence describing a race that did not happen, with a blank where a
+// digest should be. apply.sh:462 tests `[ -z "$theirs" ]` for exactly this.
+// Both outcomes are a refusal, so nothing was ever unsafe; what was wrong
+// was telling the operator the wrong story about why. The comment here
+// previously called an empty recorded digest "impossible in practice",
+// which is the kind of claim that stops anyone handling it -- the reference
+// suite has a test for it. Found by internal/parity, 2026-09-08.
 //
 // The credentials root is the one exemption (631, and §2.10): CI never
 // plans it, so there is never anything to compare against.
-func CheckPlanDigest(root, headSHA, mine string, approved string, approvedFound bool) []string {
+func CheckPlanDigest(root, headSHA, key, mine string, approved string, approvedFound bool) []string {
 	if root == "credentials" {
 		return nil
 	}
 	var problems []string
-	if !approvedFound {
+	if !approvedFound || approved == "" {
 		problems = append(problems,
-			fmt.Sprintf("no approved plan recorded for %s at %s: refusing to apply a plan nobody reviewed", root, short(headSHA)))
+			fmt.Sprintf("no approved plan recorded for %s at %s (%s): refusing to apply a plan nobody reviewed", root, short(headSHA), key))
 		return problems
 	}
 	if mine != approved {
 		problems = append(problems,
+			// The key is deliberately NOT named here, only in the
+			// unreviewed branch above -- which is where apply.sh:462 names
+			// it. A mismatch already prints both digests, and the key is
+			// derivable from the root and the sha; adding it would be a
+			// divergence in alert text that nobody asked for.
 			fmt.Sprintf("the plan for %s does not match the one approved at %s (approved %s, ours %s): the world moved between review and apply", root, short(headSHA), approved, mine))
 	}
 	return problems
