@@ -13,7 +13,22 @@ import (
 // does not reach it -- only what fills the files changed when the backend
 // did. Dir never dials a network: a missing or unreadable file is the only
 // question it can ask, and it asks it against the filesystem alone.
-type Dir struct{ Root string }
+type Dir struct {
+	Root string
+
+	// OnFieldRead, when set, is called after each successful Field read.
+	//
+	// ⚠️ A TEST SEAM, AND DELIBERATELY A FIELD RATHER THAN A PACKAGE-LEVEL
+	// VAR. Dir has no interface to fake, and reimplementing its
+	// stat-then-read as a second fake risks that fake drifting from the real
+	// one -- which is the failure this repository has hit repeatedly. A
+	// per-instance hook carries no global state, needs no reset between
+	// tests and cannot be set by one test and observed by another.
+	//
+	// It exists so a test can count REAL reads and prove the credential
+	// cache reads each field once per pass rather than once per caller.
+	OnFieldRead func(item, field string)
+}
 
 // Field reads one required credential field. A missing mount is fatal
 // (apply.sh:136); an EMPTY field is equally fatal (apply.sh:141) -- an item
@@ -48,6 +63,9 @@ func (d Dir) Field(item, field string) (string, error) {
 	v := strings.TrimRight(string(b), "\n")
 	if v == "" {
 		return "", fmt.Errorf("refusing to continue: %s is empty -- item %q is missing field %q", path, item, field)
+	}
+	if d.OnFieldRead != nil {
+		d.OnFieldRead(item, field)
 	}
 	return v, nil
 }

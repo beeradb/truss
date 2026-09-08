@@ -220,6 +220,14 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// a ref in a directory that does not exist" has no counterpart in a fake.
 	// It was found by the FIRST SHADOW RUN against the real cluster on
 	// 2026-09-08, which is the whole argument for running one.
+	// ⚠️ ONE CREDENTIAL CACHE FOR THE WHOLE PASS. runCommitLoop and
+	// runRotation each used to build their own, so a pass that applied and
+	// then rotated read the same mounted files twice -- against this type's
+	// own promise of "at most once per pass". The deployed bash uses a
+	// process-wide flag for the same reason. runDrift deliberately does NOT
+	// use it: it re-reads cf-infra-admin fresh, which is correct.
+	cc := &credCache{dir: d.Dir}
+
 	if gateOK {
 		tok, _, err := d.Forge.InstallationToken(ctx)
 		if err != nil {
@@ -250,29 +258,12 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		rotationSummary = map[string]string{"skipped": skipped}
 		driftSummary = map[string]string{"skipped": skipped}
 	} else if driftRun {
-		rotationSummary = map[string]string{"skipped": "drift run"}
-		drifted, errored, driftSkipped = runDrift(ctx, d, last)
-		if driftSkipped != "" {
-			driftSummary = map[string]string{"skipped": driftSkipped}
-		} else {
-			driftSummary = map[string]any{"drifted": orEmpty(drifted), "errored": orEmpty(errored)}
-		}
-	} else {
-		// lockContended is deliberately not surfaced beyond stopping the
-		// loop early: §2 item 7 says contention files no failed/<sha>,
-		// sends no failure alert and leaves HEAD unmoved, which
-		// runCommitLoop already guarantees by returning an empty failure
-		// and the pre-contention HEAD.
-		newLast, applied, noop, loopFailure, credentialsAppliedAt, _ := runCommitLoop(ctx, d, last)
-		last = newLast
-		appliedCount = applied
-		noopCount = noop
-		if loopFailure != "" {
-			failure = loopFailure
-		}
-
-		driftSummary = map[string]string{"skipped": "not a drift run"}
-		summary, changes, rotErr := runRotation(ctx, d, last, credentialsAppliedAt)
+		// ⚠️ ROTATION BELONGS TO THE DAILY PASS. The deployed applier runs
+		// rotate_credentials and then check_drift together under
+		// DRIFT_CHECK=1. credentialsAppliedAt is "" here because no commit
+		// loop ran, which correctly leaves runRotation's "already applied
+		// this run" short-circuit inert.
+		summary, changes, rotErr := runRotation(ctx, d, last, "", cc)
 		rotationSummary = summary
 		rotatedChanges = changes
 		if rotErr != nil {
@@ -306,6 +297,37 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 				failure = reason
 			}
 		}
+
+		drifted, errored, driftSkipped = runDrift(ctx, d, last)
+		if driftSkipped != "" {
+			driftSummary = map[string]string{"skipped": driftSkipped}
+		} else {
+			driftSummary = map[string]any{"drifted": orEmpty(drifted), "errored": orEmpty(errored)}
+		}
+	} else {
+		// lockContended is deliberately not surfaced beyond stopping the
+		// loop early: §2 item 7 says contention files no failed/<sha>,
+		// sends no failure alert and leaves HEAD unmoved, which
+		// runCommitLoop already guarantees by returning an empty failure
+		// and the pre-contention HEAD.
+		newLast, applied, noop, loopFailure, _, _ := runCommitLoop(ctx, d, last, cc)
+		last = newLast
+		appliedCount = applied
+		noopCount = noop
+		if loopFailure != "" {
+			failure = loopFailure
+		}
+
+		// ⚠️ THE FREQUENT PASS DOES NOT ROTATE, AND TRUSS HAD THIS INVERTED.
+		// The deployed applier rotates on the DAILY pass and skips here, for
+		// a stated cost: three credential reads and a full plan of
+		// credentials/ every fifteen minutes was "most of the daily budget,
+		// spent to re-derive a date". Rotating here ran 288 plans a day
+		// instead of one, and left the daily pass never rotating at all.
+		// The skip string is the bash's, byte for byte -- it lands in the
+		// heartbeat.
+		rotationSummary = map[string]string{"skipped": "rotation runs on the daily pass"}
+		driftSummary = map[string]string{"skipped": "not a drift run"}
 	}
 
 	// The expiry sweep runs on every pass, drift or not, gate-passed or
@@ -333,10 +355,20 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// the previous code then discarded it. That threw away the one
 	// credential whose lapse takes the applier down, exactly when the vault
 	// was misbehaving.
+	// ⚠️ THE SWEEP IS DAILY-ONLY, AND TRUSS RAN IT EVERY PASS -- outside this
+	// branching entirely, so it ran even when the branch-protection gate had
+	// already failed. The deployed applier gates it on the drift pass with a
+	// dated reason of its own: asking 288 times a day "is most of what
+	// rate-limited the service account on 2026-09-07". Running it on every
+	// pass reproduced the exact pattern that caused that outage.
+	var expiring []secrets.Expiring
 	var expiryUnavailable string
-	expiring, sweepErr := runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.CloudflareBaseURL, d.now)
-	if sweepErr != nil {
-		expiryUnavailable = sweepErr.Error()
+	if driftRun {
+		var sweepErr error
+		expiring, sweepErr = runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.CloudflareBaseURL, d.now)
+		if sweepErr != nil {
+			expiryUnavailable = sweepErr.Error()
+		}
 	}
 
 	rotationJSON, _ := json.Marshal(rotationSummary)
@@ -410,7 +442,7 @@ func toLedgerExpiring(in []secrets.Expiring) []ledger.Expiring {
 // stopped because of state-lock contention -- which is not a failure (§2
 // item 7): no failed/<sha> is filed, HEAD is not advanced past the
 // contended commit, and the returned failure is empty.
-func runCommitLoop(ctx context.Context, d applyDeps, last string) (newLast string, applied, noop int, failure string, credentialsAppliedAt string, lockContended bool) {
+func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure string, credentialsAppliedAt string, lockContended bool) {
 	// The clone, the fetch and the installation token are runApplyPass's job
 	// now, done BEFORE the drift branch so both paths get a repository -- see
 	// the note there. This function is handed a Git that already carries the
@@ -424,7 +456,6 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string) (newLast strin
 		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), "", false
 	}
 
-	cc := &credCache{dir: d.Dir}
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
 		return last, 0, 0, err.Error(), "", false
@@ -744,7 +775,7 @@ func countResourceChanges(planJSON []byte) (int, bool) {
 // {"skipped": "..."} or a RootSummary-shaped success, or {"failed": "..."}),
 // the number of resource changes rotation made, and an error only when
 // rotation itself failed (never for a skip, which is not a failure).
-func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt string) (summary any, changes int, err error) {
+func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt string, cc *credCache) (summary any, changes int, err error) {
 	if credentialsAppliedAt == last && last != "" {
 		return map[string]string{"skipped": "credentials applied this run at " + last}, 0, nil
 	}
@@ -765,7 +796,6 @@ func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt st
 		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, nil
 	}
 
-	cc := &credCache{dir: d.Dir}
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
 		return map[string]string{"failed": err.Error()}, 0, err

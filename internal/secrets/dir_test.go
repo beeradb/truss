@@ -67,9 +67,25 @@ func TestFieldSaysContinueNotStart(t *testing.T) {
 // that a missing mount fails as fast as a pure filesystem check should --
 // nothing here should ever be waiting on a dial.
 func TestFieldNeverFallsBackToAnyRemoteCall(t *testing.T) {
+	// ⚠️ THE POINT IS THAT NOTHING NETWORK-SHAPED CAN BE ADDED TO Dir, not
+	// that Dir has exactly one field. The allowlist is enumerated so a new
+	// field is a deliberate edit here rather than something that slips in --
+	// an http.Client, a URL or a token on this type would be the thing this
+	// guard exists to catch, and it would fail below.
+	allowed := map[string]reflect.Kind{
+		"Root":        reflect.String, // the mount path
+		"OnFieldRead": reflect.Func,   // a test seam; see Dir's doc
+	}
 	typ := reflect.TypeOf(Dir{})
-	if typ.NumField() != 1 || typ.Field(0).Name != "Root" || typ.Field(0).Type.Kind() != reflect.String {
-		t.Fatalf("Dir's shape changed to %v -- if that added anything network-shaped, Field must still never use it", typ)
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		want, ok := allowed[f.Name]
+		if !ok {
+			t.Fatalf("Dir gained a field %q (%v) -- if that is network-shaped, Field must still never use it; if it is not, add it to the allowlist above deliberately", f.Name, f.Type)
+		}
+		if f.Type.Kind() != want {
+			t.Fatalf("Dir.%s changed kind from %v to %v", f.Name, want, f.Type.Kind())
+		}
 	}
 
 	d := Dir{Root: t.TempDir()}

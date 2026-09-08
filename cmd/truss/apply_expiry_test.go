@@ -20,19 +20,40 @@ import (
 // five minutes, ~288 a day. An alert channel nobody reads is where a real
 // digest-gate refusal goes to die, which is why both reviewers called it a
 // security cost rather than noise.
+//
+// ⚠️ THIS IS NOW A DRIFT PASS, AND ORIGINALLY WAS NOT. The expiry sweep now
+// runs only when DriftOnly is set -- the sweep is daily-only, because
+// asking it every five minutes is what rate-limited the 1Password service
+// account on 2026-09-07. A commit-loop pass, which this test used
+// to drive, never reaches the sweep at all any more, so it cannot exercise
+// this behaviour; a digest-gate refusal is also not available as "the
+// unrelated failure reason" because drift never checks a digest. Branch
+// protection failing stands in instead: the sweep sits after, and is
+// unconditional on, the whole gate_ok if/else block, so a gate failure and
+// an unusable sweep coexist in the same alert without either explaining the
+// other -- which is exactly the property this test is pinning.
 func TestAnUnusableExpirySweepIsReportedAndDoesNotFailThePass(t *testing.T) {
-	const sha = "commitsha2"
-
-	deps, _, ft, _ := gateDeps(t, sha, sha)
+	forgeFake := &fakeForge{
+		// Zero-value gates.Protection: every pointer nil, which
+		// CheckProtection refuses -- the pass fails here, before it could
+		// ever reach a commit or a digest.
+	}
+	git := &fakeGit{HasDirFn: func(string) bool { return false }}
+	newTofu := func(env []string) tofuRunner { return &fakeTofu{} }
+	deps, _, ft := buildTestDeps(t, forgeFake, git, newTofu)
+	deps.Cfg.DriftOnly = true
 	// The vault is production-shaped (items, none with an expires), so the
 	// sweep genuinely cannot report -- see productionShapedVault.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := runApplyPass(ctx, deps, sha)
+	result := runApplyPass(ctx, deps, "headsha1")
 
-	// The pass refuses at the digest gate (no digest seeded here), and that
-	// is the only reason it fails: the sweep must not have contributed.
+	// The pass refuses at the branch-protection gate, and that is the only
+	// reason it fails: the sweep must not have contributed.
+	if !strings.Contains(result.failure, "branch protection") {
+		t.Fatalf("result.failure = %q, want a branch-protection refusal", result.failure)
+	}
 	if strings.Contains(result.failure, "expiry") {
 		t.Errorf("result.failure names the expiry sweep, which must not fail the pass: %q", result.failure)
 	}
@@ -52,15 +73,26 @@ func TestAnUnusableExpirySweepIsReportedAndDoesNotFailThePass(t *testing.T) {
 // TestACleanPassStaysCleanWithAnUnusableSweep is the half that matters most:
 // with the vault shaped as production is today, a pass that has nothing else
 // wrong with it exits 0 and does not send FAILED.
+//
+// ⚠️ ALSO NOW A DRIFT PASS -- see the sibling test above for why the sweep
+// can no longer be reached from a commit-loop pass. A clean drift pass needs
+// no digest at all (drift never checks one): compliant branch protection, a
+// successful clone, and rotation/drift each skipping cleanly (no
+// credentials or platform/projects root at HEAD, via HasDirFn returning
+// false) is a clean pass on its own.
 func TestACleanPassStaysCleanWithAnUnusableSweep(t *testing.T) {
-	const sha = "commitsha2"
+	const head = "headsha1"
 
-	deps, fl, ft, _ := gateDeps(t, sha, sha)
-	fl.put("digests/"+sha+"/"+gateSlug+".digest", []byte(ourDigest(t)))
+	forgeFake := compliantCommitGate("alice", head, head)
+	forgeFake.ProtectionResult = compliantGatesProtection()
+	git := &fakeGit{HasDirFn: func(string) bool { return false }}
+	tofu := &fakeTofu{}
+	deps, _, ft := buildTestDeps(t, forgeFake, git, func(env []string) tofuRunner { return tofu })
+	deps.Cfg.DriftOnly = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	result := runApplyPass(ctx, deps, sha)
+	result := runApplyPass(ctx, deps, head)
 
 	if result.failure != "" {
 		t.Fatalf("result.failure = %q, want empty -- an unusable expiry sweep is not a failed pass", result.failure)
@@ -75,16 +107,16 @@ func TestACleanPassStaysCleanWithAnUnusableSweep(t *testing.T) {
 }
 
 // TestADriftRunStillClonesTheRepository covers a regression that shipped and
-// that NOTHING in this suite or in internal/parity could see: EnsureClone and
-// Fetch lived inside runCommitLoop, which a drift run skips entirely, so a
-// drift-only pass never cloned and every checkout it then attempted failed
-// with "chdir /work/repo: no such file or directory".
+// that NOTHING in this suite could see: EnsureClone and Fetch lived inside
+// runCommitLoop, which a drift run skips entirely, so a drift-only pass
+// never cloned and every checkout it then attempted failed with
+// "chdir /work/repo: no such file or directory".
 //
-// apply.sh calls ensure_workdir unconditionally at top level (apply.sh:
-// 207-212), before its own DRIFT_ONLY branch, which is why the bash's drift
-// job works.
+// Preparing the workdir is unconditional and belongs above the DRIFT_ONLY
+// branch, because every pass that gets past the gate goes on to check out a
+// ref.
 //
-// ⚠️ IT WAS FOUND BY THE FIRST SHADOW RUN AGAINST THE REAL CLUSTER, not by a
+// ⚠️ IT WAS FOUND BY THE FIRST RUN AGAINST THE REAL CLUSTER, not by a
 // test, and the reason is worth keeping: every fake git succeeds whether or
 // not a clone happened, so "check out a ref in a directory that does not
 // exist" has no counterpart in a fake. This test therefore asserts the CALL,
@@ -116,13 +148,16 @@ func TestADriftRunStillClonesTheRepository(t *testing.T) {
 }
 
 // TestEveryTofuRunCarriesTheGitHubAppIdentity covers the third defect the
-// shadow found: buildBaseEnv returned only PATH and HOME, so the `github`
-// provider's app_auth block had none of its required arguments and tofu
-// refused at init with "Missing required argument ... pem_file / id /
-// installation_id". Every root using that provider failed -- the second
-// shadow run reported "drift UNKNOWN for: platform, projects/recipes".
+// trial runs against production found: buildBaseEnv returned only PATH and
+// HOME, so the `github` provider's app_auth block had none of its required
+// arguments and tofu refused at init with "Missing required argument ...
+// pem_file / id / installation_id". Every root using that provider failed --
+// the second trial run reported "drift UNKNOWN for: platform,
+// projects/recipes".
 //
-// apply.sh:147 exports all four (GH_TOKEN plus the three GITHUB_APP_*).
+// All four are needed: GH_TOKEN plus the three GITHUB_APP_*. Because the
+// child environment is constructed rather than inherited, a variable a
+// provider needs and this function does not name simply is not there.
 //
 // ⚠️ GITHUB_APP_PEM_FILE IS THE KEY'S CONTENTS, NOT A PATH, despite the name.
 func TestEveryTofuRunCarriesTheGitHubAppIdentity(t *testing.T) {
@@ -166,8 +201,8 @@ func TestBuildBaseEnvRefusesAMirrorMissingTheApp(t *testing.T) {
 	}
 }
 
-// TestTofuGetsTheOnePasswordServiceAccountToken covers the fourth
-// environment-parity gap, found by the first non-drift trial against
+// TestTofuGetsTheOnePasswordServiceAccountToken covers the fourth gap in
+// the constructed environment, found by the first non-drift trial against
 // production. The credentials root declares a `onepassword` provider, which
 // reads its credentials from the environment; without this tofu fails at plan
 // with "Invalid provider configuration ... Service Account ... should be set",
@@ -202,7 +237,8 @@ func TestTofuGetsTheOnePasswordServiceAccountToken(t *testing.T) {
 	if got == "" {
 		t.Fatal("tofu's environment has no OP_SERVICE_ACCOUNT_TOKEN; the credentials root cannot plan")
 	}
-	// Trailing newline stripped, matching the bash's $(cat ...).
+	// Trailing newline stripped: a token file written by an editor or by
+	// `echo` ends in one, and it is not part of the credential.
 	if got != "op-fixture-value" {
 		t.Errorf("OP_SERVICE_ACCOUNT_TOKEN = %q, want the file's contents with the trailing newline stripped", got)
 	}
