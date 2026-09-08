@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +61,15 @@ func TestAgainstTheRealBucket(t *testing.T) {
 	awsEnv := append(os.Environ(),
 		"AWS_ACCESS_KEY_ID="+accessKeyID,
 		"AWS_SECRET_ACCESS_KEY="+secretAccessKey,
+		// The AWS CLI v2 sends x-amz-checksum-* headers on every upload by
+		// default. Google's S3-compatible XML API rejects them with
+		// "SignatureDoesNotMatch: Invalid argument", so without these two the
+		// CLI cannot write to this endpoint at all and the parity direction
+		// that uses it fails for a reason that has nothing to do with our
+		// signing. Measured in-cluster 2026-09-08: 3/3 aws-writes subtests
+		// failed this way, while all 3 go-writes subtests passed.
+		"AWS_REQUEST_CHECKSUM_CALCULATION=when_required",
+		"AWS_RESPONSE_CHECKSUM_VALIDATION=when_required",
 	)
 
 	bodies := map[string][]byte{
@@ -91,6 +103,54 @@ func TestAgainstTheRealBucket(t *testing.T) {
 			}
 		})
 	}
+
+	// Not a feature test -- a standing measurement. The ledger deliberately
+	// offers no create-if-absent (see store.go) because this endpoint accepts
+	// "If-None-Match: *" and ignores it. If that ever changes, this fails and
+	// the decision is worth revisiting; until then it stops anyone concluding
+	// from the S3 docs that the precondition is available here.
+	t.Run("if-none-match/is-accepted-and-ignored", func(t *testing.T) {
+		key := fmt.Sprintf("%s/parity/ifnonematch-%s", prefix, randomHex(t))
+		ctx := context.Background()
+		hdr := map[string]string{"If-None-Match": "*"}
+		r1, err := store.do(ctx, "PUT", key, []byte("first"), hdr)
+		if err != nil {
+			t.Fatalf("first conditional write: %v", err)
+		}
+		r1.Body.Close()
+		r2, err := store.do(ctx, "PUT", key, []byte("second"), hdr)
+		if err != nil {
+			t.Fatalf("second conditional write: %v", err)
+		}
+		defer r2.Body.Close()
+		if r2.StatusCode == http.StatusPreconditionFailed || r2.StatusCode == http.StatusConflict {
+			t.Fatalf("the endpoint now ENFORCES If-None-Match (status %d) -- it did not on 2026-09-08. A real create-if-absent is available again; revisit store.go", r2.StatusCode)
+		}
+		got, err := store.Get(ctx, key)
+		if err != nil {
+			t.Fatalf("Store.Get: %v", err)
+		}
+		if string(got) != "second" {
+			t.Fatalf("second write left %q; expected the endpoint to have overwritten with \"second\"", got)
+		}
+	})
+
+	// x-goog-if-generation-match is the native create-if-absent and is
+	// unreachable from here: SigV4 forces x-amz-date and x-amz-content-sha256
+	// onto every request, and the endpoint refuses any request carrying both
+	// header families.
+	t.Run("x-goog-header/cannot-be-mixed-with-sigv4", func(t *testing.T) {
+		key := fmt.Sprintf("%s/parity/xgoog-%s", prefix, randomHex(t))
+		resp, err := store.do(context.Background(), "PUT", key, []byte("x"), map[string]string{"x-goog-if-generation-match": "0"})
+		if err != nil {
+			t.Fatalf("conditional write: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "ExcessHeaderValues") {
+			t.Fatalf("x-goog-if-generation-match now returns %d %q -- on 2026-09-08 it was 400 ExcessHeaderValues. Revisit store.go", resp.StatusCode, body)
+		}
+	})
 }
 
 func requireEnv(t *testing.T, name string) string {

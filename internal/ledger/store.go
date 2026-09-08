@@ -94,7 +94,7 @@ func (s *Store) do(ctx context.Context, method, key string, body []byte, extraHe
 		return nil, err
 	}
 
-	sig := sign(s.cfg, s.now(), method, host, u.Path, body)
+	sig := sign(s.cfg, s.now(), method, host, u.Path, body, extraHeaders)
 
 	var bodyReader io.Reader
 	if body != nil {
@@ -177,32 +177,23 @@ func (s *Store) Put(ctx context.Context, key string, body []byte) error {
 	return newRequestError("put", key, resp.StatusCode, respBody)
 }
 
-// PutIfAbsent writes body to key only if key does not already exist,
-// signalled to the server with "If-None-Match: *" on every call -- there is
-// no code path that sends this request without the precondition, which is
-// what makes it safe to call PutIfAbsent instead of checking-then-Put and
-// racing another writer. It returns ErrExists when the server reports the
-// precondition failed (412) or the key already exists (409).
+// There is deliberately no PutIfAbsent, and its absence is a measurement
+// rather than an omission. Measured against the real bucket in-cluster on
+// 2026-09-08: "If-None-Match: *" is accepted and then IGNORED -- two
+// successive writes to the same key both returned 200 and the second
+// overwrote the first -- so a create-if-absent built on it would be a guard
+// that silently never guards. The native alternative is unreachable under
+// this client's auth: "x-goog-if-generation-match: 0" is refused with
 //
-// ⚠️ Whether this endpoint honours a create-if-absent precondition under
-// HMAC auth is unverified (§8 of the port plan) -- it could not be settled
-// without credentials that live in a cluster this package was written
-// outside of. TestAgainstTheRealBucket is where that gets answered; this
-// implementation is what the spec calls for, not yet proven against the
-// real bucket.
-func (s *Store) PutIfAbsent(ctx context.Context, key string, body []byte) error {
-	resp, err := s.do(ctx, http.MethodPut, key, body, map[string]string{"If-None-Match": "*"})
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusConflict {
-		return fmt.Errorf("ledger: put-if-absent %q: %w", key, ErrExists)
-	}
-	return newRequestError("put-if-absent", key, resp.StatusCode, respBody)
-}
+//	<Code>ExcessHeaderValues</Code>
+//	Requests cannot specify both x-amz and x-goog headers.
+//
+// and SigV4 obliges every request here to carry x-amz-date and
+// x-amz-content-sha256. Signing the x-goog header does not help; the refusal
+// is about mixing the two families, not about the signature.
+//
+// So this endpoint offers no create-if-absent primitive to an S3-compatible
+// client, and callers must not be handed an API that implies otherwise.
+// Whatever needs mutual exclusion takes it from the layer that actually has
+// it -- the applier runs one pass at a time and OpenTofu holds a state lock
+// -- not from a header this store cannot enforce.

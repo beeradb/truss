@@ -994,15 +994,15 @@ should guess them and nobody needs to decide them.
 - **The ledger endpoint's addressing style** (path versus virtual-host), the **region string**
   to sign with — nothing in `applier/`, `bootstrap/` or the manifests sets `AWS_REGION`, so
   the working production requests were signed with whatever botocore defaults to — and
-  whether the endpoint honours a **create-if-absent precondition** under HMAC auth. The last
-  gates `PutIfAbsent` and any move of `publish-plan-digest` off `gcloud`.
+  whether the endpoint honours a **create-if-absent precondition** under HMAC auth. All three
+  are now answered below.
 - **Which jq version produced the digests currently in the bucket**, and whether CI's and the
   image's are the same today. Decision 7 removes the question going forward; it still needs
   answering for digests already recorded against commits that have not applied.
 
 ### Measured 2026-09-08
 
-Two of the three are now settled, from the live signing path in the production pod:
+All three are now settled, from the live signing path in the production pod:
 
 | | |
 | --- | --- |
@@ -1016,13 +1016,38 @@ so every working production request was signed with that scope. Google does not 
 region says, but the signature covers it, so it must match. Do not "fix" it to a real GCP
 region.
 
-**The create-if-absent precondition is still unverified, and the CLI cannot verify it.**
-`aws s3api put-object --if-none-match "*"` fails with `SignatureDoesNotMatch … Invalid
-argument` — which is the **checksum-trailer** rejection, not the precondition. Passing that
-flag puts the CLI on a code path that adds trailer headers, and the endpoint refuses the
-request before evaluating `If-None-Match` at all. Only a signer that omits checksum headers
-can ask the question, which is `internal/ledger` itself: `TestAgainstTheRealBucket`, run
-in-cluster against a scratch prefix.
+### The create-if-absent precondition: SETTLED, and the answer is no
+
+Measured in-cluster 2026-09-08 by `TestAgainstTheRealBucket` against a scratch prefix, which
+is the only instrument that could ask: `aws s3api put-object --if-none-match "*"` puts the CLI
+on a trailer-adding code path and the endpoint refuses the request before evaluating the
+precondition at all, so the CLI cannot answer this question about itself.
+
+| Attempt | Result |
+| --- | --- |
+| `If-None-Match: *` | **200, then 200** — accepted and ignored; the second write overwrote the first |
+| `x-goog-if-generation-match: 0`, unsigned | 400 `ExcessHeaderValues` |
+| `x-goog-if-generation-match: 0`, **signed** | 400 `ExcessHeaderValues` |
+
+> `Requests cannot specify both x-amz and x-goog headers.`
+
+SigV4 obliges every request to carry `x-amz-date` and `x-amz-content-sha256`, so the native
+Google precondition can never be combined with HMAC auth here. Signing the header does not
+help — the refusal is about mixing the two families, not about the signature.
+
+⚠️ **`PutIfAbsent` was therefore DELETED rather than shipped.** It had no caller, and its name
+promised an atomicity the endpoint silently declines to provide: a guard that never guards,
+which is worse than no guard because it stops anyone looking for the real one. Whatever needs
+mutual exclusion takes it from the layer that has it — one applier pass at a time, plus
+OpenTofu's state lock. `ErrExists` went with it.
+
+Both measurements are now **assertions** in `TestAgainstTheRealBucket`, worded to fail loudly
+if Google ever starts enforcing either, since that would be worth revisiting.
+
+⚠️ **Fixing this exposed a second thing worth keeping.** `sign` now covers **every header the
+client sends**, not the fixed three. A header outside the signature is one an intermediary can
+add, drop or rewrite without invalidating the request, so the server may act on something the
+signature never vouched for. There is no code path left that sends an unsigned header.
 
 That result also confirms the trailer hazard is **live today** rather than a note from
 2026-09-06, which is why the fake server in that package rejects trailer headers on sight.

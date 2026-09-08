@@ -113,12 +113,10 @@ func (f *fakeBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.lastBody = append([]byte(nil), body...)
-		_, exists := f.objects[key]
-		if r.Header.Get("If-None-Match") == "*" && exists {
-			f.mu.Unlock()
-			xmlError(w, http.StatusPreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold.")
-			return
-		}
+		// No conditional-write handling, deliberately: the real endpoint
+		// accepts "If-None-Match: *" and then overwrites anyway (measured
+		// in-cluster 2026-09-08). A fake that enforced the precondition
+		// would be stricter than production and would hide exactly that.
 		f.objects[key] = append([]byte(nil), body...)
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusOK)

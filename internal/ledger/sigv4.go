@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -33,34 +34,67 @@ func signingKey(secret, dateStamp, region, service string) []byte {
 	return hmacSHA256(kService, []byte("aws4_request"))
 }
 
-// signedRequest carries exactly the headers store.go needs to attach to the
-// *http.Request: the three that are part of the signature (Host,
-// X-Amz-Content-Sha256, X-Amz-Date) plus Authorization. Anything sent that
-// is not part of the signature -- If-None-Match on PutIfAbsent, say -- is
-// the caller's to add.
+// signedRequest carries the headers store.go needs to attach to the
+// *http.Request: Authorization, plus the two it must echo verbatim because
+// they are inside the signature. Every header this client sends is signed
+// -- see sign.
 type signedRequest struct {
 	amzDate       string // 20060102T150405Z
 	payloadHash   string
 	authorization string
 }
 
-// sign builds the exact three signed headers measured against the real
-// bucket on 2026-09-08 -- host, x-amz-content-sha256, x-amz-date, in that
-// order, which is also their sort order so no special-casing is needed to
-// produce SignedHeaders. No other header is folded into the signature:
-// nothing here adds x-amz-checksum-*, x-amz-sdk-checksum-algorithm or an
-// x-amz-trailer, which is the whole point (§4.2 "Checksums off unless
+// sign covers host, x-amz-content-sha256 and x-amz-date -- always -- plus
+// every header in extra. Signing everything the client sends is deliberate
+// and is the stronger of the two available rules: a header that reaches the
+// server but sits outside the signature is a header an intermediary can add,
+// drop or rewrite without invalidating the request, so the server may act on
+// something the signature never vouched for. There is no code path here that
+// sends an unsigned header.
+//
+// It is also load-bearing rather than merely tidy. Google's XML API rejects
+// an x-goog-* header that is not in SignedHeaders with a bare 400: measured
+// in-cluster 2026-09-08, x-goog-if-generation-match sent unsigned returned
+// 400 on every attempt, and signed it works. That header is how
+// create-if-absent is expressed against this endpoint, because the same
+// measurement showed If-None-Match: * being accepted and then ignored --
+// both writes 200, the second overwriting the first.
+//
+// Still deliberately absent, always: x-amz-checksum-*,
+// x-amz-sdk-checksum-algorithm and x-amz-trailer (§4.2 "Checksums off unless
 // required").
-func sign(cfg Config, now time.Time, method, host, canonicalURI string, body []byte) signedRequest {
+func sign(cfg Config, now time.Time, method, host, canonicalURI string, body []byte, extra map[string]string) signedRequest {
 	amzDate := now.UTC().Format("20060102T150405Z")
 	dateStamp := now.UTC().Format("20060102")
 	payloadHash := hashHex(body)
 
-	canonicalHeaders := fmt.Sprintf(
-		"host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-		host, payloadHash, amzDate,
-	)
-	const signedHeaders = "host;x-amz-content-sha256;x-amz-date"
+	headers := map[string]string{
+		"host":                 host,
+		"x-amz-content-sha256": payloadHash,
+		"x-amz-date":           amzDate,
+	}
+	for k, v := range extra {
+		headers[strings.ToLower(k)] = v
+	}
+	names := make([]string, 0, len(headers))
+	for k := range headers {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	var canonical strings.Builder
+	for _, n := range names {
+		// SigV4 canonicalises a header value by trimming it and collapsing
+		// runs of spaces. Nothing here sends a value with either, but doing
+		// it unconditionally means a caller adding one later cannot silently
+		// produce a signature the server computes differently.
+		canonical.WriteString(n)
+		canonical.WriteByte(':')
+		canonical.WriteString(collapseSpaces(headers[n]))
+		canonical.WriteByte('\n')
+	}
+	canonicalHeaders := canonical.String()
+	signedHeaders := strings.Join(names, ";")
 
 	canonicalRequest := strings.Join([]string{
 		method,
@@ -129,4 +163,12 @@ func isUnreserved(c byte) bool {
 	default:
 		return false
 	}
+}
+
+// collapseSpaces applies SigV4's header-value normalisation: leading and
+// trailing whitespace removed, and any internal run of spaces collapsed to
+// one. A server that normalises and a client that does not disagree on the
+// signature, and the error it produces names the key rather than the space.
+func collapseSpaces(v string) string {
+	return strings.Join(strings.Fields(v), " ")
 }

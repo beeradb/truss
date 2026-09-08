@@ -14,9 +14,6 @@ import (
 // look" (§3.2).
 var ErrNotFound = errors.New("ledger: key does not exist")
 
-// ErrExists is returned by PutIfAbsent when the key is already present.
-var ErrExists = errors.New("ledger: key already exists")
-
 // RequestError is a request that reached the server and got an answer other
 // than success or "not found". It names the HTTP status and, where the
 // server sent one, the S3 error code and message -- so "the bucket refused

@@ -251,35 +251,6 @@ func TestStoreHasNoDeleteOperation(t *testing.T) {
 	}
 }
 
-// TestPutIfAbsentRefusesToOverwrite: the precondition is sent on every
-// call, so a second PutIfAbsent for the same key never replaces what is
-// there, and returns ErrExists rather than a bare failure.
-func TestPutIfAbsentRefusesToOverwrite(t *testing.T) {
-	store, fb, srv := newFakeServerStore(t, PathStyle)
-	defer srv.Close()
-	ctx := context.Background()
-
-	if err := store.PutIfAbsent(ctx, "applier/plan-digest/headsha1/platform.digest", []byte("first")); err != nil {
-		t.Fatalf("first PutIfAbsent: %v", err)
-	}
-
-	err := store.PutIfAbsent(ctx, "applier/plan-digest/headsha1/platform.digest", []byte("second"))
-	if !errors.Is(err, ErrExists) {
-		t.Fatalf("second PutIfAbsent = %v, want errors.Is(err, ErrExists)", err)
-	}
-
-	fb.mu.Lock()
-	stored := fb.objects["applier/plan-digest/headsha1/platform.digest"]
-	fb.mu.Unlock()
-	if string(stored) != "first" {
-		t.Errorf("PutIfAbsent overwrote the existing object: now %q", stored)
-	}
-
-	if fb.lastReq.Header.Get("If-None-Match") != "*" {
-		t.Errorf("PutIfAbsent did not send If-None-Match: *")
-	}
-}
-
 // TestAddressingStyleControlsTheRequestURL confirms the two addressing
 // styles actually produce different requests -- PathStyle folds the bucket
 // into the path, VirtualHostStyle folds it into the Host -- since Config
