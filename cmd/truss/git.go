@@ -1,0 +1,179 @@
+// git.go drives the git binary that backs root discovery and checkout.
+// docs/port-plan.md §4.4 specifies a Git type living in internal/repo, but
+// the package as actually built (internal/repo/roots.go) contains only the
+// pure TouchedRoots function -- no Git struct exists anywhere in the tree.
+// Rather than guess at, or silently add, an exported API to a package the
+// task described as already built and pushed, the git driver lives here in
+// cmd/truss instead: it is only ever used by the apply pass, behind the
+// gitDriver interface below so tests can fake it. See the final report for
+// this as a named deviation.
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+// gitDriver is the subset of git operations the apply pass needs, matching
+// docs/port-plan.md §4.4's Git type shape. A local interface rather than a
+// concrete dependency on execGit so tests exercise the pass without a real
+// git binary or network.
+type gitDriver interface {
+	EnsureClone(ctx context.Context, repoURL, token string) error
+	Fetch(ctx context.Context, remote, branch, token string) error
+	Commits(ctx context.Context, from, to string) ([]string, error)
+	ChangedFiles(ctx context.Context, sha string) ([]string, error)
+	TreeRoots(ctx context.Context, sha string) ([]string, error)
+	Checkout(ctx context.Context, ref string) error
+	HasDir(root string) bool
+}
+
+// execGit drives the real git binary. The installation token is passed in
+// per call, as a parameter, rather than held as state -- the apply pass
+// mints it lazily (§2 item 12) and this keeps execGit itself stateless. It
+// is NEVER placed in argv or in a URL passed as an argument (§3.5, §2's "no
+// credential ever reaches an error string" spirit extended to argv, which
+// `ps` on the same box can read as easily as a log): it reaches git only
+// via GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0 in the child's environment,
+// git's own mechanism (since 2.31) for setting config without a file or a
+// command-line flag.
+type execGit struct {
+	Bin, Dir string
+	Stderr   io.Writer
+}
+
+var treeRootPattern = regexp.MustCompile(`^(platform|projects/[^/]+)$`)
+
+func (g execGit) EnsureClone(ctx context.Context, repoURL, token string) error {
+	if g.hasGitDir() {
+		return nil
+	}
+	args := []string{"clone", "--filter=blob:none", repoURL, g.Dir}
+	// clone has no repo to run -C into yet, so it runs from "" (the
+	// current directory) with an explicit target.
+	_, err := g.run(ctx, "", token, args)
+	return err
+}
+
+func (g execGit) Fetch(ctx context.Context, remote, branch, token string) error {
+	_, err := g.run(ctx, g.Dir, token, []string{"-C", g.Dir, "fetch", remote, branch})
+	return err
+}
+
+func (g execGit) Commits(ctx context.Context, from, to string) ([]string, error) {
+	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "rev-list", "--reverse", "--first-parent", from + ".." + to})
+	if err != nil {
+		return nil, fmt.Errorf("git rev-list %s..%s: %w", from, to, err)
+	}
+	return splitLines(out), nil
+}
+
+func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error) {
+	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "diff", "--name-only", sha + "^", sha})
+	if err != nil {
+		return nil, fmt.Errorf("git diff --name-only %s^ %s: %w", sha, sha, err)
+	}
+	return splitLines(out), nil
+}
+
+// TreeRoots lists the "platform" and "projects/<name>" directories present
+// in sha's own tree, reproducing derive_touched_roots' shared-input branch
+// (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
+// '^(platform|projects/[^/]+)$'`), filter included.
+func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
+	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "ls-tree", "-d", "--name-only", sha, "--", "platform", "projects/"})
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree -d %s: %w", sha, err)
+	}
+	var roots []string
+	for _, line := range splitLines(out) {
+		if treeRootPattern.MatchString(line) {
+			roots = append(roots, line)
+		}
+	}
+	return roots, nil
+}
+
+func (g execGit) Checkout(ctx context.Context, ref string) error {
+	_, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "checkout", "--quiet", ref})
+	if err != nil {
+		return fmt.Errorf("git checkout %s: %w", ref, err)
+	}
+	return nil
+}
+
+func (g execGit) HasDir(root string) bool {
+	info, err := os.Stat(filepath.Join(g.Dir, root))
+	return err == nil && info.IsDir()
+}
+
+func (g execGit) hasGitDir() bool {
+	info, err := os.Stat(filepath.Join(g.Dir, ".git"))
+	return err == nil && info.IsDir()
+}
+
+// run executes git with args, sending combined output to g.Stderr (never
+// this process's real stdout -- §2 item 17's discipline applies here too:
+// nothing about a git call belongs on a channel a caller might parse as
+// JSON). A non-empty token attaches the installation token via env, for
+// the two operations (clone, fetch) that touch the network.
+func (g execGit) run(ctx context.Context, dir string, token string, args []string) (string, error) {
+	bin := g.Bin
+	if bin == "" {
+		bin = "git"
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = os.Environ()
+	if token != "" {
+		cmd.Env = append(cmd.Env,
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http.extraheader",
+			"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(token),
+		)
+	}
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	runErr := cmd.Run()
+	out := buf.String()
+	if g.Stderr != nil {
+		_, _ = g.Stderr.Write(buf.Bytes())
+	}
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			return out, fmt.Errorf("exit %d", exitErr.ExitCode())
+		}
+		return out, runErr
+	}
+	return out, nil
+}
+
+// basicAuth builds the same "x-access-token:<token>" Basic credential the
+// bash embedded in the clone URL (apply.sh:373); here it travels as a
+// header value in the child's environment, never in argv or in the URL.
+func basicAuth(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+}
+
+func splitLines(s string) []string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}

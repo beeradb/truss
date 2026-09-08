@@ -1,0 +1,91 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+)
+
+// subcommands is the documented set from docs/port-plan.md §4.9, exactly.
+// TestSubcommandsAreExactlyTheDocumentedSet reads this slice directly rather
+// than re-deriving it, so adding a subcommand here is the one place that
+// needs to change for that test to see it.
+var subcommands = []string{
+	"ledger",
+	"plan-digest",
+	"token",
+	"gate",
+	"expiry",
+	"notify",
+	"apply",
+}
+
+func isSubcommand(name string) bool {
+	for _, s := range subcommands {
+		if s == name {
+			return true
+		}
+	}
+	return false
+}
+
+// usage is printed verbatim on stderr for an empty or unrecognised
+// subcommand. It names every subcommand and nothing else -- in particular
+// never any part of the environment or the arguments it was called with,
+// which is exactly the thing TestNoSubcommandPrintsASecret exists to catch
+// a regression of.
+const usage = `usage: truss <subcommand> [args]
+
+subcommands:
+  ledger get <key>     print a ledger object to stdout (exit 2 if absent)
+  ledger put <key>     write stdin to a ledger key
+  plan-digest           read a tofu plan (stdin) and print its digest
+  token                 mint a GitHub App installation token
+  gate protection       check main's branch protection
+  gate commit <sha>     check a commit's PR approval and merge provenance
+  expiry                sweep credential expiry
+  notify                compose and send a status report (stdin: JSON)
+  apply                 run the applier pass
+`
+
+// run is the binary's only entry point besides main, and main's only job
+// is to call this and hand its result to os.Exit -- so every subcommand's
+// logic is reachable, and testable, without ending the test process.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runEnv(context.Background(), args, os.Getenv, stdin, stdout, stderr)
+}
+
+// runEnv is run's real body, taking an explicit getenv so tests can supply
+// a fake environment without mutating the process's real one.
+func runEnv(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 || !isSubcommand(args[0]) {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "ledger":
+		return cmdLedger(ctx, rest, getenv, stdin, stdout, stderr)
+	case "plan-digest":
+		return cmdPlanDigest(rest, stdin, stdout, stderr)
+	case "token":
+		return cmdToken(ctx, rest, getenv, stdout, stderr)
+	case "gate":
+		return cmdGate(ctx, rest, getenv, stdout, stderr)
+	case "expiry":
+		return cmdExpiry(ctx, rest, getenv, stdout, stderr)
+	case "notify":
+		return cmdNotify(ctx, rest, getenv, stdin, stdout, stderr)
+	case "apply":
+		return cmdApply(ctx, rest, getenv, stdout, stderr)
+	default:
+		// Unreachable: isSubcommand already filtered args[0]. Kept as an
+		// explicit refusal rather than a panic so a future subcommand
+		// added to the slice above but not to this switch fails loudly
+		// instead of silently falling through.
+		fmt.Fprintf(stderr, "truss: %q is documented but not wired to a handler\n", sub)
+		return 2
+	}
+}
