@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Turns main's branch protection on, off, or shows it.
+#
+# The applier refuses to run at all unless every setting below is exactly as
+# stated -- it reads them back from the API on every pass rather than trusting
+# that somebody set them once. So protection is not decoration here: turning it
+# off stops the applier, and turning it back on is what starts it again.
+#
+# ⚠️ THERE IS NO BREAK-GLASS, WHICH IS WHY `off` EXISTS. With enforce_admins on
+# and force pushes refused, the owner is bound by the same rules as everyone
+# else and a stuck gate has no override. Toggling protection off, fixing the
+# thing, and toggling it back on IS the documented escape hatch. That is a
+# deliberate trade and it is only safe because it takes one command and leaves
+# a trail in the repository's audit log.
+#
+# ⚠️ THE PAYLOAD BELOW IS THE ONE COPY. internal/gates decides what is
+# acceptable; this sets it; and TestProtectionScriptSatisfiesTheGate feeds this
+# exact JSON through that gate and fails if they ever disagree. Do not restate
+# these values anywhere else -- a second copy is the one that goes stale.
+set -euo pipefail
+
+REPO="${TRUSS_REPO:-beeradb/truss}"
+BRANCH="${TRUSS_BRANCH:-main}"
+
+# Keep in step with config.Config.RequiredCheck, which is "plan".
+read -r -d '' PAYLOAD <<'JSON' || true
+{
+  "required_status_checks": { "strict": true, "contexts": ["plan"] },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "require_code_owner_reviews": true,
+    "dismiss_stale_reviews": true,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+
+usage() { echo "usage: $0 {on|off|show|payload}" >&2; exit 2; }
+[ $# -eq 1 ] || usage
+
+case "$1" in
+  # `payload` prints the JSON and touches nothing. It is what the Go test
+  # reads, so the test never has to hardcode a second copy of these values.
+  payload) printf '%s\n' "$PAYLOAD" ;;
+
+  on)
+    printf '%s' "$PAYLOAD" |
+      gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" --input - >/dev/null
+    echo "protection: on ($REPO/$BRANCH)"
+    ;;
+
+  off)
+    gh api -X DELETE "repos/$REPO/branches/$BRANCH/protection" >/dev/null
+    echo "protection: OFF ($REPO/$BRANCH) -- the applier will refuse every commit until this is back on"
+    ;;
+
+  show)
+    # A 404 here is a real answer -- "not protected" -- not an error, so it is
+    # reported as such rather than dumping GitHub's message and exiting non-zero.
+    if out=$(gh api "repos/$REPO/branches/$BRANCH/protection" 2>/dev/null); then
+      printf '%s\n' "$out"
+    else
+      echo "protection: none on $REPO/$BRANCH"
+      exit 1
+    fi
+    ;;
+
+  *) usage ;;
+esac

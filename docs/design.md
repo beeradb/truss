@@ -69,13 +69,13 @@ sequenceDiagram
     loop every pass
         AP->>GH: read branch protection, then gate every new commit on main
         AP->>Cloud: plan each commit's roots, verify the digest, apply — see "The gates" below
-        AP->>V: re-plan the credentials root (rotation, if due) · sweep every credential's expiry
         AP->>ST: record what happened, write the heartbeat
         AP-->>U: alert — success, a refusal, or "nothing to do"
     end
     loop once a day
         AP->>Cloud: plan EVERY root, apply nothing (drift)
-        AP-->>U: which roots differ from the code
+        AP->>V: re-plan the credentials root (rotation, if due) · sweep every credential's expiry
+        AP-->>U: which roots differ from the code · anything expiring
     end
 ```
 
@@ -138,15 +138,16 @@ flowchart TD
     G2 -- no --> STOP
     G2 -- yes --> AP2[apply · record applied,<br/>advance HEAD] --> C
     STOP --> ROT
-    ROT[re-plan credentials at HEAD,<br/>rotate if a boundary passed<br/>skipped if protection failed] --> TAIL
-    TAIL[sweep every credential's expiry] --> HB[write the heartbeat,<br/>send the alert] --> E([done])
+    ROT[daily pass only:<br/>re-plan credentials at HEAD, rotate if a boundary passed,<br/>sweep every credential's expiry<br/>skipped if protection failed] --> TAIL
+    TAIL[write the heartbeat,<br/>send the alert] --> E([done])
 ```
 
 Only the very first refusal is a true dead end — no ledger entry to start from
 means there's nothing yet to run a pass against. Every other outcome, whether
 a commit gets refused, fails to apply, or applies cleanly, reaches the same
-tail: the expiry sweep always runs, a heartbeat always gets written, and the
-alert always goes out. Stopping the queue is not the same as going quiet.
+tail: a heartbeat always gets written and the alert always goes out — and on
+the daily pass the rotation check and the expiry sweep run too, whatever the
+queue did. Stopping the queue is not the same as going quiet.
 
 One of those checks is whether the forge is still configured to require
 everything below. The applier reads the settings back from the API and
