@@ -12,3 +12,11 @@ go.work.sum
 .idea/
 .vscode/
 *.swp
+
+# The parity harness's tofu/git shim, if `go build ./...` is run from
+# the repo root: it is a main package, so the binary lands here.
+/fakebin
+
+# The capture plugin is run by pytest from the platform checkout.
+__pycache__/
+*.pyc

@@ -64,6 +64,9 @@ type applyDeps struct {
 	Now         func() time.Time
 	Stderr      io.Writer
 	VaultConfig secrets.KVConfig
+	// CloudflareBaseURL overrides the Cloudflare API host for the expiry
+	// sweep's probe; empty is the real one. See runExpirySweep.
+	CloudflareBaseURL string
 	// PATH and HOME are copied explicitly from the environment cmdApply was
 	// given, so tofu's own child process (Runner.Env, which never inherits
 	// implicitly -- §2 item 9) can still find the tofu binary and its
@@ -146,11 +149,12 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		NewTofu: func(env []string) tofuRunner {
 			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: stderr, Env: env}
 		},
-		Now:         time.Now,
-		Stderr:      stderr,
-		VaultConfig: vcfg,
-		PATH:        getenv("PATH"),
-		HOME:        getenv("HOME"),
+		Now:               time.Now,
+		Stderr:            stderr,
+		VaultConfig:       vcfg,
+		CloudflareBaseURL: getenv("CLOUDFLARE_API_BASE_URL"),
+		PATH:              getenv("PATH"),
+		HOME:              getenv("HOME"),
 	}
 
 	result := runApplyPass(ctx, deps, last)
@@ -255,7 +259,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// credential whose lapse takes the applier down, exactly when the vault
 	// was misbehaving.
 	var expiryUnavailable string
-	expiring, sweepErr := runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.now)
+	expiring, sweepErr := runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.CloudflareBaseURL, d.now)
 	if sweepErr != nil {
 		expiryUnavailable = sweepErr.Error()
 	}

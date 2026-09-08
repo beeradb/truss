@@ -1,0 +1,106 @@
+{
+  "bash": {
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogcm90YXRpb24gb2YgY3JlZGVudGlhbHMgYXQgYmFzZTogdG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIChhcHBsaWVkPTAgbm9vcD0wKQ==",
+    "bucket_after": {
+      "applied/HEAD": "YmFzZQ==",
+      "failed/rotation-<ts>": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIiwKICAiYXQiOiAiMjAyNi0wOS0wOFQwNDoyMzo1MloiCn0=",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NTNaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJyb3RhdGlvbiBvZiBjcmVkZW50aWFscyBhdCBiYXNlOiB0b2Z1IGFwcGx5IGZhaWxlZCBmb3IgY3JlZGVudGlhbHMiLAogICJyb3RhdGlvbiI6IHsKICAgICJmYWlsZWQiOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIgogIH0sCiAgImRyaWZ0IjogewogICAgInNraXBwZWQiOiAibm90IGEgZHJpZnQgcnVuIgogIH0sCiAgImV4cGlyaW5nIjogW10KfQ=="
+    },
+    "exit_code": 1
+  },
+  "bash_test": "test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
+  "bucket_before": {
+    "applied/HEAD": "YmFzZQ=="
+  },
+  "env": {
+    "APPROVER": "alice",
+    "HEARTBEAT_KEY": "heartbeat/applier.json",
+    "LEDGER_APPLIED_PREFIX": "applied",
+    "LEDGER_BUCKET": "state-bucket",
+    "LEDGER_FAILED_PREFIX": "failed",
+    "LEDGER_HEAD_KEY": "applied/HEAD",
+    "PLAN_DIGEST_PREFIX": "plans",
+    "REPO": "acme/platform"
+  },
+  "fixtures": {
+    "branch_protection": {
+      "allow_force_pushes": {
+        "enabled": false
+      },
+      "enforce_admins": {
+        "enabled": true
+      },
+      "required_pull_request_reviews": {
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": true,
+        "required_approving_review_count": 1
+      },
+      "required_status_checks": {
+        "contexts": [
+          "plan"
+        ],
+        "strict": true
+      }
+    },
+    "cloudflare_verify": {
+      "expires_on": "@+300d"
+    },
+    "commit_verification": {},
+    "commits": [],
+    "files_changed": {},
+    "prs": {},
+    "reviews": {},
+    "secrets": {
+      "platform": {
+        "cf-infra-admin": {
+          "expires": "@+60d"
+        },
+        "gcp-apply": {
+          "expires": "never"
+        },
+        "gcp-plan": {
+          "expires": "never"
+        },
+        "gcs-ledger": {
+          "expires": "never"
+        },
+        "github-app": {
+          "expires": "never"
+        },
+        "github-plan-app": {
+          "expires": "never"
+        },
+        "telegram-alert": {
+          "expires": "never"
+        },
+        "tofu-encryption": {
+          "expires": "never"
+        }
+      },
+      "recipes-runtime": {
+        "cf-images": {
+          "expires": "@+60d"
+        },
+        "nyt-cookie": {
+          "expires": "@+300d!"
+        },
+        "registry-pull": {
+          "expires": "@+60d"
+        }
+      }
+    },
+    "tofu_apply_fail": true,
+    "tofu_plan_fail": false,
+    "tofu_show": {
+      "resource_changes": []
+    },
+    "tree": {}
+  },
+  "scenario": "test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
+  "unset_env": [],
+  "workdir_roots": [
+    "credentials",
+    "platform",
+    "projects/recipes"
+  ]
+}

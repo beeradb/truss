@@ -59,7 +59,20 @@ func loadVaultConfig(getenv func(string) string) (secrets.KVConfig, []string) {
 // mount yet -- Sweep.Stores is a slice specifically so this is a
 // configuration change once a second mount exists, not a code change. That
 // gap is real today and is not fixed here.
-func runExpirySweep(ctx context.Context, cfg config.Config, dir secrets.Dir, vcfg secrets.KVConfig, now func() time.Time) ([]secrets.Expiring, error) {
+// cfBaseURL overrides the Cloudflare API host, read from
+// $CLOUDFLARE_API_BASE_URL. Empty leaves the real one in place.
+//
+// ⚠️ IT EXISTS FOR THE SAME REASON $GITHUB_API_BASE_URL DOES, AND IT WAS
+// MISSING. secrets.CloudflareToken already declares a BaseURL field whose
+// doc says it "overrides the Cloudflare API host for tests" -- and nothing
+// ever set it, so the probe reached the real api.cloudflare.com from every
+// run including a test one. That made the one credential whose lapse takes
+// the applier down the one credential no whole-pass test could drive
+// (internal/parity, added 2026-09-08, is what could not be written without
+// this), and it meant any such test would egress from CI. Optional, never
+// part of config.Config's required names, and never a route a credential
+// can travel -- the same shape loadForgeConfig's baseURL has.
+func runExpirySweep(ctx context.Context, cfg config.Config, dir secrets.Dir, vcfg secrets.KVConfig, cfBaseURL string, now func() time.Time) ([]secrets.Expiring, error) {
 	mintToken, err := loadCFMintToken(dir)
 	if err != nil {
 		return nil, err
@@ -71,7 +84,7 @@ func runExpirySweep(ctx context.Context, cfg config.Config, dir secrets.Dir, vcf
 	sweep := secrets.Sweep{
 		Stores: []secrets.Store{kv},
 		Probes: map[string]secrets.Probe{
-			itemCFTokenMint: secrets.CloudflareToken{Token: mintToken},
+			itemCFTokenMint: secrets.CloudflareToken{BaseURL: cfBaseURL, Token: mintToken},
 		},
 		WarnDays: cfg.ExpiryWarnDays,
 		Now:      now,
@@ -105,7 +118,7 @@ func cmdExpiry(ctx context.Context, args []string, getenv func(string) string, s
 	}
 
 	dir := secrets.Dir{Root: cfg.SecretsDir}
-	findings, err := runExpirySweep(ctx, cfg, dir, vcfg, time.Now)
+	findings, err := runExpirySweep(ctx, cfg, dir, vcfg, getenv("CLOUDFLARE_API_BASE_URL"), time.Now)
 	if err != nil {
 		fmt.Fprintf(stderr, "expiry: %v\n", err)
 		return 1

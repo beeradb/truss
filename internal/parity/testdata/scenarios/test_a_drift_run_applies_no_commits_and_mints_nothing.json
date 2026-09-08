@@ -1,0 +1,97 @@
+{
+  "bash": {
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllcjogbm90aGluZyB0byBhcHBseTsgRVhQSVJJTkc6IGNmLXRva2VuLW1pbnQgKG5vIGV4cGlyeSByZWNvcmRlZCk=",
+    "bucket_after": {
+      "applied/HEAD": "YmFzZQ==",
+      "heartbeat/drift.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjQ6MDFaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6IG51bGwsCiAgInJvdGF0aW9uIjogewogICAgInNraXBwZWQiOiAiZHJpZnQgcnVuIgogIH0sCiAgImRyaWZ0IjogewogICAgImRyaWZ0ZWQiOiBbXSwKICAgICJlcnJvcmVkIjogW10KICB9LAogICJleHBpcmluZyI6IFsKICAgIHsKICAgICAgIm5hbWUiOiAiY2YtdG9rZW4tbWludCIsCiAgICAgICJkYXlzX2xlZnQiOiBudWxsCiAgICB9CiAgXQp9",
+      "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
+      "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
+    },
+    "exit_code": 0
+  },
+  "bash_test": "test_a_drift_run_applies_no_commits_and_mints_nothing",
+  "bucket_before": {
+    "applied/HEAD": "YmFzZQ==",
+    "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
+    "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
+  },
+  "env": {
+    "APPROVER": "alice",
+    "DRIFT_CHECK": "1",
+    "HEARTBEAT_KEY": "heartbeat/drift.json",
+    "LEDGER_APPLIED_PREFIX": "applied",
+    "LEDGER_BUCKET": "state-bucket",
+    "LEDGER_FAILED_PREFIX": "failed",
+    "LEDGER_HEAD_KEY": "applied/HEAD",
+    "PLAN_DIGEST_PREFIX": "plans",
+    "REPO": "acme/platform"
+  },
+  "fixtures": {
+    "branch_protection": {
+      "allow_force_pushes": {
+        "enabled": false
+      },
+      "enforce_admins": {
+        "enabled": true
+      },
+      "required_pull_request_reviews": {
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": true,
+        "required_approving_review_count": 1
+      },
+      "required_status_checks": {
+        "contexts": [
+          "plan"
+        ],
+        "strict": true
+      }
+    },
+    "cloudflare_verify": null,
+    "commit_verification": {},
+    "commits": [
+      "sha1"
+    ],
+    "files_changed": {
+      "sha1": [
+        "platform/main.tf"
+      ]
+    },
+    "prs": {
+      "sha1": [
+        {
+          "head": {
+            "sha": "headsha1"
+          },
+          "merge_commit_sha": "sha1",
+          "merged": true,
+          "number": 42
+        }
+      ]
+    },
+    "reviews": {
+      "42": [
+        {
+          "commit_id": "headsha1",
+          "state": "APPROVED",
+          "user": {
+            "login": "alice"
+          }
+        }
+      ]
+    },
+    "secrets": {},
+    "tofu_apply_fail": false,
+    "tofu_plan_fail": false,
+    "tofu_show": {
+      "resource_changes": []
+    },
+    "tree": {}
+  },
+  "scenario": "test_a_drift_run_applies_no_commits_and_mints_nothing",
+  "unset_env": [],
+  "workdir_roots": [
+    "credentials",
+    "platform",
+    "projects/recipes"
+  ]
+}

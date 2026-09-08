@@ -1,0 +1,98 @@
+{
+  "bash": {
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogcm90YXRpb24gb2YgY3JlZGVudGlhbHMgYXQgYmFzZTogdG9mdSBwbGFuIGZhaWxlZCBmb3IgY3JlZGVudGlhbHMgKGFwcGxpZWQ9MCBub29wPTApOyBFWFBJUklORzogY2YtdG9rZW4tbWludCAobm8gZXhwaXJ5IHJlY29yZGVkKQ==",
+    "bucket_after": {
+      "applied/HEAD": "YmFzZQ==",
+      "failed/rotation-<ts>": "ewogICJyZWFzb24iOiAidG9mdSBwbGFuIGZhaWxlZCBmb3IgY3JlZGVudGlhbHMiLAogICJhdCI6ICIyMDI2LTA5LTA4VDA0OjIzOjQyWiIKfQ==",
+      "failed/sha1": "ewogICJyZWFzb24iOiAidG9mdSBwbGFuIGZhaWxlZCBmb3IgcHJvamVjdHMvcmVjaXBlcyIsCiAgImF0IjogIjIwMjYtMDktMDhUMDQ6MjM6NDJaIgp9",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NDJaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJyb3RhdGlvbiBvZiBjcmVkZW50aWFscyBhdCBiYXNlOiB0b2Z1IHBsYW4gZmFpbGVkIGZvciBjcmVkZW50aWFscyIsCiAgInJvdGF0aW9uIjogewogICAgImZhaWxlZCI6ICJ0b2Z1IHBsYW4gZmFpbGVkIGZvciBjcmVkZW50aWFscyIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogIm5vdCBhIGRyaWZ0IHJ1biIKICB9LAogICJleHBpcmluZyI6IFsKICAgIHsKICAgICAgIm5hbWUiOiAiY2YtdG9rZW4tbWludCIsCiAgICAgICJkYXlzX2xlZnQiOiBudWxsCiAgICB9CiAgXQp9",
+      "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
+      "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
+    },
+    "exit_code": 1
+  },
+  "bash_test": "test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
+  "bucket_before": {
+    "applied/HEAD": "YmFzZQ==",
+    "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
+    "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
+  },
+  "env": {
+    "APPROVER": "alice",
+    "HEARTBEAT_KEY": "heartbeat/applier.json",
+    "LEDGER_APPLIED_PREFIX": "applied",
+    "LEDGER_BUCKET": "state-bucket",
+    "LEDGER_FAILED_PREFIX": "failed",
+    "LEDGER_HEAD_KEY": "applied/HEAD",
+    "PLAN_DIGEST_PREFIX": "plans",
+    "REPO": "acme/platform"
+  },
+  "fixtures": {
+    "branch_protection": {
+      "allow_force_pushes": {
+        "enabled": false
+      },
+      "enforce_admins": {
+        "enabled": true
+      },
+      "required_pull_request_reviews": {
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": true,
+        "required_approving_review_count": 1
+      },
+      "required_status_checks": {
+        "contexts": [
+          "plan"
+        ],
+        "strict": true
+      }
+    },
+    "cloudflare_verify": null,
+    "commit_verification": {},
+    "commits": [
+      "sha1"
+    ],
+    "files_changed": {
+      "sha1": [
+        "projects/recipes/main.tf"
+      ]
+    },
+    "prs": {
+      "sha1": [
+        {
+          "head": {
+            "sha": "headsha1"
+          },
+          "merge_commit_sha": "sha1",
+          "merged": true,
+          "number": 42
+        }
+      ]
+    },
+    "reviews": {
+      "42": [
+        {
+          "commit_id": "headsha1",
+          "state": "APPROVED",
+          "user": {
+            "login": "alice"
+          }
+        }
+      ]
+    },
+    "secrets": {},
+    "tofu_apply_fail": false,
+    "tofu_plan_fail": true,
+    "tofu_show": {
+      "resource_changes": []
+    },
+    "tree": {}
+  },
+  "scenario": "test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
+  "unset_env": [],
+  "workdir_roots": [
+    "credentials",
+    "platform",
+    "projects/recipes"
+  ]
+}
