@@ -66,14 +66,48 @@ func TestATableEntryForAProbedItemIsRefused(t *testing.T) {
 	}
 }
 
-func TestATableWhereEveryEntryIsNeverIsRefused(t *testing.T) {
+// ⚠️ AN ALL-"never" TABLE IS ACCEPTED, AND THAT REPLACED THE OPPOSITE RULE.
+//
+// The earlier rule refused any table in which every entry was "never",
+// reasoning that an all-"never" table silences the daily alarm forever. Right
+// danger, wrong signal: EVERY hand-made credential in this system genuinely
+// never expires -- a GitHub App private key has no expiry, a Telegram bot
+// token has none, a passphrase is not an issued credential -- so the honest
+// table IS all-"never", and the rule refused the truth. Deploying it proved
+// that: the publisher crash-looped on the real table, and because it is a
+// native sidecar the whole daily pass could not start.
+//
+// What protects the alarm now is that a "never" cannot be set SILENTLY.
+func TestATableWhereEveryEntryIsNeverIsAcceptedWhenEachSaysWhy(t *testing.T) {
 	raw := `{
-		"github-app": {"expires": "never", "why": "app keys never expire"},
-		"telegram-alert": {"expires": "never", "why": "bot tokens never expire"}
+		"github-app": {"expires": "never", "why": "a GitHub App private key has no expiry; the tokens minted from it live an hour and are never stored"},
+		"telegram-alert": {"expires": "never", "why": "a Telegram bot token does not expire; it is revoked by regenerating it in BotFather"}
 	}`
-	_, err := LoadExpiries(strings.NewReader(raw), nil)
-	if err == nil {
-		t.Fatal("LoadExpiries with every entry \"never\" = nil error, want a refusal -- that silences the alarm forever")
+	got, err := LoadExpiries(strings.NewReader(raw), nil)
+	if err != nil {
+		t.Fatalf("LoadExpiries on an honest all-\"never\" table = %v, want it accepted", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+}
+
+// TestANeverWithNoWhyIsRefused is the guard that replaced it, and it is the
+// one that matters: a credential exempted from the expiry alarm has to say
+// what makes it permanent, in the file, where a reviewer reads it.
+func TestANeverWithNoWhyIsRefused(t *testing.T) {
+	for _, why := range []string{"", "   ", "\\t \\n"} {
+		raw := `{
+			"github-app": {"expires": "never", "why": "` + why + `"},
+			"telegram-alert": {"expires": "never", "why": "bot tokens do not expire"}
+		}`
+		_, err := LoadExpiries(strings.NewReader(raw), nil)
+		if err == nil {
+			t.Fatalf("LoadExpiries accepted a \"never\" whose why was %q -- an unjustified never is exactly what silences the alarm", why)
+		}
+		if !strings.Contains(err.Error(), "github-app") {
+			t.Errorf("the refusal does not name the offending item: %v", err)
+		}
 	}
 }
 
@@ -116,3 +150,21 @@ func TestLoadExpiriesRejectsInvalidJSON(t *testing.T) {
 		t.Fatal("LoadExpiries with invalid JSON = nil error, want a refusal")
 	}
 }
+
+// ⚠️ THE DEPLOYED TABLE ITSELF IS NOT TESTED HERE, AND THAT IS A REAL GAP.
+//
+// The file the ConfigMap ships lives in the platform repo, so a test in this
+// repo could only reach it by a relative path across checkouts -- which passes
+// locally, SKIPS in CI, and is therefore the vacuous check this project has a
+// standing rule against. One was written and deleted rather than kept.
+//
+// What actually caught the first broken table was the publisher failing closed
+// in the cluster: it crash-looped, and because it is a native sidecar the whole
+// daily pass could not start. That is the right failure DIRECTION and the wrong
+// PLACE to discover it -- pod Pending at 04:10, with concurrencyPolicy Forbid
+// suppressing every later pass.
+//
+// The gap is closed at deploy time, not here: see the platform repo's
+// applier/README for the step that loads the table through this parser before
+// the CronJob is applied. If that step is ever removed, this comment is the
+// record of what it was for.
