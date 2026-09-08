@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/truss-horizontal-ondark.svg">
+  <img src="docs/assets/truss-horizontal.svg" alt="" width="300">
+</picture>
+
 # Truss
 
 **A GitOps applier where the diff a human approved is provably the diff that

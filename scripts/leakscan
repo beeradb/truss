@@ -49,6 +49,12 @@ scan() { # pattern description
   # code have to name the import path, and it is this repository's own name --
   # the same public handle already exempted above, in the same words.
   hits=$(echo "$hits" | grep -vE 'github\.com/beeradb/truss' || true)
+  # ⚠️ THE SVG NAMESPACE, WHICH IS A CONSTANT AND NOT A DESTINATION. Every SVG
+  # file must declare `xmlns="http://www.w3.org/2000/svg"` -- it is an XML
+  # namespace identifier, never fetched, and identical in every SVG ever
+  # written. Exempted as the exact string, so a real URL in an SVG (an
+  # xlink:href to an asset host, say) is still caught.
+  hits=$(echo "$hits" | grep -vF 'xmlns="http://www.w3.org/2000/svg"' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }

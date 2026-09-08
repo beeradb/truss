@@ -79,6 +79,11 @@ check 'module path in prose' clean  docs/d.md 'the module is github.com/beeradb/
 check 'someone elses repo'   refuse docs/d.md 'clone github.com/otherorg/private-thing now'
 check 'a bucket uri'         refuse docs/d.md 'state lives in gs://a-real-bucket-name'
 
+# ⚠️ The SVG namespace is a constant every SVG carries; a real URL in an SVG is
+# not. Exempting the exact declaration keeps the second case biting.
+check 'svg namespace'        clean  m.svg '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
+check 'real url in an svg'   refuse m.svg '<image xlink:href="https://assets.example.com/logo/mark.png"/>'
+
 echo
 echo "leakscan-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
