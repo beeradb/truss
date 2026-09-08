@@ -488,3 +488,37 @@ func TestOPsExecTargetIsConfigNeverALiteral(t *testing.T) {
 		t.Fatalf("found %d exec.CommandContext call(s) in opstore.go, want exactly 1", found)
 	}
 }
+
+// TestOPGivesTheCLIAWritableHome pins the fix for a failure that only appears
+// in a container: `op` creates $HOME/.config/op before doing anything, so under
+// readOnlyRootFilesystem with no home mounted it dies with
+// `cannot create directory ... read-only file system`.
+//
+// ⚠️ IT MUST BE SET IN THE SUBPROCESS ENV, NOT IN THE POD SPEC. That env is
+// explicit and never inherited, so a HOME in the manifest does not reach `op`.
+// Setting it in the manifest was tried first, deployed, and changed nothing --
+// the same error came back byte for byte. This test is what stops somebody
+// "simplifying" it back out into a manifest that looks like it works.
+func TestOPGivesTheCLIAWritableHome(t *testing.T) {
+	f := newFakeOP(t)
+	f.arrange(fakeOPResponse{stdout: `[{"label":"password","value":"v"}]`},
+		"item", "get", "cf-infra-admin", "--vault", "platform", "--fields", "password", "--format", "json")
+	op := newTestOP(t, f, "platform")
+
+	if _, err := op.Field(context.Background(), "cf-infra-admin", "password"); err != nil {
+		t.Fatalf("Field: %v", err)
+	}
+
+	var home string
+	for _, kv := range f.envs[0] {
+		if strings.HasPrefix(kv, "HOME=") {
+			home = strings.TrimPrefix(kv, "HOME=")
+		}
+	}
+	if home == "" {
+		t.Fatal("no HOME in the subprocess environment -- the 1Password CLI cannot create its config dir and dies under a read-only root filesystem")
+	}
+	if home == "/home/applier" || home == "/" {
+		t.Fatalf("HOME=%q is not a directory this process created; it must be writable regardless of the image", home)
+	}
+}
