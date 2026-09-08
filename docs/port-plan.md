@@ -892,9 +892,18 @@ bucket contents and the alert text produced by `truss apply` equal those produce
 `applied/<sha>` (§3.4) and timestamps. Named: `TestPassAgreesWithBashOnEveryFixture`, one
 subtest per scenario, and `TestEveryBashScenarioHasAGoSubtest`.
 
-Before step 5 is deployed, both jobs run in the same cluster for a week: the drift CronJob runs
-`truss apply --drift` writing to a **different heartbeat key**, while the 5-minute job stays on
-bash. Divergence is then a diff of two heartbeat objects, observed rather than argued.
+Before step 5 is deployed, both jobs run in the same cluster for a week: a shadow CronJob runs
+`truss apply` with **`DRIFT_CHECK=1`** and its own **`HEARTBEAT_KEY`**, while the 5-minute job
+stays on bash. Divergence is then a diff of two heartbeat objects, observed rather than argued.
+
+⚠️ **There is no `--drift` FLAG, and this paragraph used to specify one.** `DRIFT_CHECK=1` is
+how the bash selects a drift pass and truss reads the same variable, so a flag would be a second
+way to say one thing. `truss apply` takes no arguments at all and exits 2 if given any.
+
+⚠️ **And the heartbeat diff will not be byte-for-byte**, because jq pretty-prints and Go's
+`encoding/json` does not — every object differs in whitespace. `internal/parity` compares ledger
+objects field by field for exactly this reason; a shadow comparison must do the same rather than
+`diff` two files and conclude everything changed.
 
 ## 6. What each package deletes from the image
 

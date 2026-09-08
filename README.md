@@ -15,11 +15,24 @@ was reviewed under rules it verifies rather than assumes — then plans the
 approved commit with its own credentials and refuses to apply anything whose
 plan does not match the one the reviewer read.
 
-**Being extracted, not yet extractable.** Truss is a rewrite, in progress, of
-a 915-line bash script already running this in production. Nothing here is
-deployed yet — this README describes where the design is headed, not what's
-live today. See [docs/development.md](docs/development.md) for exactly how
-far the port has gotten.
+**The port is complete; it is not yet deployed.** Truss is a finished
+rewrite of a 915-line bash script that runs this in production today. Every
+package is built, and the engine is checked three ways: its own tests, and
+two independent reviews of the whole codebase — a security review and a
+third-party code audit — whose findings are closed.
+
+The strongest of the three is [`internal/parity`](internal/parity), which
+replays 37 scenarios recorded from the bash's own test suite against the real
+`truss` binary and compares the resulting bucket contents and alert text.
+Every difference between the two implementations is an enumerated entry with
+a reason, and an entry that stops matching anything fails the build — so an
+exemption cannot outlive the divergence it excuses.
+
+What is NOT done is the cutover. Nothing runs truss in the cluster yet: it
+reads its credentials from a mounted mirror that the platform does not render
+yet, and the plan is to run it in shadow — drift-only, writing to its own
+heartbeat key — alongside the bash before anything is switched over. See
+[docs/development.md](docs/development.md).
 
 ## What is actually different here
 
