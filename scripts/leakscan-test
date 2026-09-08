@@ -70,6 +70,15 @@ check 'pinned action'      clean  .github/workflows/ci.yml '      - uses: action
 check 'hex in a workflow'  refuse .github/workflows/ci.yml '      - run: echo 0123456789abcdef0123456789abcdef'
 check 'unpinned uses line' clean  .github/workflows/ci.yml '      - uses: actions/checkout@v7'
 
+# ⚠️ THE VENDOR'S NAME IS NOT A LEAK; A REFERENCE INTO THEIR STORE IS. A design
+# document has to be able to name the product it integrates with. What must
+# still bite is anything that says WHICH vault, WHICH bucket, WHICH account.
+check 'vendor name in prose' clean  docs/d.md 'The applier reads 1Password items at build time.'
+check 'op:// reference'      refuse docs/d.md 'reads op://somevault/someitem/field'
+check 'module path in prose' clean  docs/d.md 'the module is github.com/beeradb/truss'
+check 'someone elses repo'   refuse docs/d.md 'clone github.com/otherorg/private-thing now'
+check 'a bucket uri'         refuse docs/d.md 'state lives in gs://a-real-bucket-name'
+
 echo
 echo "leakscan-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

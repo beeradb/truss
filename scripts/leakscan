@@ -45,6 +45,10 @@ scan() { # pattern description
   #   this scanner's own first green run, which is the argument for pinning
   #   the exemption to the `uses:` shape and not to `.github/`.
   hits=$(echo "$hits" | grep -vE '^go\.mod:[0-9]+:module ' || true)
+  # ⚠️ AND THE MODULE PATH WHEREVER IT IS WRITTEN, not only in go.mod. Docs and
+  # code have to name the import path, and it is this repository's own name --
+  # the same public handle already exempted above, in the same words.
+  hits=$(echo "$hits" | grep -vE 'github\.com/beeradb/truss' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
@@ -59,7 +63,13 @@ scan '(secret|token|password|api[_-]?key|credential)[[:space:]]*[:=][[:space:]]*
      'something shaped like an assigned credential'
 scan '\b[A-Za-z0-9-]+\.(com|net|org|io|dev|pw)\b/[A-Za-z0-9._/-]+' \
      'a URL path into a specific host'
-scan '\b(op://|1password|cloudflare account|gs://|s3://)' \
+# ⚠️ A URI INTO A STORE, NOT THE VENDOR'S NAME. `1password` alone was in this
+# list and it is not a deployment identifier -- it is a company, and a design
+# document that integrates with them has to be able to say so. What identifies
+# a deployment is a reference INTO a store: `op://<vault>/<item>`, a bucket
+# URI, an account id. Those stay. Measured 2026-09-08: the bare vendor name
+# refused docs/port-plan.md for naming the product it ports away from.
+scan '\b(op://|cloudflare account|gs://|s3://)' \
      'a reference to a concrete store or account'
 
 # ⚠️ Co-authored-by trailers are refused here as well as by the commit hook,
