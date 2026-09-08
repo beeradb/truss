@@ -120,7 +120,27 @@ func cmdExpiry(ctx context.Context, args []string, getenv func(string) string, s
 	dir := secrets.Dir{Root: cfg.SecretsDir}
 	findings, err := runExpirySweep(ctx, cfg, dir, vcfg, getenv("CLOUDFLARE_API_BASE_URL"), time.Now)
 	if err != nil {
+		// ⚠️ PRINT WHAT THE SWEEP DID LEARN, THEN FAIL. Sweep.Run evaluates
+		// the live PROBES before it walks any store and returns those
+		// findings alongside its error -- so discarding them here threw away
+		// the only real expiry data the system currently has. Measured
+		// 2026-09-08: `truss expiry` printed nothing but "platform lists 6
+		// item(s) but not one records an expiry", because one empty store
+		// suppressed the Cloudflare probe's answer about cf-token-mint.
+		//
+		// This does NOT soften §4.7. The exit code stays 1 and the error
+		// still goes to stderr, so nothing reads this as a clean bill of
+		// health; the findings go to stdout where a partial answer is
+		// strictly more useful than none. A sweep that cannot say whether
+		// anything is expiring must say so -- it need not also forget what
+		// it already found out.
 		fmt.Fprintf(stderr, "expiry: %v\n", err)
+		if len(findings) > 0 {
+			fmt.Fprintln(stderr, "expiry: what the probes did answer, before the failure above:")
+			if encErr := json.NewEncoder(stdout).Encode(findings); encErr != nil {
+				fmt.Fprintf(stderr, "expiry: encoding partial findings: %v\n", encErr)
+			}
+		}
 		return 1
 	}
 

@@ -335,6 +335,27 @@ var Divergences = []Divergence{
 			"the commit it refuses, are identical.",
 		Ref: "internal/gates/gates.go CheckMergeCommit; docs/port-plan.md §4.5",
 	},
+	{
+		ID:     "COUNT-EXCLUDES-NOOP",
+		Status: StatusIntended,
+		Accept: resourceChangesCountExcludesNoop,
+		Bash: "resource_changes: every entry in tofu's own resource_changes array, no-ops " +
+			"included -- summary_from_plan (apply.sh:598) is `jq '.resource_changes | length'`",
+		Truss: "resource_changes: only entries whose actions are not exactly the single element " +
+			"\"no-op\"; a replace ([\"delete\",\"create\"]) is one changed resource, not two",
+		Why: "Not an accident: OpenTofu lists every resource the plan LOOKED AT in resource_changes, " +
+			"including ones it will not touch, marked `\"actions\":[\"no-op\"]` (verified against a real " +
+			"`tofu show -json` from a scratch root, not assumed). The bash counts the array; measured in " +
+			"production, that reported \"rotated credentials (30 changes)\" for a credentials/ plan that " +
+			"changed nothing, and would say so every single night. This project's standing rule is that a " +
+			"number we put in front of someone must be a number the plan vouches for -- 30 no-op entries " +
+			"are not 30 changes, and printing that number the same way on a night nothing rotates and a " +
+			"night 30 things genuinely do is also the operational failure: an operator who reads a false " +
+			"\"N changes\" every night learns to ignore the field, so the one night it is real is " +
+			"indistinguishable from a quiet one. countResourceChanges therefore counts real changes, not " +
+			"array length, on purpose and in disagreement with the bash.",
+		Ref: "cmd/truss/apply_cmd.go countResourceChanges; applier/apply.sh:598 summary_from_plan",
+	},
 
 	// -----------------------------------------------------------------
 	// FINDINGS -- nobody decided these. Reported to the owner as defects.
@@ -475,4 +496,62 @@ func silentDeathBeforeHeartbeat(d Diff) bool {
 	default:
 		return false
 	}
+}
+
+// resourceChangesCountExcludesNoop matches COUNT-EXCLUDES-NOOP wherever a
+// resource-change count reaches a diff: a bare "resource_changes" field --
+// an applied/<sha> root's own count or the rotation summary's -- or the
+// same number embedded in the alert's "rotated credentials (N changes)"
+// clause. Both sides must be non-negative integers with truss's no greater
+// than the bash's: excluding no-op entries can only ever shrink the count,
+// never grow it, so this pins the direction of the difference rather than
+// accepting any two numbers that happen to differ.
+func resourceChangesCountExcludesNoop(d Diff) bool {
+	switch d.Kind {
+	case "value":
+		if !strings.HasSuffix(d.Path, "/resource_changes") {
+			return false
+		}
+		return nonNegativeAndNoGreater(d.Bash, d.Truss)
+	case "alert":
+		return rotatedChangesCountExcludesNoop(d)
+	default:
+		return false
+	}
+}
+
+// rotatedChangesClause isolates the one number COUNT-EXCLUDES-NOOP is
+// allowed to touch inside an alert: the N in "rotated credentials (N
+// changes)" (internal/notify/compose.go).
+var rotatedChangesClause = regexp.MustCompile(`; rotated credentials \((\d+) changes\)`)
+
+// rotatedChangesCountExcludesNoop requires everything OUTSIDE the digits to
+// be byte-identical between the bash's alert and truss's -- so this cannot
+// forgive a divergence anywhere else in the alert -- and the digits
+// themselves to be non-negative integers with truss's no greater than the
+// bash's.
+func rotatedChangesCountExcludesNoop(d Diff) bool {
+	bm := rotatedChangesClause.FindStringSubmatchIndex(d.Bash)
+	tm := rotatedChangesClause.FindStringSubmatchIndex(d.Truss)
+	if bm == nil || tm == nil {
+		return false
+	}
+	if d.Bash[:bm[2]] != d.Truss[:tm[2]] || d.Bash[bm[3]:] != d.Truss[tm[3]:] {
+		return false
+	}
+	return nonNegativeAndNoGreater(d.Bash[bm[2]:bm[3]], d.Truss[tm[2]:tm[3]])
+}
+
+// nonNegativeAndNoGreater parses both strings as non-negative integers and
+// reports whether truss is no greater than bash.
+func nonNegativeAndNoGreater(bash, truss string) bool {
+	b, err := strconv.Atoi(bash)
+	if err != nil || b < 0 {
+		return false
+	}
+	t, err := strconv.Atoi(truss)
+	if err != nil || t < 0 {
+		return false
+	}
+	return t <= b
 }
