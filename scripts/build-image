@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Build the truss image and import it into containerd, the same no-registry
+# path applier/build uses in the platform repo: no push credential, at the
+# cost of no tagged history.
+#
+# Run this ON the box that will run it, from a directory holding the built
+# binary and the Dockerfile.
+#
+# Usage: build-image <base-image> <tag> [binary]
+set -euo pipefail
+
+BASE=${1:?"usage: build-image <base-image> <tag> [binary]  -- the base must already carry tofu, git and a CA bundle"}
+TAG=${2:?"usage: build-image <base-image> <tag> [binary]"}
+BINARY=${3:-truss}
+
+# ⚠️ Refuses :latest for the reason applier/build does: a CronJob that
+# silently picks up whatever was built last is untraceable after the fact.
+case "$TAG" in
+  latest|*:latest) echo "refusing :latest -- use an immutable tag" >&2; exit 1 ;;
+esac
+
+[ -f "$BINARY" ] || { echo "no binary at $BINARY -- build it with CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $BINARY ./cmd/truss" >&2; exit 1; }
+
+# ⚠️ `localhost/` IS PART OF THE NAME. An image imported into containerd keeps
+# the name podman gave it, and podman qualifies a bare name as `localhost/…`.
+# A pod asking for a BARE `truss:tag` is asking for the Docker Hub library
+# path instead, finds nothing present, tries to pull and sits in
+# ImagePullBackOff. The
+# platform repo's applier/build records this being measured on 2026-09-06.
+IMAGE="localhost/truss:$TAG"
+
+echo "building $IMAGE on $BASE"
+podman build --build-arg BASE_IMAGE="$BASE" --build-arg TRUSS_BINARY="$BINARY" -t "$IMAGE" -f Dockerfile .
+
+echo "importing into containerd"
+# A fresh file every time and removed afterwards: `podman save -o` onto an
+# existing path fails outright, so a build interrupted between save and import
+# poisons every later build of the same tag.
+TAR="$(mktemp -t "truss-$TAG-XXXXXX.tar")"
+trap 'rm -f "$TAR"' EXIT
+podman save "$IMAGE" -o "$TAR"
+sudo k3s ctr images import "$TAR"
+
+echo "imported $IMAGE"
