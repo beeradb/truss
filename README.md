@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/truss-horizontal-ondark.svg">
-  <img src="docs/assets/truss-horizontal.svg" alt="" width="300">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/truss-lockup-ondark.svg">
+  <img src="docs/assets/truss-lockup.svg" alt="Truss" width="260">
 </picture>
 
 # Truss

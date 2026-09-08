@@ -17,8 +17,8 @@ font dependency and render identically everywhere.
 
 | file                        | use                                                    |
 |-----------------------------|--------------------------------------------------------|
-| `truss-lockup.svg`          | primary — word over the span. Docs headers, site header |
-| `truss-horizontal.svg`      | icon + word, where vertical room is tight (nav, README) |
+| `truss-lockup.svg`          | primary — word over the span. README, docs headers, site header |
+| `truss-horizontal.svg`      | icon + word, where vertical room is tight (nav)        |
 | `truss-wordmark.svg`        | word alone                                              |
 | `truss-mark.svg`            | icon alone, 32px and up                                 |
 | `truss-mark-small.svg`      | icon at 24px and below — struts dropped                 |
