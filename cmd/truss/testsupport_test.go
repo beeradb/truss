@@ -208,6 +208,15 @@ func (f *fakeLedger) get(key string) ([]byte, bool) {
 	return b, ok
 }
 
+// put seeds an object directly, without going through a signed request --
+// for a test that needs something already IN the bucket, such as the plan
+// digest CI would have filed.
+func (f *fakeLedger) put(key string, body []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[key] = append([]byte(nil), body...)
+}
+
 func (f *fakeLedger) handle(w http.ResponseWriter, r *http.Request) {
 	prefix := "/" + f.bucket + "/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -608,11 +617,31 @@ type fakeTofu struct {
 	ShowJSONErr                error
 	PlanDetailedChanged        bool
 	PlanDetailedErr            error
+
+	mu      sync.Mutex
+	applies []string
 }
 
-func (f *fakeTofu) Init(ctx context.Context, dir string) error            { return f.InitErr }
-func (f *fakeTofu) Plan(ctx context.Context, dir, outFile string) error   { return f.PlanErr }
-func (f *fakeTofu) Apply(ctx context.Context, dir, planFile string) error { return f.ApplyErr }
+func (f *fakeTofu) Init(ctx context.Context, dir string) error          { return f.InitErr }
+func (f *fakeTofu) Plan(ctx context.Context, dir, outFile string) error { return f.PlanErr }
+
+// Apply records that it was reached. Whether Apply ran AT ALL is the
+// property the digest gate exists to control, so a test asserting a refusal
+// has to be able to see it -- "the pass failed" is also true of a pass that
+// applied and then failed afterwards.
+func (f *fakeTofu) Apply(ctx context.Context, dir, planFile string) error {
+	f.mu.Lock()
+	f.applies = append(f.applies, dir)
+	f.mu.Unlock()
+	return f.ApplyErr
+}
+
+// appliedDirs is what Apply was called with, in order.
+func (f *fakeTofu) appliedDirs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.applies...)
+}
 func (f *fakeTofu) PlanDetailed(ctx context.Context, dir string) (bool, error) {
 	return f.PlanDetailedChanged, f.PlanDetailedErr
 }
