@@ -6,9 +6,19 @@ and untick the box" is a step nobody can review, repeat or automate.
 
 ## Branch protection: the only way past a stuck gate
 
+    export TRUSS_REPO=<owner>/<the repository the applier applies>
+
     scripts/protection show     # what is set right now
     scripts/protection on       # set it to what the applier requires
     scripts/protection off      # remove it
+
+⚠️ **`TRUSS_REPO` is the repository truss APPLIES, never the one truss is
+built in.** There is no default, on purpose. These settings require a status
+check named `plan`, which is filed by the plan job of a managed repository —
+so pointing them at truss's own source repository requires a context that
+cannot exist there, and `enforce_admins` leaves no way to merge past it. The
+script now refuses a required check the target has never reported, but the
+variable is the thing to get right.
 
 The applier refuses to run at all unless protection is exactly as
 [docs/design.md](design.md) specifies, and it re-reads it from the API on
