@@ -66,6 +66,20 @@ scan() { # pattern description
   # storage.googleapis.com, because the path after it carries a bucket name
   # and that IS this deployment.
   hits=$(echo "$hits" | grep -vE 'https://api\.(telegram\.org|github\.com)/' || true)
+  # The OpenTofu provider registry, for the same reason and under the same
+  # rule. `registry.opentofu.org/<namespace>/<type>` is a provider's public
+  # ADDRESS in the registry -- it is the identical string in every lockfile
+  # everywhere, it names the vendor rather than our deployment, and it is what
+  # a committed .terraform.lock.hcl says verbatim.
+  #
+  # We match on it because the lockfile is how a root declares which providers
+  # it may use (`-lockfile=readonly` makes the committed one authoritative), so
+  # it is how the applier decides which credentials a root needs. Writing the
+  # match without the host would be less precise in the code AND would force
+  # the test fixture to hold a lockfile that no real checkout contains -- and
+  # a fixture that differs from production is a bug this repo has already paid
+  # for once.
+  hits=$(echo "$hits" | grep -vE 'registry\.opentofu\.org/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }

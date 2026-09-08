@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -425,7 +426,22 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		ExpiryUnavailable: expiryUnavailable,
 	}
 	text := notify.Compose(report)
-	_ = d.Telegram.Send(ctx, text) // non-fatal, matching send_telegram (apply.sh:445-448)
+	// ⚠️ NON-FATAL, BUT NOT SILENT -- and this line used to be both, under a
+	// comment claiming a parity with the bash that it did not have.
+	// apply.sh:447 ends its curl with
+	// `|| echo "telegram send failed (non-fatal)" >&2`.
+	//
+	// Non-fatal is right: a broken alert channel must not fail a pass that
+	// otherwise succeeded. Silent is not, because Telegram is the channel that
+	// reports every OTHER failure -- so a send that dies without a trace is
+	// the one signal whose absence looks exactly like good news.
+	//
+	// Safe to log the error: Telegram.Send redacts the bot token from every
+	// error it returns (internal/notify/telegram.go, redactToken), so the URL
+	// carrying it cannot arrive here.
+	if err := d.Telegram.Send(ctx, text); err != nil {
+		d.logf("telegram send failed (non-fatal): %v", err)
+	}
 
 	return applyResult{failure: failure, notifyText: text}
 }
@@ -699,15 +715,21 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		}
 		env = append(env, "CLOUDFLARE_API_TOKEN="+mint, "TF_VAR_encryption_passphrase="+pass)
 	} else {
-		infra, ok, err := loadCFInfraAdminToken(cc.dir)
+		declares, err := rootDeclaresCloudflare(d.Cfg.Workdir, root)
 		if err != nil {
 			return ledger.RootSummary{}, false, err.Error()
 		}
-		if !ok {
-			return ledger.RootSummary{}, false, fmt.Sprintf(
-				"cf-infra-admin is not mounted: it is minted by credentials/, so that root must be applied before %s can be", root)
+		if declares {
+			infra, ok, err := loadCFInfraAdminToken(cc.dir)
+			if err != nil {
+				return ledger.RootSummary{}, false, err.Error()
+			}
+			if !ok {
+				return ledger.RootSummary{}, false, fmt.Sprintf(
+					"cf-infra-admin is not mounted: it is minted by credentials/, so that root must be applied before %s can be", root)
+			}
+			env = append(env, "CLOUDFLARE_API_TOKEN="+infra)
 		}
-		env = append(env, "CLOUDFLARE_API_TOKEN="+infra)
 	}
 
 	runner := d.NewTofu(env)
@@ -771,18 +793,78 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	return ledger.RootSummary{ResourceChanges: n}, false, ""
 }
 
-// countResourceChanges mirrors summary_from_plan (apply.sh:598): the
-// number of entries in the applied plan's own resource_changes array, or
-// "could not be parsed" (nil, matching RootSummary.ResourceChanges' own
-// doc) rather than zero.
+// countResourceChanges is a DELIBERATE DIVERGENCE from summary_from_plan
+// (apply.sh:598), which counts every entry in resource_changes, no-ops
+// included -- so a plan that touches nothing still reports "N changes"
+// every single night. See parity.Divergences["COUNT-EXCLUDES-NOOP"].
+//
+// OpenTofu/Terraform mark a resource the plan will not touch with
+// `"change":{"actions":["no-op"]}` (verified against a real `tofu show
+// -json`, not assumed: a genuine no-op, an in-place update and a
+// forced replace were produced from a scratch root and inspected -- the
+// replace comes back as the two-element `["delete","create"]`, one
+// resource, not two). Only an entry whose actions are exactly that single
+// element is excluded; everything else, including replace, counts as one
+// changed resource.
+//
+// An entry with a missing or empty actions array is counted as a change
+// rather than skipped: that shape is not one OpenTofu is known to emit, and
+// silently treating an unanticipated shape as "no change" is exactly the
+// kind of guess the "if we put a number somewhere, we must be sure it is
+// right" rule forbids. Fail loud by counting it, not by swallowing it.
+//
+// Returns "could not be parsed" (false, matching RootSummary.ResourceChanges'
+// own doc) rather than zero when the plan JSON itself does not parse.
+// rootDeclaresCloudflare reports whether a root's COMMITTED lockfile declares
+// the Cloudflare provider.
+//
+// ⚠️ ROOT CREDENTIALS MUST NOT GO WHERE THEY CANNOT BE USED. Every root that
+// was not `credentials` used to be handed cf-infra-admin, which carries
+// account-wide R2 write, account-wide Access "Apps and Policies" AND
+// "Organizations, Identity Providers, and Groups" write, and zone DNS write.
+// `platform/` does not use Cloudflare at all -- its lockfile declares only the
+// github provider and it contains no cloudflare_ resource -- and was still
+// given that token on every apply. This mints nothing and needs nothing new:
+// it just stops handing the account's broadest credential to a process that
+// cannot use it.
+//
+// The LOCKFILE is the authority rather than a list we maintain, because
+// `tofu init` runs with -lockfile=readonly: the committed lockfile IS the
+// reviewed provider set, so a root cannot use a provider it does not name
+// there. A list beside it would be a second copy, and the one that goes stale.
+//
+// ⚠️ A MISSING LOCKFILE IS AN ERROR, NOT A "no". Defaulting to no-token would
+// silently strip the credential from a root that genuinely needs one, and the
+// failure would surface later as a confusing provider error. A root with no
+// lockfile cannot init under -lockfile=readonly anyway.
+func rootDeclaresCloudflare(workdir, root string) (bool, error) {
+	lock := filepath.Join(workdir, root, ".terraform.lock.hcl")
+	b, err := os.ReadFile(lock)
+	if err != nil {
+		return false, fmt.Errorf("could not read %s to decide which credentials %s needs: %w", lock, root, err)
+	}
+	return bytes.Contains(b, []byte(`provider "registry.opentofu.org/cloudflare/cloudflare"`)), nil
+}
+
 func countResourceChanges(planJSON []byte) (int, bool) {
 	var parsed struct {
-		ResourceChanges []json.RawMessage `json:"resource_changes"`
+		ResourceChanges []struct {
+			Change struct {
+				Actions []string `json:"actions"`
+			} `json:"change"`
+		} `json:"resource_changes"`
 	}
 	if err := json.Unmarshal(planJSON, &parsed); err != nil {
 		return 0, false
 	}
-	return len(parsed.ResourceChanges), true
+	count := 0
+	for _, rc := range parsed.ResourceChanges {
+		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" {
+			continue
+		}
+		count++
+	}
+	return count, true
 }
 
 // runRotation re-plans and, if a generation boundary passed, re-applies
@@ -865,14 +947,6 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 		return nil, nil, "no roots at last applied commit"
 	}
 
-	infra, ok, err := loadCFInfraAdminToken(d.Dir)
-	if err != nil {
-		return nil, nil, fmt.Sprintf("could not read cf-infra-admin: %v", err)
-	}
-	if !ok {
-		return nil, nil, "cf-infra-admin is not mounted yet"
-	}
-
 	google, err := loadGCPCredentials(d.Dir)
 	if err != nil {
 		return nil, nil, fmt.Sprintf("could not read gcp-apply credentials: %v", err)
@@ -881,11 +955,60 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 	if err != nil {
 		return nil, nil, err.Error()
 	}
-	env := append(base, "CLOUDFLARE_API_TOKEN="+infra, "GOOGLE_CREDENTIALS="+google)
+	baseEnv := append(base, "GOOGLE_CREDENTIALS="+google)
+
+	// ⚠️ WHICH ROOTS NEED CLOUDFLARE IS DECIDED BEFORE THE LOOP; WHETHER THE
+	// TOKEN IS MISSING STILL SKIPS THE WHOLE PASS. Two things had to hold at
+	// once here and the obvious shape breaks one of them.
+	//
+	// The credential must be chosen PER ROOT, because runDrift used to read it
+	// once for every root -- so gating applyOneRoot alone leaves the drift pass
+	// still exporting the account's broadest Cloudflare token to roots that
+	// cannot use it, which is a fix that looks complete and covers one of the
+	// two places a root gets planned.
+	//
+	// But apply.sh:1044 treats an unmounted cf-infra-admin as
+	// `drift_summary={"skipped":"cf-infra-admin is not mounted yet"}` -- the
+	// whole check skipped, with a reason -- NOT as every root erroring. A first
+	// version of this moved the read inside the loop and marked each root
+	// errored, which reads on the heartbeat as "drift UNKNOWN for:
+	// projects/recipes" where the bash says "DRIFT NOT CHECKED". Those are
+	// different claims: one says we looked and could not tell, the other says
+	// we never looked. internal/parity caught it.
+	declaresCF := make(map[string]bool, len(roots))
+	needCF := false
+	for _, root := range roots {
+		declares, err := rootDeclaresCloudflare(d.Cfg.Workdir, root)
+		if err != nil {
+			return nil, nil, fmt.Sprintf("could not decide which credentials %s needs: %v", root, err)
+		}
+		declaresCF[root] = declares
+		if declares {
+			needCF = true
+		}
+	}
+
+	var infra string
+	if needCF {
+		tok, ok, err := loadCFInfraAdminToken(d.Dir)
+		if err != nil {
+			return nil, nil, fmt.Sprintf("could not read cf-infra-admin: %v", err)
+		}
+		if !ok {
+			return nil, nil, "cf-infra-admin is not mounted yet"
+		}
+		infra = tok
+	}
 
 	for _, root := range roots {
 		rootDir := filepath.Join(d.Cfg.Workdir, root)
 		d.logf("drift: planning %s at %s", root, last)
+
+		env := baseEnv
+		if declaresCF[root] {
+			env = append(append([]string{}, baseEnv...), "CLOUDFLARE_API_TOKEN="+infra)
+		}
+
 		runner := d.NewTofu(env)
 		if err := runner.Init(ctx, rootDir); err != nil {
 			errored = append(errored, root)
