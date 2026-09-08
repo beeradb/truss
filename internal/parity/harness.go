@@ -279,9 +279,19 @@ func vaultItems(f Fixtures, now time.Time) map[string]map[string]string {
 // Every credential exists by default, matching the reference `op` shim,
 // which answers any reference it was not told about. A field the scenario
 // explicitly records as nil is NOT written, which is how that shim spells
-// "the item is absent" -- and it is the whole content of two scenarios
-// (the missing App key, and cf-infra-admin before credentials/ has ever
-// applied).
+// "the item is absent". A field recorded with any other value OVERRIDES the
+// default and is written verbatim -- which is how
+// test_an_empty_credential_file_is_as_fatal_as_a_missing_one spells "the
+// item is present but the mirror rendered it empty", a state a missing file
+// cannot represent.
+//
+// ⚠️ THE OVERRIDE BRANCH WAS MISSING UNTIL 2026-09-08, AND THIS COMMENT USED
+// TO CLAIM ONLY nil EVER MATTERED. That was true of the corpus that existed
+// then. Re-recording against origin/main added a scenario whose whole point
+// is an empty (not absent) app_id, and this function silently substituted
+// the default "123456" for it -- the fixture was recorded correctly and the
+// replay threw the override away, so the scenario "passed" without truss
+// ever seeing the empty file it was written to test.
 func writeSecrets(root string, f Fixtures, ledgerEndpoint string) error {
 	defaults := map[string]map[string]string{
 		"gcs-ledger": {
@@ -317,10 +327,15 @@ func writeSecrets(root string, f Fixtures, ledgerEndpoint string) error {
 			return err
 		}
 		for field, value := range fields {
-			// An explicit nil in the corpus removes the field entirely.
+			// An explicit nil in the corpus removes the field entirely; any
+			// other declared value overrides the default and is written as
+			// given, including an empty string.
 			if declared, ok := f.Secrets[vaultMount][item]; ok {
-				if v, named := declared[field]; named && v == nil {
-					continue
+				if v, named := declared[field]; named {
+					if v == nil {
+						continue
+					}
+					value = *v
 				}
 			}
 			if err := os.WriteFile(filepath.Join(dir, field), []byte(value), 0o600); err != nil {

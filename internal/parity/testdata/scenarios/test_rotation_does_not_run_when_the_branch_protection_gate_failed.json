@@ -3,7 +3,7 @@
     "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogYnJhbmNoIHByb3RlY3Rpb24gb24gbWFpbiBkb2VzIG5vdCBtZWV0IHRoZSBiYXI6IGVuZm9yY2VfYWRtaW5zIGlzIG9mZiAoYXBwbGllZD0wIG5vb3A9MCk=",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NTJaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJicmFuY2ggcHJvdGVjdGlvbiBvbiBtYWluIGRvZXMgbm90IG1lZXQgdGhlIGJhcjogZW5mb3JjZV9hZG1pbnMgaXMgb2ZmIiwKICAicm90YXRpb24iOiB7CiAgICAic2tpcHBlZCI6ICJicmFuY2ggcHJvdGVjdGlvbiBnYXRlIGZhaWxlZCIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogImJyYW5jaCBwcm90ZWN0aW9uIGdhdGUgZmFpbGVkIgogIH0sCiAgImV4cGlyaW5nIjogW10KfQ=="
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTNaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJicmFuY2ggcHJvdGVjdGlvbiBvbiBtYWluIGRvZXMgbm90IG1lZXQgdGhlIGJhcjogZW5mb3JjZV9hZG1pbnMgaXMgb2ZmIiwKICAicm90YXRpb24iOiB7CiAgICAic2tpcHBlZCI6ICJicmFuY2ggcHJvdGVjdGlvbiBnYXRlIGZhaWxlZCIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogImJyYW5jaCBwcm90ZWN0aW9uIGdhdGUgZmFpbGVkIgogIH0sCiAgImV4cGlyaW5nIjogW10KfQ=="
     },
     "exit_code": 1
   },
@@ -81,7 +81,7 @@
           "expires": "@+60d"
         },
         "nyt-cookie": {
-          "expires": "@+300d!"
+          "expires": "@+299d!"
         },
         "registry-pull": {
           "expires": "@+60d"
