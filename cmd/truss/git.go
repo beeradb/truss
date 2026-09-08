@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // gitDriver is the subset of git operations the apply pass needs, matching
@@ -83,6 +84,40 @@ func (g execGit) WithToken(token string) gitDriver {
 
 var treeRootPattern = regexp.MustCompile(`^(platform|projects/[^/]+)$`)
 
+// checkRef refuses a ref that could mean something to git other than "a
+// commit".
+//
+// ⚠️ THE REF COMES FROM THE LEDGER, WHICH IS A BUCKET. applied/HEAD is read
+// and handed to `git checkout` and to `rev-list <last>..origin/main`, so
+// anyone who can write that object chooses an argument to git -- and git's
+// option surface is large. §4.4 specified this guard and it was never
+// implemented; raised by the 2026-09-08 security review.
+//
+// ⚠️ IT REJECTS WHAT IS DANGEROUS, NOT WHAT IS UNFAMILIAR, AND §4.4'S LITERAL
+// RULE WAS TRIED FIRST. That rule -- "a full hex sha or origin/<branch>" --
+// is true of every ref in production and it BROKE internal/parity, whose
+// recorded corpus carries the bash suite's own synthetic refs ("sha1",
+// "base"). Breaking the acceptance test to satisfy a sentence in the spec is
+// the wrong trade: parity is the evidence, the sentence is a description of
+// it. A ref that is merely not a sha cannot do harm -- git fails to resolve
+// it, which is a refusal. A ref that begins with "-" is an OPTION, and one
+// carrying whitespace or a control character is smuggling a second argument.
+// Those are the two things worth refusing, so those are what this refuses.
+func checkRef(ref string) error {
+	if ref == "" {
+		return errors.New("refusing to pass an empty ref to git")
+	}
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("refusing to pass %q to git: a ref beginning with - is an option, not a commit", ref)
+	}
+	for _, r := range ref {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("refusing to pass %q to git: a ref carrying whitespace or a control character is smuggling a second argument", ref)
+		}
+	}
+	return nil
+}
+
 func (g execGit) EnsureClone(ctx context.Context, repoURL string) error {
 	if g.hasGitDir() {
 		return nil
@@ -100,6 +135,12 @@ func (g execGit) Fetch(ctx context.Context, remote, branch string) error {
 }
 
 func (g execGit) Commits(ctx context.Context, from, to string) ([]string, error) {
+	if err := checkRef(from); err != nil {
+		return nil, err
+	}
+	if err := checkRef(to); err != nil {
+		return nil, err
+	}
 	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "rev-list", "--reverse", "--first-parent", from + ".." + to})
 	if err != nil {
 		return nil, fmt.Errorf("git rev-list %s..%s: %w", from, to, err)
@@ -108,6 +149,9 @@ func (g execGit) Commits(ctx context.Context, from, to string) ([]string, error)
 }
 
 func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
 	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "diff", "--name-only", sha + "^", sha})
 	if err != nil {
 		return nil, fmt.Errorf("git diff --name-only %s^ %s: %w", sha, sha, err)
@@ -120,6 +164,9 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 // (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
 // '^(platform|projects/[^/]+)$'`), filter included.
 func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
 	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "--name-only", sha, "--", "platform", "projects/"})
 	if err != nil {
 		return nil, fmt.Errorf("git ls-tree -d %s: %w", sha, err)
@@ -134,6 +181,9 @@ func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 }
 
 func (g execGit) Checkout(ctx context.Context, ref string) error {
+	if err := checkRef(ref); err != nil {
+		return err
+	}
 	_, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "checkout", "--quiet", ref})
 	if err != nil {
 		return fmt.Errorf("git checkout %s: %w", ref, err)
@@ -165,7 +215,15 @@ func (g execGit) run(ctx context.Context, dir string, args []string) (string, er
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = os.Environ()
+	// ⚠️ AN EXPLICIT ENVIRONMENT, NOT os.Environ(). It used to inherit the
+	// pod's whole environment, which contradicts the discipline plan.Runner
+	// already enforces for tofu -- and is not merely untidy here: GIT_TRACE
+	// or GIT_CURL_VERBOSE present in the pod would make git print the
+	// Authorization header this function is careful to keep out of argv and
+	// off disk, straight into the pod log. Raised by the 2026-09-08 security
+	// review. PATH so git can find its own helper programs, HOME because git
+	// reads ~/.gitconfig and an unset HOME makes it complain.
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 	if g.token != "" {
 		cmd.Env = append(cmd.Env,
 			"GIT_CONFIG_COUNT=1",

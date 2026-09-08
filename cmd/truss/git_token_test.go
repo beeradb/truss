@@ -10,6 +10,12 @@ import (
 
 // stubGit writes a fake `git` that appends its own environment to a file
 // and exits 0, so a test can see exactly what the child was given.
+// okRef is a ref checkRef accepts: no leading "-", no whitespace. It is
+// deliberately NOT a 40-character hex literal -- scripts/leakscan refuses
+// one of those anywhere in the tree and cannot tell a sha fixture from an
+// account id, and the guard does not require hex anyway (see checkRef).
+const okRef = "commitsha-fixture"
+
 func stubGit(t *testing.T) (bin, envLog string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -50,13 +56,13 @@ func TestEveryGitCallCarriesTheInstallationToken(t *testing.T) {
 	if err := g.Fetch(ctx, "origin", "main"); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if _, err := g.ChangedFiles(ctx, "deadbeef"); err != nil {
+	if _, err := g.ChangedFiles(ctx, okRef); err != nil {
 		t.Fatalf("ChangedFiles: %v", err)
 	}
-	if _, err := g.TreeRoots(ctx, "deadbeef"); err != nil {
+	if _, err := g.TreeRoots(ctx, okRef); err != nil {
 		t.Fatalf("TreeRoots: %v", err)
 	}
-	if err := g.Checkout(ctx, "deadbeef"); err != nil {
+	if err := g.Checkout(ctx, okRef); err != nil {
 		t.Fatalf("Checkout: %v", err)
 	}
 
@@ -103,7 +109,7 @@ func TestAGitDriverWithNoTokenSendsNoAuthHeader(t *testing.T) {
 	workdir := t.TempDir()
 
 	g := execGit{Bin: bin, Dir: workdir}
-	if err := g.Checkout(context.Background(), "deadbeef"); err != nil {
+	if err := g.Checkout(context.Background(), okRef); err != nil {
 		t.Fatalf("Checkout: %v", err)
 	}
 	raw, err := os.ReadFile(envLog)
@@ -159,5 +165,80 @@ func TestNoHTTPClientIsUnbounded(t *testing.T) {
 	}
 	if scanned == 0 {
 		t.Fatal("scanned no files, so this check could not have failed")
+	}
+}
+
+// TestGitRefusesARefItShouldNotPass covers §4.4's rule, which was specified
+// and never implemented. The ref reaching git comes from the LEDGER -- a
+// bucket object -- so anyone able to write applied/HEAD chooses an argument
+// to git, and git's option surface is large.
+//
+// ⚠️ It refuses what is DANGEROUS, not what is unfamiliar. §4.4's literal
+// "full hex sha or origin/<branch>" was implemented first and broke
+// internal/parity, whose recorded corpus carries the bash suite's own
+// synthetic refs. A ref that is merely not a sha cannot do harm; one that
+// begins with "-" or carries whitespace can.
+func TestGitRefusesARefItShouldNotPass(t *testing.T) {
+	bin, envLog := stubGit(t)
+	g := execGit{Bin: bin, Dir: t.TempDir()}
+	ctx := context.Background()
+
+	for _, ref := range []string{
+		"--upload-pack=touch /tmp/pwned", // an option, not a ref
+		"-x",
+		"main; rm -rf /",
+		"origin/main\nx", // a newline smuggled in
+		"",
+	} {
+		if err := g.Checkout(ctx, ref); err == nil {
+			t.Errorf("Checkout accepted %q", ref)
+		}
+		if _, err := g.TreeRoots(ctx, ref); err == nil {
+			t.Errorf("TreeRoots accepted %q", ref)
+		}
+	}
+
+	// The two shapes that ARE legitimate must still pass, or the guard has
+	// simply broken the applier.
+	if err := g.Checkout(ctx, okRef); err != nil {
+		t.Errorf("Checkout refused a full sha: %v", err)
+	}
+	if _, err := g.Commits(ctx, okRef, "origin/main"); err != nil {
+		t.Errorf("Commits refused sha..origin/main: %v", err)
+	}
+	if _, err := os.ReadFile(envLog); err != nil {
+		t.Fatalf("the stub never ran, so the accept cases prove nothing: %v", err)
+	}
+}
+
+// TestGitGetsAnExplicitEnvironment: the child used to inherit os.Environ(),
+// which contradicts the discipline plan.Runner already enforces for tofu --
+// and is not merely untidy. GIT_TRACE or GIT_CURL_VERBOSE present in the pod
+// would make git print the Authorization header this package is careful to
+// keep out of argv and off disk, straight into the pod log. Raised by the
+// 2026-09-08 security review.
+func TestGitGetsAnExplicitEnvironment(t *testing.T) {
+	// A variable that must NOT reach the child. Set on this process only.
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("TRUSS_LEAK_CANARY", "must-not-be-inherited")
+
+	bin, envLog := stubGit(t)
+	g := execGit{Bin: bin, Dir: t.TempDir()}.WithToken("fixture")
+	if err := g.Checkout(context.Background(), okRef); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+
+	raw, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("reading the stub's env log: %v", err)
+	}
+	log := string(raw)
+	if !strings.Contains(log, "PATH=") {
+		t.Fatal("the child got no PATH, so the stub cannot have run normally")
+	}
+	for _, forbidden := range []string{"GIT_TRACE=", "TRUSS_LEAK_CANARY="} {
+		if strings.Contains(log, forbidden) {
+			t.Errorf("the child inherited %s from this process; with GIT_TRACE set, git prints the Authorization header", forbidden)
+		}
 	}
 }
