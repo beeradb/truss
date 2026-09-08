@@ -999,3 +999,30 @@ should guess them and nobody needs to decide them.
 - **Which jq version produced the digests currently in the bucket**, and whether CI's and the
   image's are the same today. Decision 7 removes the question going forward; it still needs
   answering for digests already recorded against commits that have not applied.
+
+### Measured 2026-09-08
+
+Two of the three are now settled, from the live signing path in the production pod:
+
+| | |
+| --- | --- |
+| endpoint | `https://storage.googleapis.com` |
+| addressing | **path-style** (`ForcePathStyle: True`) |
+| region in the credential scope | **`us-east-1`** |
+| signed headers | exactly `host;x-amz-content-sha256;x-amz-date` |
+
+⚠️ **`us-east-1` is botocore's default, not a location.** Nothing sets `AWS_REGION` anywhere,
+so every working production request was signed with that scope. Google does not care what the
+region says, but the signature covers it, so it must match. Do not "fix" it to a real GCP
+region.
+
+**The create-if-absent precondition is still unverified, and the CLI cannot verify it.**
+`aws s3api put-object --if-none-match "*"` fails with `SignatureDoesNotMatch … Invalid
+argument` — which is the **checksum-trailer** rejection, not the precondition. Passing that
+flag puts the CLI on a code path that adds trailer headers, and the endpoint refuses the
+request before evaluating `If-None-Match` at all. Only a signer that omits checksum headers
+can ask the question, which is `internal/ledger` itself: `TestAgainstTheRealBucket`, run
+in-cluster against a scratch prefix.
+
+That result also confirms the trailer hazard is **live today** rather than a note from
+2026-09-06, which is why the fake server in that package rejects trailer headers on sight.
