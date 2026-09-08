@@ -33,12 +33,33 @@ Truss is not backend-agnostic and does not pretend to be. Today it assumes:
 | --- | --- |
 | forge | GitHub — Apps, branch protection, PR reviews |
 | infrastructure tool | OpenTofu, with a provider allowlist and one pinned version |
-| ledger and state | object storage that supports versioning and a create-not-overwrite grant |
+| ledger and state | object storage reachable as an S3-compatible endpoint (SigV4) |
 | secret store | one vault the applier alone can read, one per project for runtime |
 | alerting | one chat transport, on success as well as failure |
 
 Making any of those swappable is a later problem. Naming them is the honest
 alternative to a pluggability claim nothing has ever tested.
+
+That ledger row used to say the storage layer enforces a create-not-overwrite
+grant. Measured against the real bucket on 2026-09-08 (`internal/ledger/
+sigv4.go`, `store.go`): it doesn't. `If-None-Match: *` is accepted and
+silently ignored — two writes to the same key both return 200, the second
+overwriting the first — and the endpoint refuses to mix `x-amz` headers,
+which SigV4 requires, with GCS's own `x-goog-if-generation-match`. No
+conditional-write primitive is reachable from this client at all. Mutual
+exclusion instead comes from the applier itself: one pass runs at a time,
+and OpenTofu holds its own state lock. Nothing the bucket enforces.
+
+Whether Cloudflare R2 would actually fix that gap, rather than just relocate
+it, is a live question — not answered here. R2's S3 API documents real
+conditional-write support: `PutObject` honours `If-Match`/`If-None-Match`
+with a `412` on failure, through the standard S3 API, not a Workers-only
+feature, so switching could plausibly deliver the create-if-absent this
+client doesn't have today. R2 has no bucket or object versioning at all,
+but nothing here uses that. None of this has been tested against a real R2
+bucket with this exact SigV4 client — it's desk research against Cloudflare's
+own docs, not a measurement, and deserves the same in-cluster test that found
+the GCS gap before anyone relies on it.
 
 ## The change path
 

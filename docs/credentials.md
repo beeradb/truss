@@ -14,6 +14,42 @@ demand, while a PAT expires on its own and nothing can renew it via API.
 Every item in the vault carries an **`expires`** field: a real date, or
 `never`. The applier reads every one of them, every run.
 
+## What's actually rotated today
+
+Seven credentials, one rotated:
+
+| Credential | What it is | Rotated? |
+| --- | --- | --- |
+| `cf-infra-admin` | the Cloudflare token every non-credentials root applies under | **Yes** — minted and rotated on the two-generation clock |
+| `cf-token-mint` | the one Cloudflare token that can mint others | No — root, hand-made, by definition: it's the thing minting depends on |
+| `github-app` private key | signs the GitHub App's identity | No — root, hand-made |
+| `gcs-ledger` access/secret key | the ledger bucket's own credentials | No — root, hand-made |
+| `gcp-apply` | the GCP service account key every root's Google provider and the ledger backend use | No — root, hand-made |
+| `tofu-encryption` passphrase | encrypts the credentials root's own state | No — root, hand-made, and harder to fix than the rest (see below) |
+| `telegram-alert` bot token | where alerts go | No — root, hand-made |
+
+`gcp-apply` doesn't have to stay that way. GCP's IAM API supports creating and
+deleting a service account's keys without touching what the account is
+allowed to do — rotating the key doesn't change any IAM binding, so there's
+none of the re-encryption problem `tofu-encryption` has. What's missing is
+the same minter/worker split Cloudflare already has: a dedicated, hand-made
+"key-minter" identity with `iam.serviceAccountKeys.admin` on the `gcp-apply`
+service account, separate from `gcp-apply` itself, so the credential being
+rotated is never the one doing the rotating. Buildable, not built — the
+actual GCP IAM setup lives in `beeradb/platform`, not this repo, so there's
+nothing here to point at yet.
+
+`tofu-encryption` is different in kind, not just degree. Rotating an API
+token works because the old and new can coexist — they're two valid keys to
+the same door. Rotating this passphrase means state already encrypted with
+the old one has to get re-encrypted with the new one, or it becomes
+permanently unreadable, and this is the one state file that defines every
+other credential in the system. OpenTofu's own encryption feature supports
+multiple decryption methods, so a safe two-phase rotation — accept either
+during a transition, then drop the old one — is buildable the same way. It's
+just a harder kind of rotation, a migration rather than a re-mint, and
+nobody's built it either.
+
 ## Rotation is the applier's job, not a calendar's
 
 Nobody renews a token on a calendar, and nothing has to remember to. Every
@@ -50,16 +86,19 @@ hand. That widens nothing: a credential that can mint any credential could
 always have minted this one.
 
 What cannot be rotated is what no API can mint. Those the applier **watches**:
-anything within 30 days, or with no date recorded at all, is in every
-heartbeat and every daily alert until it is renewed. The nag is daily on
-purpose — a hand-made credential lapsing takes the applier down with it, and a
-warning sent once is a warning sent while somebody was asleep.
+anything inside the warn window, or with no date recorded at all, is in every
+heartbeat and every daily alert until it is renewed. The window is
+configurable (`EXPIRY_WARN_DAYS`, 30 days by default) — how much lead time a
+renewal actually needs varies by provider, so the number is a knob, not a
+constant. The nag itself stays daily regardless of the window's width —
+a hand-made credential lapsing takes the applier down with it, and a warning
+sent once is a warning sent while somebody was asleep.
 
-`never` skips the watch entirely, and it should be rare. Most hand-made
+`never` skips the watch entirely, and it should be rare. The knob changes how
+much notice you get; it doesn't change the recommendation. Most hand-made
 credentials aren't the kind that should genuinely outlive every renewal
-cycle — they're the kind that should carry a real date and let the 30-day
-window do its job: a month's notice to renew, instead of nothing until it's
-already down.
+cycle — they're the kind that should carry a real date, sized to whatever
+lead time `EXPIRY_WARN_DAYS` is set to, and actually get rotated on it.
 
 ## Revocation is a commit, not a dashboard
 
