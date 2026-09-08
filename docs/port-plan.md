@@ -1090,3 +1090,57 @@ proving only that a bare clone does not fetch `refs/pull/*`. The corrected check
 That is the third time in this project a check has passed or failed for a reason unrelated to
 what it claimed to test. The rule stands: **a check is only a check if you know what its
 failure would mean.**
+
+## 9. Next evolution: a scratch image, with git in the init phase
+
+Decided 2026-09-08, deliberately NOT built with the port. Written down because
+the shape is settled and one part of it is a trap.
+
+**The goal is `FROM scratch` for the truss image.** Measured on the live
+applier image, not assumed:
+
+| binary | linkage | scratch-compatible |
+| --- | --- | --- |
+| `tofu` | `not a dynamic executable` — static Go | **yes** |
+| `git` | libc, `ld-linux`, libpcre2, libz, **plus 166 helper programs** in its exec-path, including `git-remote-https`, which is what actually fetches | **no** |
+
+So git is the only thing standing between truss and a scratch base, and the
+image today is `ubuntu:24.04` carrying `op`, `gh`, the aws CLI, `jq`, python
+and pip — every one of which the Go port already made unnecessary (§6).
+
+⚠️ **AN INIT CONTAINER REMOVES GIT'S NETWORK USE, NOT GIT'S BINARY.**
+`rev-list`, `diff --name-only`, `ls-tree` and `checkout` are local operations
+and still need the executable. Reaching scratch means the init phase
+materialising EVERYTHING the pass will ask git for, so the main container asks
+nothing.
+
+That is possible, because every ref the pass touches is knowable before it
+runs, and the ordering has no circularity:
+
+1. **init 1 — truss (scratch).** `truss ledger get $LEDGER_HEAD_KEY` writes
+   `last` to the shared volume. Needs the ledger credential; needs no git.
+   The subcommand already exists.
+2. **init 2 — a git image.** Clone, fetch, then write `meta.json` (commits,
+   changed files, tree roots) and a worktree per ref under `trees/<sha>/`.
+   Needs the GitHub token; needs no cloud credentials.
+3. **main — truss (scratch).** Reads the filesystem. `gitDriver` becomes a
+   filesystem-backed implementation — the interface and its fake already
+   exist, so this is a swap rather than a redesign.
+
+⚠️ **THE TRAP: `pr.HeadSHA` COMES FROM THE FORGE, NOT FROM GIT.** The pass
+checks out the PR head discovered by the approval gate, so init 2 cannot learn
+that list by asking git for the commit queue alone. It works at all only
+because the gate requires web-flow merge commits, which makes each PR head the
+SECOND PARENT of a merge commit on main. **init 2 must therefore materialise
+each queued commit AND its parents.** Materialising only the queue looks
+right, passes a smoke test, and fails on the first real pull request.
+
+**The security property is worth more than the base image.** The git container
+holds the GitHub token; the truss container holds write credentials for four
+clouds; neither holds both. Today one image holds all of it.
+
+Also considered and not chosen: replacing git with the GitHub API (the compare
+and tarball endpoints, decoded with `archive/tar` and `compress/gzip` — all
+stdlib). It reaches scratch too and deletes three bug classes outright, but it
+rewrites how truss learns about commits, where the init-phase route only moves
+git out of the image.
