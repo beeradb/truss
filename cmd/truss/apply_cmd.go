@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -579,6 +580,30 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 	env := []string{"PATH=" + d.PATH, "HOME=" + d.HOME}
 	if token != "" {
 		env = append(env, "GH_TOKEN="+token)
+	}
+
+	// ⚠️ THE 1PASSWORD SERVICE ACCOUNT TOKEN, AND IT WAS MISSING. The
+	// credentials root declares a `onepassword` provider, which reads its
+	// credentials from the environment; without this tofu fails at plan with
+	// "Invalid provider configuration. Either Connect credentials … or
+	// Service Account … should be set." apply.sh:99-100 exports it for every
+	// root. Found by the first non-drift trial against production,
+	// 2026-09-08.
+	//
+	// ⚠️ AND THIS IS WHY $OP_TOKEN_FILE IS A REQUIRED VARIABLE. I had
+	// recorded it as "required by config.Load and read by nothing", which
+	// was wrong: it is read to feed exactly this, and truss demanded the
+	// variable while never using it -- the worst of both.
+	if d.Cfg.OPTokenFile != "" {
+		b, err := os.ReadFile(d.Cfg.OPTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("refusing to continue: reading %s: %w", d.Cfg.OPTokenFile, err)
+		}
+		opToken := strings.TrimRight(string(b), "\n")
+		if opToken == "" {
+			return nil, fmt.Errorf("refusing to continue: %s is empty -- the credentials root's onepassword provider cannot authenticate", d.Cfg.OPTokenFile)
+		}
+		env = append(env, "OP_SERVICE_ACCOUNT_TOKEN="+opToken)
 	}
 	appID, err := d.Dir.Field(itemGitHubApp, fieldGitHubAppID)
 	if err != nil {

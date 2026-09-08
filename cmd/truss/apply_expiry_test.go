@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -161,5 +163,67 @@ func TestBuildBaseEnvRefusesAMirrorMissingTheApp(t *testing.T) {
 	d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root"}
 	if _, err := buildBaseEnv(d, ""); err == nil {
 		t.Fatal("buildBaseEnv accepted a mirror with no github-app item")
+	}
+}
+
+// TestTofuGetsTheOnePasswordServiceAccountToken covers the fourth
+// environment-parity gap, found by the first non-drift trial against
+// production. The credentials root declares a `onepassword` provider, which
+// reads its credentials from the environment; without this tofu fails at plan
+// with "Invalid provider configuration ... Service Account ... should be set",
+// and the pass reports "tofu plan failed for credentials".
+//
+// ⚠️ THIS IS WHY $OP_TOKEN_FILE IS REQUIRED. It had been recorded as
+// "required and read by nothing" -- wrong, and the worst of both: truss
+// demanded the variable and never used it.
+func TestTofuGetsTheOnePasswordServiceAccountToken(t *testing.T) {
+	dir, write := testSecretsDir(t)
+	writeGitHubAppSecret(t, write)
+
+	tokenPath := filepath.Join(t.TempDir(), "op")
+	if err := os.WriteFile(tokenPath, []byte("op-fixture-value\n"), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+
+	cfg := testConfig()
+	cfg.OPTokenFile = tokenPath
+	d := applyDeps{Cfg: cfg, Dir: dir, PATH: "/usr/bin", HOME: "/root"}
+
+	env, err := buildBaseEnv(d, "")
+	if err != nil {
+		t.Fatalf("buildBaseEnv: %v", err)
+	}
+	var got string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "OP_SERVICE_ACCOUNT_TOKEN=") {
+			got = strings.TrimPrefix(kv, "OP_SERVICE_ACCOUNT_TOKEN=")
+		}
+	}
+	if got == "" {
+		t.Fatal("tofu's environment has no OP_SERVICE_ACCOUNT_TOKEN; the credentials root cannot plan")
+	}
+	// Trailing newline stripped, matching the bash's $(cat ...).
+	if got != "op-fixture-value" {
+		t.Errorf("OP_SERVICE_ACCOUNT_TOKEN = %q, want the file's contents with the trailing newline stripped", got)
+	}
+}
+
+// TestAnEmptyOnePasswordTokenIsRefused: absent is not empty. A zero-byte
+// token file would authenticate as nobody and fail inside a provider three
+// steps later.
+func TestAnEmptyOnePasswordTokenIsRefused(t *testing.T) {
+	dir, write := testSecretsDir(t)
+	writeGitHubAppSecret(t, write)
+
+	tokenPath := filepath.Join(t.TempDir(), "op")
+	if err := os.WriteFile(tokenPath, []byte("\n"), 0o600); err != nil {
+		t.Fatalf("writing the fixture: %v", err)
+	}
+	cfg := testConfig()
+	cfg.OPTokenFile = tokenPath
+	d := applyDeps{Cfg: cfg, Dir: dir, PATH: "/usr/bin", HOME: "/root"}
+
+	if _, err := buildBaseEnv(d, ""); err == nil {
+		t.Fatal("buildBaseEnv accepted an empty 1Password token")
 	}
 }
