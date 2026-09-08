@@ -387,27 +387,6 @@ var Divergences = []Divergence{
 	// FINDINGS -- nobody decided these. Reported to the owner as defects.
 	// -----------------------------------------------------------------
 	{
-		ID:     "SECRETS-WORDING-VAULT-VS-MOUNTED",
-		Status: StatusFinding,
-		Scenarios: []string{
-			"test_a_skipped_drift_check_says_so_rather_than_looking_clean",
-			"test_infra_admin_token_is_read_only_when_a_project_root_needs_it#2",
-		},
-		Accept: cfInfraAdminVaultWording,
-		Bash:   "\"cf-infra-admin is not mounted\" / \"...is not mounted yet\"",
-		Truss:  "\"cf-infra-admin is not in the platform vault\" / \"...is not in the vault yet\"",
-		Why: "PORT LAG, TRACED TO THE EXACT COMMIT. The pre-Vault apply.sh (the 851-line file the old corpus was " +
-			"recorded from, and the one this wording was ported against) said \"is not in the platform vault\" / " +
-			"\"is not in the vault yet\" -- truss's cmd/truss/apply_cmd.go:721 and :880 match it verbatim. Commit " +
-			"fff78e1 (\"Vault for the platform's credentials\", #5) renamed the wording to \"is not mounted\" / " +
-			"\"is not mounted yet\" as part of the move to file-rendered credentials, and nothing updated truss to " +
-			"follow. internal/secrets/dir.go's own Field error already uses the NEW words -- \"is not mounted -- " +
-			"is the credential mirror applied and syncing?\" -- written after the same commit, which is why truss " +
-			"is internally inconsistent: one call site tracks the bash, these two are frozen at the commit before it.",
-		Ref: "cmd/truss/apply_cmd.go:721 and :880 vs internal/secrets/dir.go:41; " +
-			"applier/apply.sh:727 and :1044 (was :544 and :805 before fff78e1)",
-	},
-	{
 		ID:     "BASH-DIES-SILENT-BEFORE-HEARTBEAT",
 		Status: StatusFinding,
 		Scenarios: []string{
@@ -477,37 +456,6 @@ func expirySweepCannotFailLike1Password(d Diff) bool {
 	default:
 		return false
 	}
-}
-
-// cfInfraAdminVaultWording is SECRETS-WORDING-VAULT-VS-MOUNTED's matcher:
-// the bash's "is not mounted" / "is not mounted yet" against truss's
-// "is not in the platform vault" / "is not in the vault yet", for the
-// specific sentences the two known call sites produce. Each pair is pinned
-// exactly, on both sides, whether the diff arrives as a bare value or
-// embedded in the alert's own frame.
-var cfInfraAdminWordingPairs = [][2]string{
-	{
-		"cf-infra-admin is not mounted: it is minted by credentials/, so that root must be applied before projects/recipes can be",
-		"cf-infra-admin is not in the platform vault: it is minted by credentials/, so that root must be applied before projects/recipes can be",
-	},
-	{
-		"cf-infra-admin is not mounted yet",
-		"cf-infra-admin is not in the vault yet",
-	},
-}
-
-func cfInfraAdminVaultWording(d Diff) bool {
-	for _, pair := range cfInfraAdminWordingPairs {
-		bash, truss := pair[0], pair[1]
-		if exact(bash, truss)(d) {
-			return true
-		}
-		if d.Kind == "alert" && strings.Contains(d.Bash, bash) && strings.Contains(d.Truss, truss) &&
-			strings.Replace(d.Bash, bash, truss, 1) == d.Truss {
-			return true
-		}
-	}
-	return false
 }
 
 // silentDeathBeforeHeartbeat matches BASH-DIES-SILENT-BEFORE-HEARTBEAT's one

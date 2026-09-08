@@ -276,10 +276,9 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	} else if driftRun {
 		// ⚠️ ROTATION BELONGS TO THE DAILY PASS. The deployed applier runs
 		// rotate_credentials and then check_drift together under
-		// DRIFT_CHECK=1. credentialsAppliedAt is "" here because no commit
-		// loop ran, which correctly leaves runRotation's "already applied
-		// this run" short-circuit inert.
-		summary, changes, rotErr := runRotation(ctx, d, last, "", cc)
+		// DRIFT_CHECK=1; the daily pass never runs the commit loop, so
+		// rotation has nothing from this run to have already applied.
+		summary, changes, rotErr := runRotation(ctx, d, last, cc)
 		rotationSummary = summary
 		rotatedChanges = changes
 		if rotErr != nil {
@@ -326,7 +325,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// sends no failure alert and leaves HEAD unmoved, which
 		// runCommitLoop already guarantees by returning an empty failure
 		// and the pre-contention HEAD.
-		newLast, applied, noop, loopFailure, _, _ := runCommitLoop(ctx, d, last, cc)
+		newLast, applied, noop, loopFailure, _ := runCommitLoop(ctx, d, last, cc)
 		last = newLast
 		appliedCount = applied
 		noopCount = noop
@@ -453,12 +452,10 @@ func toLedgerExpiring(in []secrets.Expiring) []ledger.Expiring {
 // runCommitLoop walks every commit from last (exclusive) to origin/main
 // (inclusive), applying each one's touched roots in order. It returns the
 // new HEAD, the applied/noop counts, a failure reason (if the pass must
-// stop), the sha at which the credentials root was last applied THIS run
-// (rotation's own "already applied this run" check), and whether it
-// stopped because of state-lock contention -- which is not a failure (§2
-// item 7): no failed/<sha> is filed, HEAD is not advanced past the
-// contended commit, and the returned failure is empty.
-func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure string, credentialsAppliedAt string, lockContended bool) {
+// stop), and whether it stopped because of state-lock contention -- which
+// is not a failure (§2 item 7): no failed/<sha> is filed, HEAD is not
+// advanced past the contended commit, and the returned failure is empty.
+func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure string, lockContended bool) {
 	// The clone, the fetch and the installation token are runApplyPass's job
 	// now, done BEFORE the drift branch so both paths get a repository -- see
 	// the note there. This function is handed a Git that already carries the
@@ -469,12 +466,12 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	// AGENTS.md already has a standing rule against.
 	commits, err := d.Git.Commits(ctx, last, "origin/main")
 	if err != nil {
-		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), "", false
+		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), false
 	}
 
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
-		return last, 0, 0, err.Error(), "", false
+		return last, 0, 0, err.Error(), false
 	}
 
 	for _, sha := range commits {
@@ -482,21 +479,21 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
-			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), credentialsAppliedAt, false
+			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), false
 		}
 		treeRoots, err := d.Git.TreeRoots(ctx, sha)
 		if err != nil {
-			return last, applied, noop, fmt.Sprintf("could not read the tree for %s: %v", sha, err), credentialsAppliedAt, false
+			return last, applied, noop, fmt.Sprintf("could not read the tree for %s: %v", sha, err), false
 		}
 		roots := repo.TouchedRoots(changedFiles, treeRoots)
 
 		if len(roots) == 0 {
 			d.logf("noop: %s touches no root", sha)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
-				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), credentialsAppliedAt, false
+				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), false
 			}
 			if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
-				return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), credentialsAppliedAt, false
+				return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
 			}
 			last = sha
 			noop++
@@ -511,13 +508,13 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
 				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 			}
-			return last, applied, noop, reason, credentialsAppliedAt, false
+			return last, applied, noop, reason, false
 		}
 
 		if err := d.Git.Checkout(ctx, headSHA); err != nil {
 			reason := fmt.Sprintf("could not check out %s: %v", headSHA, err)
 			_ = d.Journal.PutFailed(ctx, sha, reason)
-			return last, applied, noop, reason, credentialsAppliedAt, false
+			return last, applied, noop, reason, false
 		}
 
 		summaries := map[string]ledger.RootSummary{}
@@ -526,31 +523,28 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			summary, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, headSHA, root)
 			if lockBusy {
 				d.logf("state lock held elsewhere; ending this pass without recording a failure")
-				return last, applied, noop, "", credentialsAppliedAt, true
+				return last, applied, noop, "", true
 			}
 			if reason != "" {
 				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
 					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 				}
-				return last, applied, noop, reason, credentialsAppliedAt, false
+				return last, applied, noop, reason, false
 			}
 			summaries[root] = summary
-			if root == "credentials" {
-				credentialsAppliedAt = sha
-			}
 		}
 
 		if err := d.Journal.PutApplied(ctx, sha, summaries); err != nil {
-			return last, applied, noop, fmt.Sprintf("could not record %s as applied: %v", sha, err), credentialsAppliedAt, false
+			return last, applied, noop, fmt.Sprintf("could not record %s as applied: %v", sha, err), false
 		}
 		if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
-			return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), credentialsAppliedAt, false
+			return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
 		}
 		last = sha
 		applied++
 	}
 
-	return last, applied, noop, "", credentialsAppliedAt, false
+	return last, applied, noop, "", false
 }
 
 // credCache lazily reads the "applying credentials" -- Google's key, the
@@ -711,7 +705,7 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		}
 		if !ok {
 			return ledger.RootSummary{}, false, fmt.Sprintf(
-				"cf-infra-admin is not in the platform vault: it is minted by credentials/, so that root must be applied before %s can be", root)
+				"cf-infra-admin is not mounted: it is minted by credentials/, so that root must be applied before %s can be", root)
 		}
 		env = append(env, "CLOUDFLARE_API_TOKEN="+infra)
 	}
@@ -797,10 +791,15 @@ func countResourceChanges(planJSON []byte) (int, bool) {
 // {"skipped": "..."} or a RootSummary-shaped success, or {"failed": "..."}),
 // the number of resource changes rotation made, and an error only when
 // rotation itself failed (never for a skip, which is not a failure).
-func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt string, cc *credCache) (summary any, changes int, err error) {
-	if credentialsAppliedAt == last && last != "" {
-		return map[string]string{"skipped": "credentials applied this run at " + last}, 0, nil
-	}
+func runRotation(ctx context.Context, d applyDeps, last string, cc *credCache) (summary any, changes int, err error) {
+	// ⚠️ THE "ALREADY APPLIED THIS RUN" SKIP IS GONE, BECAUSE IT BECAME
+	// UNREACHABLE. It existed so a pass that had just applied credentials/ in
+	// the commit loop would not immediately re-plan it here. Rotation now
+	// runs only on the daily pass, and the daily pass skips the commit loop
+	// entirely -- so the two can no longer happen in one run and the branch
+	// could never be taken. A guard that cannot fire reads like protection
+	// and is not. See applier/apply.sh:870-875 for the same removal on the
+	// bash side.
 
 	// ⚠️ CHECK OUT FIRST, THEN TEST FOR THE DIRECTORY. HasDir reads the
 	// working tree, so asking before the checkout asked about whatever tree
@@ -871,7 +870,7 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 		return nil, nil, fmt.Sprintf("could not read cf-infra-admin: %v", err)
 	}
 	if !ok {
-		return nil, nil, "cf-infra-admin is not in the vault yet"
+		return nil, nil, "cf-infra-admin is not mounted yet"
 	}
 
 	google, err := loadGCPCredentials(d.Dir)

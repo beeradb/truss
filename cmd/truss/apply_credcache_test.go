@@ -24,10 +24,12 @@ import (
 // (which of the two gets called on a given pass), which is what lets this
 // test fail on FIX 3 alone -- see the negative-test note in the PR/report.
 //
-// runRotation is given credentialsAppliedAt="" rather than the sha the
-// commit loop actually applied at, on purpose: passing the real value would
-// hit runRotation's "already applied this run" short-circuit and return
-// before ever touching cc, which would test nothing about the cache.
+// runRotation no longer takes a credentialsAppliedAt argument -- the
+// "already applied this run" short-circuit it used to gate on was removed
+// as unreachable (runCommitLoop and runRotation never run in the same real
+// pass any more; see the comment where the branch used to be). So calling
+// it here, right after runCommitLoop applied credentials/, tests the shared
+// cache with nothing left to short-circuit around.
 //
 // ⚠️ HOW THE READS ARE COUNTED. secrets.Dir is a concrete struct
 // (filepath.Join + os.Stat + os.ReadFile), not an interface, so there is no
@@ -72,7 +74,7 @@ func TestOneCredentialCachePerPass(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	newLast, applied, _, loopFailure, _, _ := runCommitLoop(ctx, deps, head, cc)
+	newLast, applied, _, loopFailure, _ := runCommitLoop(ctx, deps, head, cc)
 	if loopFailure != "" {
 		t.Fatalf("runCommitLoop: %s", loopFailure)
 	}
@@ -80,7 +82,7 @@ func TestOneCredentialCachePerPass(t *testing.T) {
 		t.Fatalf("runCommitLoop applied %d commits, want 1 -- the credentials root never got exercised", applied)
 	}
 
-	if _, _, err := runRotation(ctx, deps, newLast, "", cc); err != nil {
+	if _, _, err := runRotation(ctx, deps, newLast, cc); err != nil {
 		t.Fatalf("runRotation: %v", err)
 	}
 
