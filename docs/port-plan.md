@@ -1144,3 +1144,80 @@ and tarball endpoints, decoded with `archive/tar` and `compress/gzip` — all
 stdlib). It reaches scratch too and deletes three bug classes outright, but it
 rewrites how truss learns about commits, where the init-phase route only moves
 git out of the image.
+
+## 10. What belongs to truss, and what belongs to a deployment
+
+Decided by the owner 2026-09-08. Recorded because the line is not the obvious
+one, and because half of it is already true and the other half is not.
+
+**The line is ENGINE versus DEPLOYMENT VALUES — not code versus Terraform.**
+Truss ships the engine and the tools that operate it. A deployment ships its
+own infrastructure and the values that name it: buckets, vaults, hosts,
+accounts, and the manifests that carry them.
+
+⚠️ **`scripts/leakscan` is what enforces this, and it is not advisory.** It
+refuses an IP address, a secret-store reference, a URL path into a host or a
+32-character hex literal anywhere in this tree -- and it refused the first
+draft of THIS paragraph, for naming a store reference in the course of
+explaining that it refuses them. The guard does not read for intent, which is
+the property that makes it worth having. That is why the CronJob manifests stay with
+the deployment even though they are engine artefacts, and why the cutover
+runbook for this deployment could not be committed here. A repository that can
+be published is one that has never been allowed to learn where it runs.
+
+### The forge tooling comes in, and one piece closes a real hole
+
+`truss token` already replaces the App-token shell script, and
+`truss plan-digest` already replaces the jq pipeline. Three remain:
+
+- **`publish-plan-digest`.** This is the one worth doing first, and not for
+  tidiness. It runs in CI, so the digest canonicalisation exists TWICE today:
+  a jq pipeline that CI uses to WRITE the digest, and the Go reimplementation
+  in `internal/plan/digest.go` that the applier uses to CHECK it.
+  `TestDigestAgreesWithJQ` exists only to keep two implementations of one
+  algorithm in step. Have CI run the truss binary and the whole class of drift
+  disappears -- one implementation on both sides of the gate, and that test
+  becomes a historical curiosity rather than a load-bearing guard.
+- **`force-unlock`.** ⚠️ ON THE CRITICAL PATH FOR §9. It is a standalone
+  operator script that runs `bash -c` inside the CronJob's own image, and §9
+  strips bash to reach a scratch base. It must become a truss subcommand in
+  the same change, or the break-glass tool for a wedged state lock stops
+  working on the day it is most needed. Nothing recorded that conflict until
+  now.
+- **The PR-authoring Job**, same borrowed-pod-template shape, same argument.
+
+### Rotation comes in, and it takes the POLICY first
+
+Three options were weighed. The chosen one is **truss owns the policy and the
+plumbing; OpenTofu keeps the mechanism**: truss decides when to rotate,
+records what it did, and owns the re-seed into Vault that Decision 4 names as
+its own unmet prerequisite. `credentials/` remains a Terraform root, owned by
+truss.
+
+Why not native rotation in Go, which is the tempting answer: it would delete
+the provider dependency, the state-encryption passphrase and the bootstrap
+circularity in one move -- but it means hand-writing Cloudflare, 1Password,
+GCP IAM and HMAC clients in a stdlib-only codebase, and 2026-09-08 was spent
+learning how expensive one unnoticed divergence is. Take it per credential,
+where each one earns it.
+
+Three things argued for pulling rotation in at all, and all three were
+measured on 2026-09-08 rather than reasoned:
+
+1. **`credentials/` is the ONE root exempt from the plan-digest gate**,
+   because CI never plans it. That exemption is the single hole in "every
+   apply is gated", and it exists only because rotation is an apply.
+2. **The first production trial failed inside a PROVIDER** -- the
+   `onepassword` provider had no service-account token -- a dependency that
+   exists only because rotation is expressed as Terraform.
+3. **The rotation cadence had been inverted for weeks without anyone
+   noticing**, because the policy lived as control flow in a shell script
+   rather than as a rule stated anywhere a test could read.
+
+### Sequencing
+
+⚠️ **After the cutover, not before.** Truss must first match the DEPLOYED
+applier; moving rotation while the two still differ means redesigning against
+a baseline we have just proved we cannot verify. See the stale-baseline
+finding: the port was built against an `apply.sh` nine commits behind
+production, and the cadence inversion above is what that cost.
