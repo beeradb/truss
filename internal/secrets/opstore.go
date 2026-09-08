@@ -123,8 +123,30 @@ func (o *OP) exec(ctx context.Context, args ...string) (stdout, stderr []byte, e
 	// `op` can find whatever it shells out to, and the token -- nothing
 	// else this process happens to be holding crosses into the
 	// subprocess's environment by accident.
+	// ⚠️ AND A WRITABLE HOME, WHICH `op` REQUIRES AND WILL NOT TELL YOU ABOUT
+	// UNTIL IT FAILS. The CLI creates $HOME/.config/op before doing anything,
+	// so under readOnlyRootFilesystem it dies with `cannot create directory
+	// "/home/applier/.config/op" ... read-only file system` -- measured on the
+	// first real value publish, 2026-09-08.
+	//
+	// It is set HERE rather than in the pod spec precisely BECAUSE the env
+	// above is explicit: a HOME in the manifest never reaches this subprocess,
+	// which is the whole point of not inheriting. Setting it in the manifest
+	// was tried first and changed nothing.
+	//
+	// A per-call temp dir, removed after: `op` writes only cache and config
+	// there, never the token (that arrives in the environment), and a
+	// directory this process owns for the length of one call cannot be
+	// preloaded by anything else.
+	home, err := os.MkdirTemp("", "op-home-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("secrets: making a home directory for the 1Password CLI: %w", err)
+	}
+	defer os.RemoveAll(home)
+
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
 		"OP_SERVICE_ACCOUNT_TOKEN=" + tok,
 	}
 
