@@ -240,6 +240,25 @@ const vaultMount = "platform"
 // even.
 func vaultItems(f Fixtures, now time.Time) map[string]map[string]string {
 	items := map[string]map[string]string{}
+
+	// ⚠️ THE MOUNT IS NEVER EMPTY IN PRODUCTION, AND THIS FAKE USED TO SERVE
+	// IT EMPTY WHENEVER A SCENARIO NAMED NO EXPIRY FIXTURES. The applier
+	// reads its own credentials out of this mount, so if it were empty the
+	// pass would have died fetching them long before the sweep ran. Serving
+	// nothing made the sweep's "no items at all" refusal unreachable in
+	// every parity scenario -- the same too-forgiving-fixture shape that
+	// hid the expiry alarm in cmd/truss's own fake, found the same week.
+	//
+	// They carry no `expires`, which is also what production looks like
+	// today: nothing seeds it. That is what the EXPIRY-NOT-CHECKED-CLAUSE
+	// divergence records.
+	for _, title := range []string{
+		"gcs-ledger", "github-app", "telegram-alert",
+		"cf-token-mint", "gcp-apply", "tofu-encryption",
+	} {
+		items[title] = nil
+	}
+
 	for title, fields := range f.Secrets[vaultMount] {
 		expires, ok := fields["expires"]
 		if !ok || expires == nil {

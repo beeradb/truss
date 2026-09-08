@@ -31,7 +31,17 @@ func (d Dir) Field(item, field string) (string, error) {
 		return "", fmt.Errorf("refusing to continue: %s is not mounted -- is the credential mirror applied and syncing?", path)
 	}
 
-	b, _ := os.ReadFile(path)
+	// ⚠️ THE READ ERROR IS NOT DISCARDED, AND IT USED TO BE (`b, _ :=`).
+	// A file that Stat succeeds on but ReadFile fails on -- permission
+	// denied is the realistic one, since these arrive 0600 from an init
+	// container -- fell through to the "is empty" branch below and reported
+	// a missing FIELD. That sends somebody to look at the mirror's contents
+	// for a value that is sitting right there. Raised by the 2026-09-08
+	// code audit.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("refusing to continue: reading %s: %w", path, err)
+	}
 	// Command substitution in the bash ($(cat "$f")) strips every trailing
 	// newline; match that so a value differs from the bash's only in bytes
 	// nobody meant to be part of it.
@@ -83,4 +93,31 @@ func (d Dir) FieldIfPresent(item, field string) (string, bool, error) {
 		return "", false, nil
 	}
 	return v, true, nil
+}
+
+// ItemMounted reports whether item's directory exists at all, as opposed to
+// whether any particular field inside it does.
+//
+// ⚠️ IT EXISTS TO STOP A MISTYPED ITEM NAME READING AS "NOT MINTED YET".
+// FieldIfPresent cannot tell those apart -- both are ENOENT -- and its one
+// caller, cf-infra-admin, treats absence as "credentials/ has not run yet"
+// and carries on. So a wrong item name makes drift detection a permanent,
+// silent no-op: every pass succeeds, nothing is ever checked, and no alert
+// says so. The item names were reverse-engineered from an older apply.sh
+// and are the one part of this port with no authoritative source, which is
+// exactly why the failure mode needed to be loud. Raised by the 2026-09-08
+// code audit as the highest-cost outcome of that uncertainty.
+func (d Dir) ItemMounted(item string) (bool, error) {
+	path := filepath.Join(d.Root, item)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%s exists but is not a directory", path)
+	}
+	return true, nil
 }

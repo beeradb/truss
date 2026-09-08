@@ -151,7 +151,26 @@ func loadCFMintToken(dir secrets.Dir) (string, error) {
 // loadCFInfraAdminToken reads the token every non-credentials root applies
 // under. It is minted BY the credentials root, so it may legitimately not
 // exist yet on a first pass -- FieldIfPresent, never Field.
+//
+// ⚠️ BUT THE ITEM ITSELF MUST BE MOUNTED, AND NOT CHECKING THAT MADE A
+// MISTYPED NAME INVISIBLE. FieldIfPresent answers ENOENT identically for
+// "credentials/ has not minted this yet" and "there is no such item,
+// because the name is wrong" -- and the caller carries on for the first,
+// which turns drift detection into a permanent no-op that reports success
+// forever. These item names were reverse-engineered from an older apply.sh
+// and are the one part of this port with no authoritative source, so the
+// wrong-name case has to be the loud one. Raised by the 2026-09-08 code
+// audit.
 func loadCFInfraAdminToken(dir secrets.Dir) (string, bool, error) {
+	mounted, err := dir.ItemMounted(itemCFInfraAdmin)
+	if err != nil {
+		return "", false, err
+	}
+	if !mounted {
+		return "", false, fmt.Errorf(
+			"refusing to continue: no %q item in the credential mirror at %s -- credentials/ mints this token into an item of that name, so either the mirror is not syncing or the item name here is wrong",
+			itemCFInfraAdmin, dir.Root)
+	}
 	return dir.FieldIfPresent(itemCFInfraAdmin, fieldCFPassword)
 }
 

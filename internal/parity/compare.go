@@ -96,9 +96,37 @@ func CompareOutcomes(bash, truss Outcome) []Diff {
 	return diffs
 }
 
+// expiryNotCheckedClause is §5.5's FOURTH documented exception, stated here
+// rather than hidden in a divergences.go entry.
+//
+// truss inserts "; EXPIRY NOT CHECKED: <reason>" whenever the sweep cannot
+// earn a clean bill, which today is EVERY pass -- nothing seeds `expires`
+// into Vault yet (§4.7, "BLOCKED"). The bash has no such clause at all: it
+// swept 1Password, where the field was hand-maintained.
+//
+// ⚠️ IT IS NORMALISED OUT RATHER THAN FORGIVEN BY AN ENTRY BECAUSE IT
+// COMPOSES WITH EVERY OTHER ALERT DIVERGENCE. An entry matches one whole
+// diff, so an alert differing BOTH by this clause and by (say) the approval
+// wording is accepted by neither matcher, and the harness fails for a reason
+// nobody can act on. Stripping it first lets the remaining entries see the
+// difference they were written for.
+//
+// ⚠️ Nothing here checks the clause's CONTENT, so it is asserted positively
+// elsewhere: cmd/truss's TestAnUnusableExpirySweepIsReportedAndDoesNotFail-
+// ThePass requires it to appear and to name the reason, and
+// TestACleanPassStaysCleanWithAnUnusableSweep requires it not to turn the
+// pass red. A normalisation with no counterpart assertion would be this
+// harness forgetting a whole clause exists.
+var expiryNotCheckedRE = regexp.MustCompile(`; EXPIRY NOT CHECKED: secrets: [^;]*(?:; refusing[^;]*)?`)
+
+func stripExpiryNotChecked(alert string) string {
+	return expiryNotCheckedRE.ReplaceAllString(alert, "")
+}
+
 func compareAlert(bash, truss Outcome) []Diff {
 	b, _ := bash.AlertText()
 	t, _ := truss.AlertText()
+	t = stripExpiryNotChecked(t)
 	if b == t {
 		return nil
 	}

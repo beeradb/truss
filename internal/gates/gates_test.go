@@ -421,3 +421,72 @@ func TestAnUnreviewedRefusalNamesTheLedgerKey(t *testing.T) {
 		})
 	}
 }
+
+// TestApprovalWithdrawnAtTheSameHeadDoesNotCount: approve, spot something,
+// request changes on the same push -- the gate must not still read
+// "approved". Scanning for any APPROVED review counts an approval that was
+// afterwards withdrawn.
+//
+// ⚠️ A DELIBERATE DIVERGENCE from apply.sh:358, which counts APPROVED
+// reviews and never looks at CHANGES_REQUESTED. GitHub's own protection
+// would block such a merge, but this gate exists precisely because it does
+// not take the merge's legitimacy on trust. Raised by the 2026-09-08
+// security review.
+func TestApprovalWithdrawnAtTheSameHeadDoesNotCount(t *testing.T) {
+	pr := PullRequest{Number: 42, Merged: true, MergeCommitSHA: "mergesha", HeadSHA: "headsha1"}
+
+	withdrawn := []Review{
+		{State: "APPROVED", User: "alice", CommitID: "headsha1"},
+		{State: "CHANGES_REQUESTED", User: "alice", CommitID: "headsha1"},
+	}
+	if problems := CheckApproval(pr, withdrawn, "alice", "mergesha"); len(problems) == 0 {
+		t.Error("an approval withdrawn by CHANGES_REQUESTED at the same head still counted")
+	}
+
+	// Re-approving after requesting changes must count again -- the last
+	// word decides, in both directions.
+	reapproved := []Review{
+		{State: "APPROVED", User: "alice", CommitID: "headsha1"},
+		{State: "CHANGES_REQUESTED", User: "alice", CommitID: "headsha1"},
+		{State: "APPROVED", User: "alice", CommitID: "headsha1"},
+	}
+	if problems := CheckApproval(pr, reapproved, "alice", "mergesha"); len(problems) != 0 {
+		t.Errorf("a re-approval after requested changes was not accepted: %v", problems)
+	}
+
+	// A COMMENTED review says nothing about approval and must not clear one.
+	commented := []Review{
+		{State: "APPROVED", User: "alice", CommitID: "headsha1"},
+		{State: "COMMENTED", User: "alice", CommitID: "headsha1"},
+	}
+	if problems := CheckApproval(pr, commented, "alice", "mergesha"); len(problems) != 0 {
+		t.Errorf("a comment after an approval cleared it: %v", problems)
+	}
+
+	// Somebody else requesting changes is not the approver withdrawing.
+	otherPerson := []Review{
+		{State: "APPROVED", User: "alice", CommitID: "headsha1"},
+		{State: "CHANGES_REQUESTED", User: "bob", CommitID: "headsha1"},
+	}
+	if problems := CheckApproval(pr, otherPerson, "alice", "mergesha"); len(problems) != 0 {
+		t.Errorf("another user's CHANGES_REQUESTED cleared alice's approval: %v", problems)
+	}
+}
+
+// TestAnEmptyHeadSHAIsRefusedRatherThanMatched: `r.CommitID != pr.HeadSHA`
+// is FALSE when both are empty, so a PR with no head sha plus a review
+// carrying no commit id read as APPROVED. Absent is not agreement -- the
+// rule this file applies to every other absent field, and the one place it
+// was not applied. Raised by the 2026-09-08 security review.
+func TestAnEmptyHeadSHAIsRefusedRatherThanMatched(t *testing.T) {
+	pr := PullRequest{Number: 42, Merged: true, MergeCommitSHA: "mergesha", HeadSHA: ""}
+	reviews := []Review{{State: "APPROVED", User: "alice", CommitID: ""}}
+
+	problems := CheckApproval(pr, reviews, "alice", "mergesha")
+	if len(problems) == 0 {
+		t.Fatal("a PR with no head sha was approved by a review with no commit id")
+	}
+	if !hasProblemContaining(problems, "no head sha") {
+		t.Errorf("the refusal does not name the missing head sha: %v", problems)
+	}
+}

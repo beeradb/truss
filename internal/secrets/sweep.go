@@ -89,6 +89,26 @@ func (s Sweep) Run(ctx context.Context) ([]Expiring, error) {
 			return findings, fmt.Errorf("secrets: could not list %s: %w", store.Name(), err)
 		}
 
+		// ⚠️ AN EMPTY LISTING IS NOT A CLEAN BILL OF HEALTH. Vault answers a
+		// LIST over a prefix holding nothing with 404, and KV.List reports
+		// that as zero items rather than an error -- correctly, because that
+		// IS how Vault says "empty". But zero items also means the loop
+		// below runs zero times, `eligible` stays 0, the no-expiry alarm
+		// cannot fire, and the sweep returns "nothing is expiring".
+		//
+		// A mount the applier reads its own credentials out of cannot
+		// legitimately be empty: if it were, the pass would already have
+		// failed fetching them. So an empty listing here means the mount was
+		// wiped, or the path is wrong, or a policy is answering in a way we
+		// are reading as emptiness -- and every one of those is a sweep that
+		// did not earn its silence. §4.7's rule is that this function never
+		// reports a clean bill it has not earned; that has to cover the case
+		// where there was nothing to check as well as the case where nothing
+		// recorded an expiry. Raised by the 2026-09-08 security review.
+		if len(items) == 0 {
+			return findings, fmt.Errorf("secrets: %s lists no items at all -- the applier reads its own credentials from this mount, so an empty listing means it was wiped, the path is wrong, or a policy denial is being read as emptiness; refusing to report a clean sweep over nothing", store.Name())
+		}
+
 		var mountFindings []Expiring
 		recorded := false
 		eligible := 0

@@ -435,3 +435,41 @@ func TestTheSameTitleInTwoMountsIsReportedTwice(t *testing.T) {
 		t.Errorf("a title present in two mounts was reported %d time(s), want 2 -- the sweep must not dedupe", count)
 	}
 }
+
+// TestAnEmptyMountIsNotACleanSweep: Vault answers a LIST over an empty
+// prefix with 404 and KV.List reports that as zero items -- correctly,
+// because that is how Vault says "empty". But zero items means the
+// per-item loop never runs, so the no-expiry alarm cannot fire and the
+// sweep returns "nothing is expiring" over a mount it never read.
+//
+// The applier reads its own credentials from this mount, so an empty
+// listing means it was wiped, the path is wrong, or a policy denial is
+// being read as emptiness. Raised by the 2026-09-08 security review as the
+// clean-bill-not-earned case §4.7 did not cover.
+func TestAnEmptyMountIsNotACleanSweep(t *testing.T) {
+	sw := Sweep{
+		Stores:   []Store{emptyStore{name: "platform"}},
+		WarnDays: 30,
+		Now:      fixedNow(testNow),
+	}
+	findings, err := sw.Run(context.Background())
+	if err == nil {
+		t.Fatal("an empty mount was reported as a clean sweep")
+	}
+	if !strings.Contains(err.Error(), "platform") {
+		t.Errorf("the error does not name the mount: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings = %v, want none", findings)
+	}
+}
+
+// emptyStore lists nothing, the way Vault's own 404-on-empty-prefix reaches
+// Sweep through KV.List.
+type emptyStore struct{ name string }
+
+func (e emptyStore) Name() string                           { return e.name }
+func (e emptyStore) List(context.Context) ([]string, error) { return nil, nil }
+func (e emptyStore) Expiry(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("Expiry must not be called: there are no items")
+}

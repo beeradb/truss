@@ -113,15 +113,40 @@ func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []str
 			fmt.Sprintf("PR #%d's merge commit is %s, not %s", pr.Number, short(pr.MergeCommitSHA), short(sha)))
 	}
 
+	// ⚠️ AN EMPTY HEAD SHA IS REFUSED BEFORE ANY REVIEW IS CONSIDERED, AND
+	// IT USED TO FALL THROUGH INTO THE COMPARISON. `r.CommitID !=
+	// pr.HeadSHA` is FALSE when both are empty, so a PR with no head sha
+	// plus a review carrying no commit id read as APPROVED. Absent is not
+	// agreement -- the same rule this file applies to every other absent
+	// field, and the one place it was not applied.
+	if pr.HeadSHA == "" {
+		problems = append(problems, fmt.Sprintf("PR #%d has no head sha recorded", pr.Number))
+		return problems
+	}
+
+	// ⚠️ THE APPROVER'S LAST WORD AT THE HEAD DECIDES, NOT WHETHER THEY EVER
+	// SAID YES. Scanning for any APPROVED counts an approval that was
+	// afterwards withdrawn: approve, spot something, request changes on the
+	// same push -- and the gate still reads "approved". GitHub's own
+	// protection would block that merge, but this gate exists precisely
+	// because it does not take the merge's legitimacy on trust.
+	//
+	// ⚠️ This is a DELIBERATE DIVERGENCE from apply.sh:358, which counts
+	// APPROVED reviews and never looks at CHANGES_REQUESTED. Recorded in
+	// internal/parity as intended. Raised by the 2026-09-08 security review.
 	approved := false
 	for _, r := range reviews {
-		if r.State != "APPROVED" || r.User != approver {
+		if r.User != approver || r.CommitID != pr.HeadSHA {
 			continue
 		}
-		if r.CommitID != pr.HeadSHA {
-			continue
+		switch r.State {
+		case "APPROVED":
+			approved = true
+		case "CHANGES_REQUESTED", "DISMISSED":
+			approved = false
 		}
-		approved = true
+		// Every other state -- COMMENTED, PENDING -- says nothing about
+		// approval and must not clear one.
 	}
 	if !approved {
 		problems = append(problems,
