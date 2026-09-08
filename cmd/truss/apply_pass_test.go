@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/beeradb/truss/internal/config"
+	"github.com/beeradb/truss/internal/handoff"
 	"github.com/beeradb/truss/internal/ledger"
 	"github.com/beeradb/truss/internal/notify"
 	"github.com/beeradb/truss/internal/secrets"
@@ -115,6 +116,17 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 		},
 		PATH: "/usr/bin", HOME: "/root",
 		Stderr: io.Discard,
+		// A default that answers "nothing to publish" without a real
+		// socket -- most tests here do not care about the handoff, and a
+		// nil Handoff func would panic the first of them that runs a
+		// non-drift pass, which is nearly all of them (DriftOnly defaults
+		// false). A test that DOES care overrides deps.Handoff and
+		// deps.HandoffSocket with its own fakeHandoff after this returns,
+		// the same way apply_daily_pass_test.go overrides deps.Cfg.DriftOnly.
+		HandoffSocket: "unused-in-tests",
+		Handoff: func(ctx context.Context, path string, timeout time.Duration, r handoff.Request) (handoff.Response, error) {
+			return handoff.Response{Value: handoff.ValueSkipped}, nil
+		},
 	}
 	return deps, fl, ft
 }

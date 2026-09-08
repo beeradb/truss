@@ -209,6 +209,17 @@ func (h *Harness) Run(ctx context.Context, s Scenario, now time.Time) (Outcome, 
 		// newRefusingProxy.
 		"HTTPS_PROXY": proxy.URL,
 	}
+	// HANDOFF_SOCKET: required on the DRIFT pass and forbidden on a frequent
+	// one (loadHandoffConfig, design publisher-identity-design.md §3), because
+	// rotation runs only under DRIFT_CHECK=1 and so only that pass has
+	// anything to publish. Set here only for drift scenarios.
+	//
+	// No publisher process is ever started for a parity run: runHandoff treats
+	// a socket nobody is listening on as "nothing to publish" (§9's table), so
+	// a path is all a scenario needs, never a listener.
+	if s.Env["DRIFT_CHECK"] == "1" {
+		env["HANDOFF_SOCKET"] = filepath.Join(root, "handoff.sock")
+	}
 	for k, v := range s.Env {
 		// The scenario's own recorded environment wins, so a drift run's
 		// DRIFT_CHECK and its separate heartbeat key arrive here.

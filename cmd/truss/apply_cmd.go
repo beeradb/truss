@@ -15,6 +15,7 @@ import (
 	"github.com/beeradb/truss/internal/config"
 	"github.com/beeradb/truss/internal/forge"
 	"github.com/beeradb/truss/internal/gates"
+	"github.com/beeradb/truss/internal/handoff"
 	"github.com/beeradb/truss/internal/ledger"
 	"github.com/beeradb/truss/internal/notify"
 	"github.com/beeradb/truss/internal/plan"
@@ -78,7 +79,24 @@ type applyDeps struct {
 	// implicitly -- §2 item 9) can still find the tofu binary and its
 	// plugin cache.
 	PATH, HOME string
+	// HandoffSocket is the path to the publisher's Unix socket
+	// (design publisher-identity-design.md §3). Set by loadHandoffConfig,
+	// which refuses to start rather than leave it empty on the one pass
+	// that needs it -- see that function's own doc. Empty on a drift run,
+	// where it must never be read at all.
+	HandoffSocket string
+	// Handoff sends one publish request and returns the publisher's
+	// verdict, matching internal/handoff.Send's signature exactly so
+	// cmdApply can wire the real function and a test can fake it without a
+	// real socket.
+	Handoff func(ctx context.Context, path string, timeout time.Duration, r handoff.Request) (handoff.Response, error)
 }
+
+// handoffTimeout bounds one publish exchange from the truss side. It
+// matches internal/handoff's own connDeadline (30s), which that package's
+// doc ties to the timeout internal/secrets already uses for a single Vault
+// HTTP call -- the publisher's own work is at most a handful of those.
+const handoffTimeout = 30 * time.Second
 
 func (d applyDeps) now() time.Time {
 	if d.Now != nil {
@@ -101,6 +119,43 @@ func (d applyDeps) now() time.Time {
 func (d applyDeps) logf(format string, args ...any) {
 	fmt.Fprintf(d.Stderr, "[%s] %s\n", d.now().UTC().Format("15:04:05"),
 		fmt.Sprintf(format, args...))
+}
+
+// loadHandoffConfig reads $HANDOFF_SOCKET, whose presence depends on which
+// pass this is (design publisher-identity-design.md §3, §8).
+//
+// ⚠️ IT IS THE DRIFT PASS THAT PUBLISHES, BECAUSE IT IS THE DRIFT PASS THAT
+// MINTS. Rotation runs under DRIFT_CHECK=1 and nowhere else -- see runRotation
+// and its "ROTATION BELONGS TO THE DAILY PASS" comment -- so the minted value
+// exists only there, and the publisher sidecar belongs on that CronJob.
+//
+// An earlier version had this exactly inverted: the socket was required on the
+// FREQUENT pass and forbidden on the drift one, which put the publisher on the
+// only pass that never mints anything. It would have run indefinitely, sending
+// an empty request every five minutes and publishing nothing, while the daily
+// pass that actually rotates had no publisher to hand its value to -- and the
+// failure mode is silence, which is the one this whole system is built to
+// refuse. Caught before the manifests baked it in.
+//
+// So: REQUIRED on a drift run, FORBIDDEN otherwise. A manifest that dropped
+// the sidecar must be a refusal to start, never a silent stop of publishing;
+// and a frequent CronJob that somehow inherited the variable must not sit
+// dialling a socket nobody will answer.
+//
+// Matches config.Load's own fail-closed contract: every problem reported,
+// nothing defaulted or guessed.
+func loadHandoffConfig(getenv func(string) string, driftOnly bool) (string, []string) {
+	socket := getenv("HANDOFF_SOCKET")
+	if !driftOnly {
+		if socket != "" {
+			return "", []string{"refusing to start: $HANDOFF_SOCKET must not be set on a frequent pass -- only the drift pass rotates, so only it has a publisher container to contact"}
+		}
+		return "", nil
+	}
+	if socket == "" {
+		return "", []string{"refusing to start: $HANDOFF_SOCKET is unset -- the drift pass rotates and must hand its result to the publisher"}
+	}
+	return socket, nil
 }
 
 // cmdApply replaces apply.sh in full (§4.9, landing at step 5). Everything
@@ -149,6 +204,13 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		}
 		return 1
 	}
+	handoffSocket, hproblems := loadHandoffConfig(getenv, cfg.DriftOnly)
+	if len(hproblems) > 0 {
+		for _, p := range hproblems {
+			fmt.Fprintln(stderr, p)
+		}
+		return 1
+	}
 
 	journal := &ledger.Journal{Store: store, Layout: layoutFor(cfg)}
 	last, err := journal.Head(ctx)
@@ -177,6 +239,8 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		CloudflareBaseURL: getenv("CLOUDFLARE_API_BASE_URL"),
 		PATH:              getenv("PATH"),
 		HOME:              getenv("HOME"),
+		HandoffSocket:     handoffSocket,
+		Handoff:           handoff.Send,
 	}
 
 	result := runApplyPass(ctx, deps, last)
@@ -344,6 +408,36 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// heartbeat.
 		rotationSummary = map[string]string{"skipped": "rotation runs on the daily pass"}
 		driftSummary = map[string]string{"skipped": "not a drift run"}
+	}
+
+	// The publisher handoff (design publisher-identity-design.md §3, §9):
+	// required on this pass, forbidden on a drift run -- loadHandoffConfig
+	// already refused to start otherwise, so d.HandoffSocket is exactly one
+	// of "set" or "this branch never runs". Every branch above, including
+	// the gate-failure one, falls through to here with no early return, so
+	// this call is reached on every path a DRIFT pass can take: gate failed,
+	// the repo could not be prepared, rotation succeeded, or rotation failed.
+	// See runHandoff's own doc for why that guarantee is the whole point --
+	// a pass that finishes without contacting the publisher leaves it waiting
+	// until its deadline, and concurrencyPolicy: Forbid then silently
+	// suppresses every pass after it.
+	if driftRun {
+		req := handoff.Request{} // always "nothing to publish" today: see
+		// runHandoff's doc for what is still missing before this can ever
+		// carry a minted value.
+		if pubFailure := runHandoff(ctx, d, req, last); pubFailure != "" {
+			// Filed under its own key for the same reason a rotation
+			// failure already is (see the rotKey comment above): not a
+			// commit's fault, and the heartbeat alone is overwritten five
+			// minutes later.
+			rotKey := "rotation-" + d.now().UTC().Format("20060102T150405Z")
+			if err := d.Journal.PutFailed(ctx, rotKey, pubFailure); err != nil {
+				fmt.Fprintf(d.Stderr, "truss: could not file %s: %v\n", rotKey, err)
+			}
+			if failure == "" {
+				failure = pubFailure
+			}
+		}
 	}
 
 	// The expiry sweep runs on every pass, drift or not, gate-passed or
@@ -1024,4 +1118,67 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 		}
 	}
 	return drifted, errored, ""
+}
+
+// runHandoff sends req to the publisher exactly once and narrates the
+// exchange via d.logf. It NEVER returns before calling d.Handoff -- there
+// is no early return above the call -- because a truss that finishes
+// without contacting the publisher leaves the publisher container blocked
+// until its own deadline, and concurrencyPolicy: Forbid then silently
+// suppresses every later pass until somebody notices
+// (design publisher-identity-design.md §3, §9's "operational hazard", and
+// worse than any single failed publish). The caller (runApplyPass) already
+// guarantees this function itself is reached on every return path of a
+// non-drift pass; this function's own job is not adding a return path that
+// skips the send.
+//
+// The mapping to a failure is design §9's table, and it turns entirely on
+// req.PublishValue -- what TRUSS ITSELF decided to send -- never on the
+// shape of the response. A dial failure and a Response.Error are folded
+// the same way deliberately: from here, both mean "the publisher did not
+// confirm the write". When nothing was minted (req.PublishValue is false,
+// which is every call today -- see the caller), ANY answer, including the
+// publisher's own refusal of a vacuous pass or nobody listening at all, is
+// narrated and never fails this pass: the same reasoning already governs
+// the expiry sweep elsewhere in this file -- an alert channel nobody reads
+// is where a real gate refusal goes to die, and the underlying problem
+// (an unpatched expiry table, say) is still shouted about on its own
+// channel. Only a failed publish OF A MINTED VALUE returns a non-empty
+// failure, and its sentence says the apply itself succeeded -- the token
+// was minted, Cloudflare has it, 1Password and the state hold it -- which
+// is the same lesson PublishInProgress already taught: an error that
+// names a step it did not check is claiming to know something it does
+// not.
+//
+// Nothing here writes the ledger, the heartbeat or the Telegram alert
+// directly -- the caller folds a returned failure into the pass's existing
+// failure/PutFailed machinery, the same path a rotation failure already
+// takes. Reporting through narration (stderr) rather than those channels
+// for the non-failing cases is deliberate: internal/parity compares ledger
+// writes and alert text against a bash reference that has no concept of a
+// publisher at all, and stdio is the one channel that comparison never
+// touches (see logf's own doc).
+func runHandoff(ctx context.Context, d applyDeps, req handoff.Request, last string) (failure string) {
+	d.logf("publish: contacting the publisher")
+	resp, err := d.Handoff(ctx, d.HandoffSocket, handoffTimeout, req)
+	if err != nil {
+		d.logf("publish: no publisher answered: %v", err)
+		if req.PublishValue {
+			return fmt.Sprintf(
+				"credentials applied at %s; publishing to vault failed: %v. Vault still holds the previous value; the next daily pass republishes.",
+				last, err)
+		}
+		return ""
+	}
+	if resp.Error != "" {
+		d.logf("publish: %s (expiries=%d skipped=%v): %s", resp.Value, resp.Expiries, resp.Skipped, resp.Error)
+		if req.PublishValue {
+			return fmt.Sprintf(
+				"credentials applied at %s; publishing to vault failed: %v. Vault still holds the previous value; the next daily pass republishes.",
+				last, resp.Error)
+		}
+		return ""
+	}
+	d.logf("publish: %s (expiries=%d)", resp.Value, resp.Expiries)
+	return ""
 }
