@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -312,21 +311,14 @@ func orEmpty(s []string) []string {
 	return s
 }
 
-// toLedgerExpiring converts the sweep's Name+DaysLeft findings into
-// ledger.Expiring's Name+Expires shape. ledger.Expiring's own doc records
-// that its shape is "not specified further by §4.2" and rides as "opaque
-// data this package only needs to marshal in the right position" -- the
-// two packages' Expiring types disagree (Name+Expires vs. Name+DaysLeft)
-// because internal/ledger was specified before internal/secrets settled on
-// the days-left shape. This is that disagreement's one crossing point.
+// toLedgerExpiring copies the sweep's findings into the heartbeat's shape.
+// Both are Name + DaysLeft (*int, nil for "no expiry recorded"), so this is
+// a copy rather than a reformat -- see the ⚠️ on ledger.Expiring for why it
+// used to stringify the number into an "expires" field, and what that broke.
 func toLedgerExpiring(in []secrets.Expiring) []ledger.Expiring {
 	out := make([]ledger.Expiring, len(in))
 	for i, e := range in {
-		expires := "no expiry recorded"
-		if e.DaysLeft != nil {
-			expires = "in " + strconv.Itoa(*e.DaysLeft) + "d"
-		}
-		out[i] = ledger.Expiring{Name: e.Name, Expires: expires}
+		out[i] = ledger.Expiring{Name: e.Name, DaysLeft: e.DaysLeft}
 	}
 	return out
 }
@@ -344,11 +336,16 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string) (newLast strin
 	if err != nil {
 		return last, 0, 0, fmt.Sprintf("could not mint an installation token: %v", err), "", false
 	}
+	// Every git call from here on carries the token -- the clone is
+	// --filter=blob:none, so checkout and diff lazily fetch blobs and are
+	// network operations too. See gitDriver.WithToken.
+	d.Git = d.Git.WithToken(tok)
+
 	repoURL := "https://github.com/" + d.Cfg.Repo + ".git"
-	if err := d.Git.EnsureClone(ctx, repoURL, tok); err != nil {
+	if err := d.Git.EnsureClone(ctx, repoURL); err != nil {
 		return last, 0, 0, fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err), "", false
 	}
-	if err := d.Git.Fetch(ctx, "origin", "main", tok); err != nil {
+	if err := d.Git.Fetch(ctx, "origin", "main"); err != nil {
 		return last, 0, 0, fmt.Sprintf("could not fetch origin main: %v", err), "", false
 	}
 
@@ -612,15 +609,24 @@ func countResourceChanges(planJSON []byte) (int, bool) {
 // the number of resource changes rotation made, and an error only when
 // rotation itself failed (never for a skip, which is not a failure).
 func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt string) (summary any, changes int, err error) {
-	if !d.Git.HasDir("credentials") {
-		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, nil
-	}
 	if credentialsAppliedAt == last && last != "" {
 		return map[string]string{"skipped": "credentials applied this run at " + last}, 0, nil
 	}
 
+	// ⚠️ CHECK OUT FIRST, THEN TEST FOR THE DIRECTORY. HasDir reads the
+	// working tree, so asking before the checkout asked about whatever tree
+	// the commit loop happened to leave behind -- not about `last`.
+	// apply.sh:673-675 checks out $LAST first and then tests, and both
+	// directions of getting this wrong bite: a false skip silently stalls a
+	// 45-day rotation window, and the inverse produces a hard failure in
+	// applyOneRoot where the bash skipped cleanly. runDrift already had the
+	// order right, so the inconsistency was within one file. Found by the
+	// 2026-09-08 code audit.
 	if err := d.Git.Checkout(ctx, last); err != nil {
 		return map[string]string{"failed": err.Error()}, 0, fmt.Errorf("could not check out %s for rotation: %w", last, err)
+	}
+	if !d.Git.HasDir("credentials") {
+		return map[string]string{"skipped": "no credentials root at last applied commit"}, 0, nil
 	}
 
 	cc := &credCache{dir: d.Dir}

@@ -87,6 +87,7 @@ func TestFailedRecordTrimsTheReasonItself(t *testing.T) {
 // order, checked against the bytes it actually produces.
 func TestHeartbeatFieldOrderIsStable(t *testing.T) {
 	failure := "boom"
+	days := 23
 	hb := Heartbeat{
 		Time:     "2026-09-08T12:30:45Z",
 		LastSHA:  "headsha1",
@@ -95,7 +96,7 @@ func TestHeartbeatFieldOrderIsStable(t *testing.T) {
 		Failure:  &failure,
 		Rotation: json.RawMessage(`null`),
 		Drift:    json.RawMessage(`null`),
-		Expiring: []Expiring{{Name: "cf-infra-admin", Expires: "2026-10-01T00:00:00Z"}},
+		Expiring: []Expiring{{Name: "cf-infra-admin", DaysLeft: &days}},
 	}
 	body, err := json.Marshal(hb)
 	if err != nil {
@@ -224,5 +225,27 @@ func TestApprovedDigestOfAnUnrecordedRootIsErrNotFound(t *testing.T) {
 	_, err := j.ApprovedDigest(context.Background(), "headsha1", "platform")
 	if err == nil {
 		t.Fatal("ApprovedDigest of an unrecorded root returned nil error")
+	}
+}
+
+// TestExpiringMatchesTheBashHeartbeatSchema pins the field names and JSON
+// types write_heartbeat (apply.sh:730-732) emits. The Go port shipped
+// {"name":…,"expires":"in 5d"} against the bash's
+// {"name":…,"days_left":<number|null>} -- the field renamed and the number
+// stringified, which breaks any consumer and specifically defeats §5's plan
+// to validate the rollout by diffing a bash heartbeat against a Go one.
+// Found by the 2026-09-08 code audit.
+func TestExpiringMatchesTheBashHeartbeatSchema(t *testing.T) {
+	days := 5
+	body, err := json.Marshal([]Expiring{
+		{Name: "cf-infra-admin", DaysLeft: &days},
+		{Name: "gcs-ledger"}, // no expiry recorded
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	const want = `[{"name":"cf-infra-admin","days_left":5},{"name":"gcs-ledger","days_left":null}]`
+	if string(body) != want {
+		t.Errorf("heartbeat expiring JSON\n got %s\nwant %s", body, want)
 	}
 }

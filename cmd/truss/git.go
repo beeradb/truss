@@ -28,8 +28,29 @@ import (
 // concrete dependency on execGit so tests exercise the pass without a real
 // git binary or network.
 type gitDriver interface {
-	EnsureClone(ctx context.Context, repoURL, token string) error
-	Fetch(ctx context.Context, remote, branch, token string) error
+	// WithToken returns a driver that attaches the installation token to
+	// EVERY git call it makes, not just the two that obviously touch the
+	// network.
+	//
+	// ⚠️ THE TOKEN USED TO BE A PER-CALL PARAMETER ON CLONE AND FETCH ONLY,
+	// AND IT NEVER REACHED THE OPERATIONS THAT NEEDED IT. The clone is
+	// --filter=blob:none, so git lazily fetches blobs later: `diff
+	// --name-only` does it for rename detection and `checkout` does it to
+	// materialise a working tree. Both ran unauthenticated, so on a private
+	// repo they 401 -- and the error names checkout or diff, not auth.
+	// apply.sh got away with it because the token lived in
+	// remote.origin.url. Moving it out of the URL was right; it just was not
+	// carried to the rest. Found by the 2026-09-08 code audit.
+	//
+	// It returns a copy rather than mutating, so the token is still never
+	// stored anywhere longer-lived than one pass, and it still travels only
+	// in the child's environment -- never argv, never a URL, and never
+	// `git config`-ed into the clone, which would restore the on-disk leak
+	// the port removed.
+	WithToken(token string) gitDriver
+
+	EnsureClone(ctx context.Context, repoURL string) error
+	Fetch(ctx context.Context, remote, branch string) error
 	Commits(ctx context.Context, from, to string) ([]string, error)
 	ChangedFiles(ctx context.Context, sha string) ([]string, error)
 	TreeRoots(ctx context.Context, sha string) ([]string, error)
@@ -49,28 +70,37 @@ type gitDriver interface {
 type execGit struct {
 	Bin, Dir string
 	Stderr   io.Writer
+
+	// token is attached to every call this driver makes. Unexported and set
+	// only through WithToken, so there is one way for it to arrive.
+	token string
+}
+
+func (g execGit) WithToken(token string) gitDriver {
+	g.token = token // g is a copy: the receiver is by value
+	return g
 }
 
 var treeRootPattern = regexp.MustCompile(`^(platform|projects/[^/]+)$`)
 
-func (g execGit) EnsureClone(ctx context.Context, repoURL, token string) error {
+func (g execGit) EnsureClone(ctx context.Context, repoURL string) error {
 	if g.hasGitDir() {
 		return nil
 	}
 	args := []string{"clone", "--filter=blob:none", repoURL, g.Dir}
 	// clone has no repo to run -C into yet, so it runs from "" (the
 	// current directory) with an explicit target.
-	_, err := g.run(ctx, "", token, args)
+	_, err := g.run(ctx, "", args)
 	return err
 }
 
-func (g execGit) Fetch(ctx context.Context, remote, branch, token string) error {
-	_, err := g.run(ctx, g.Dir, token, []string{"-C", g.Dir, "fetch", remote, branch})
+func (g execGit) Fetch(ctx context.Context, remote, branch string) error {
+	_, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "fetch", remote, branch})
 	return err
 }
 
 func (g execGit) Commits(ctx context.Context, from, to string) ([]string, error) {
-	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "rev-list", "--reverse", "--first-parent", from + ".." + to})
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "rev-list", "--reverse", "--first-parent", from + ".." + to})
 	if err != nil {
 		return nil, fmt.Errorf("git rev-list %s..%s: %w", from, to, err)
 	}
@@ -78,7 +108,7 @@ func (g execGit) Commits(ctx context.Context, from, to string) ([]string, error)
 }
 
 func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error) {
-	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "diff", "--name-only", sha + "^", sha})
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "diff", "--name-only", sha + "^", sha})
 	if err != nil {
 		return nil, fmt.Errorf("git diff --name-only %s^ %s: %w", sha, sha, err)
 	}
@@ -90,7 +120,7 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 // (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
 // '^(platform|projects/[^/]+)$'`), filter included.
 func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
-	out, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "ls-tree", "-d", "--name-only", sha, "--", "platform", "projects/"})
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "--name-only", sha, "--", "platform", "projects/"})
 	if err != nil {
 		return nil, fmt.Errorf("git ls-tree -d %s: %w", sha, err)
 	}
@@ -104,7 +134,7 @@ func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 }
 
 func (g execGit) Checkout(ctx context.Context, ref string) error {
-	_, err := g.run(ctx, g.Dir, "", []string{"-C", g.Dir, "checkout", "--quiet", ref})
+	_, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "checkout", "--quiet", ref})
 	if err != nil {
 		return fmt.Errorf("git checkout %s: %w", ref, err)
 	}
@@ -126,7 +156,7 @@ func (g execGit) hasGitDir() bool {
 // nothing about a git call belongs on a channel a caller might parse as
 // JSON). A non-empty token attaches the installation token via env, for
 // the two operations (clone, fetch) that touch the network.
-func (g execGit) run(ctx context.Context, dir string, token string, args []string) (string, error) {
+func (g execGit) run(ctx context.Context, dir string, args []string) (string, error) {
 	bin := g.Bin
 	if bin == "" {
 		bin = "git"
@@ -136,11 +166,11 @@ func (g execGit) run(ctx context.Context, dir string, token string, args []strin
 		cmd.Dir = dir
 	}
 	cmd.Env = os.Environ()
-	if token != "" {
+	if g.token != "" {
 		cmd.Env = append(cmd.Env,
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=http.extraheader",
-			"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(token),
+			"GIT_CONFIG_VALUE_0=Authorization: Basic "+basicAuth(g.token),
 		)
 	}
 

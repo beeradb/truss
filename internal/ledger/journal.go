@@ -55,8 +55,20 @@ type RootSummary struct {
 // further by §4.2; it rides inside Heartbeat.Expiring as opaque data this
 // package only needs to marshal in the right position.
 type Expiring struct {
-	Name    string `json:"name"`
-	Expires string `json:"expires"`
+	Name string `json:"name"`
+	// DaysLeft is whole days until expiry, negative when already past, and
+	// nil when the credential records no expiry at all.
+	//
+	// ⚠️ THIS USED TO BE `Expires string` AND IT CHANGED THE HEARTBEAT'S
+	// SCHEMA. write_heartbeat (apply.sh:730-732) emits
+	// {"name":…,"days_left":<number|null>}; the Go port emitted
+	// {"name":…,"expires":"in 5d"} -- the field renamed AND the number
+	// stringified. Any consumer of the heartbeat breaks on that, and
+	// specifically it defeats port-plan §5's plan to validate the rollout by
+	// diffing a bash heartbeat against a Go one. Found by the 2026-09-08
+	// code audit. The two packages' Expiring types now agree, so the
+	// crossing point in cmd/truss is a copy rather than a reformat.
+	DaysLeft *int `json:"days_left"`
 }
 
 // Heartbeat is written on every pass, success or failure, because a job

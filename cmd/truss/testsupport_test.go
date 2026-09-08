@@ -619,12 +619,37 @@ type fakeGit struct {
 	CheckoutErr       error
 	CommitsErr        error
 
+	// DirsAtRef makes HasDir depend on WHICH TREE IS CHECKED OUT, which the
+	// real one does and this fake did not. Without it no test could see a
+	// HasDir asked before its Checkout -- the 2026-09-08 audit's finding
+	// about runRotation. Keyed by ref; the empty-string key is the tree
+	// before any checkout.
+	DirsAtRef map[string][]string
+
 	mu        sync.Mutex
 	checkouts []string
+	current   string
+	token     string
 }
 
-func (g *fakeGit) EnsureClone(ctx context.Context, repoURL, token string) error  { return nil }
-func (g *fakeGit) Fetch(ctx context.Context, remote, branch, token string) error { return nil }
+// WithToken records the token so a test can assert every git call carries
+// one -- the 2026-09-08 audit's finding was precisely that they did not.
+func (g *fakeGit) WithToken(token string) gitDriver {
+	g.mu.Lock()
+	g.token = token
+	g.mu.Unlock()
+	return g
+}
+
+// tokenSeen is the token WithToken was last given, empty if never called.
+func (g *fakeGit) tokenSeen() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.token
+}
+
+func (g *fakeGit) EnsureClone(ctx context.Context, repoURL string) error  { return nil }
+func (g *fakeGit) Fetch(ctx context.Context, remote, branch string) error { return nil }
 
 func (g *fakeGit) Commits(ctx context.Context, from, to string) ([]string, error) {
 	if g.CommitsErr != nil {
@@ -642,13 +667,40 @@ func (g *fakeGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 }
 
 func (g *fakeGit) Checkout(ctx context.Context, ref string) error {
+	if g.CheckoutErr != nil {
+		return g.CheckoutErr
+	}
 	g.mu.Lock()
 	g.checkouts = append(g.checkouts, ref)
+	g.current = ref
 	g.mu.Unlock()
-	return g.CheckoutErr
+	return nil
+}
+
+// checkedOut reports whether ref was ever checked out.
+func (g *fakeGit) checkedOut(ref string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range g.checkouts {
+		if c == ref {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *fakeGit) HasDir(root string) bool {
+	if g.DirsAtRef != nil {
+		g.mu.Lock()
+		ref := g.current
+		g.mu.Unlock()
+		for _, d := range g.DirsAtRef[ref] {
+			if d == root {
+				return true
+			}
+		}
+		return false
+	}
 	if g.HasDirFn != nil {
 		return g.HasDirFn(root)
 	}
