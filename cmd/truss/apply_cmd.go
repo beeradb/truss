@@ -67,6 +67,10 @@ type applyDeps struct {
 	// CloudflareBaseURL overrides the Cloudflare API host for the expiry
 	// sweep's probe; empty is the real one. See runExpirySweep.
 	CloudflareBaseURL string
+	// Token is the GitHub App installation token minted once per pass. It
+	// reaches git through the environment (gitDriver.WithToken) and tofu as
+	// GH_TOKEN (buildBaseEnv). Set by runApplyPass; empty before that.
+	Token string
 	// PATH and HOME are copied explicitly from the environment cmdApply was
 	// given, so tofu's own child process (Runner.Env, which never inherits
 	// implicitly -- §2 item 9) can still find the tofu binary and its
@@ -225,6 +229,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 			// --filter=blob:none, so checkout and diff lazily fetch blobs and
 			// are network operations too. See gitDriver.WithToken.
 			d.Git = d.Git.WithToken(tok)
+			d.Token = tok
 			repoURL := "https://github.com/" + d.Cfg.Repo + ".git"
 			if err := d.Git.EnsureClone(ctx, repoURL); err != nil {
 				failure = fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err)
@@ -419,7 +424,10 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string) (newLast strin
 	}
 
 	cc := &credCache{dir: d.Dir}
-	baseEnv := buildBaseEnv(d)
+	baseEnv, err := buildBaseEnv(d, d.Token)
+	if err != nil {
+		return last, 0, 0, err.Error(), "", false
+	}
 
 	for _, sha := range commits {
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
@@ -545,8 +553,50 @@ func (c *credCache) mintToken() (string, error) {
 // process environment because Runner.Env is never inherited implicitly
 // (§2 item 9) -- so cmd/truss itself decides what crosses that boundary,
 // rather than plan.Runner defaulting to os.Environ() by accident.
-func buildBaseEnv(d applyDeps) []string {
-	return []string{"PATH=" + d.PATH, "HOME=" + d.HOME}
+// buildBaseEnv is the environment EVERY tofu run gets, matching what
+// apply.sh:147 exports: PATH and HOME, plus the GitHub App identity the
+// `github` provider authenticates with.
+//
+// ⚠️ THE FOUR GITHUB VARIABLES WERE MISSING AND EVERY ROOT USING THE GITHUB
+// PROVIDER FAILED. The provider's `app_auth {}` block takes its arguments
+// from the environment, so without them tofu refuses at init with
+// "Missing required argument ... pem_file / id / installation_id" -- which
+// reads like a bug in the platform's own versions.tf rather than a missing
+// export. Found by the second shadow run, 2026-09-08: drift reported UNKNOWN
+// for platform and projects/recipes, and the reason was this.
+//
+// ⚠️ GITHUB_APP_PEM_FILE IS THE KEY'S CONTENTS, NOT A PATH, despite the name
+// -- that is the provider's own convention, and apply.sh carries the same
+// warning. Passing a path here would fail in a way that looks like an
+// unreadable file.
+//
+// ⚠️ These reach tofu through the ENVIRONMENT rather than argv, which is the
+// same trade apply.sh documents at its own credential block: this process
+// runs one pass and exits, there is no second tenant to leak to, and every
+// one of these tools reads its credentials from the environment by
+// convention.
+func buildBaseEnv(d applyDeps, token string) ([]string, error) {
+	env := []string{"PATH=" + d.PATH, "HOME=" + d.HOME}
+	if token != "" {
+		env = append(env, "GH_TOKEN="+token)
+	}
+	appID, err := d.Dir.Field(itemGitHubApp, fieldGitHubAppID)
+	if err != nil {
+		return nil, err
+	}
+	installationID, err := d.Dir.Field(itemGitHubApp, fieldGitHubInstallationID)
+	if err != nil {
+		return nil, err
+	}
+	pem, err := d.Dir.Field(itemGitHubApp, fieldGitHubPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	return append(env,
+		"GITHUB_APP_ID="+appID,
+		"GITHUB_APP_INSTALLATION_ID="+installationID,
+		"GITHUB_APP_PEM_FILE="+pem,
+	), nil
 }
 
 // applyOneRoot runs init, plan, (for non-credentials roots) the digest
@@ -691,7 +741,10 @@ func runRotation(ctx context.Context, d applyDeps, last, credentialsAppliedAt st
 	}
 
 	cc := &credCache{dir: d.Dir}
-	baseEnv := buildBaseEnv(d)
+	baseEnv, err := buildBaseEnv(d, d.Token)
+	if err != nil {
+		return map[string]string{"failed": err.Error()}, 0, err
+	}
 	result, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, last, "credentials")
 	if lockBusy {
 		return map[string]string{"skipped": "state lock held elsewhere"}, 0, nil
@@ -745,7 +798,11 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 	if err != nil {
 		return nil, nil, fmt.Sprintf("could not read gcp-apply credentials: %v", err)
 	}
-	env := append(buildBaseEnv(d), "CLOUDFLARE_API_TOKEN="+infra, "GOOGLE_CREDENTIALS="+google)
+	base, err := buildBaseEnv(d, d.Token)
+	if err != nil {
+		return nil, nil, err.Error()
+	}
+	env := append(base, "CLOUDFLARE_API_TOKEN="+infra, "GOOGLE_CREDENTIALS="+google)
 
 	for _, root := range roots {
 		rootDir := filepath.Join(d.Cfg.Workdir, root)

@@ -112,3 +112,54 @@ func TestADriftRunStillClonesTheRepository(t *testing.T) {
 		t.Error("a drift run never attached the installation token, so the clone is unauthenticated")
 	}
 }
+
+// TestEveryTofuRunCarriesTheGitHubAppIdentity covers the third defect the
+// shadow found: buildBaseEnv returned only PATH and HOME, so the `github`
+// provider's app_auth block had none of its required arguments and tofu
+// refused at init with "Missing required argument ... pem_file / id /
+// installation_id". Every root using that provider failed -- the second
+// shadow run reported "drift UNKNOWN for: platform, projects/recipes".
+//
+// apply.sh:147 exports all four (GH_TOKEN plus the three GITHUB_APP_*).
+//
+// ⚠️ GITHUB_APP_PEM_FILE IS THE KEY'S CONTENTS, NOT A PATH, despite the name.
+func TestEveryTofuRunCarriesTheGitHubAppIdentity(t *testing.T) {
+	dir, write := testSecretsDir(t)
+	writeGitHubAppSecret(t, write)
+
+	d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "installation-tok"}
+	env, err := buildBaseEnv(d, d.Token)
+	if err != nil {
+		t.Fatalf("buildBaseEnv: %v", err)
+	}
+
+	seen := map[string]string{}
+	for _, kv := range env {
+		if i := strings.Index(kv, "="); i > 0 {
+			seen[kv[:i]] = kv[i+1:]
+		}
+	}
+	for _, name := range []string{
+		"PATH", "HOME", "GH_TOKEN",
+		"GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PEM_FILE",
+	} {
+		if seen[name] == "" {
+			t.Errorf("tofu's environment has no %s; the github provider's app_auth block needs it", name)
+		}
+	}
+	// The PEM is the key itself, so it must look like one rather than a path.
+	if !strings.Contains(seen["GITHUB_APP_PEM_FILE"], "PRIVATE KEY") {
+		t.Errorf("GITHUB_APP_PEM_FILE = %q, want the key's contents, not a path", seen["GITHUB_APP_PEM_FILE"])
+	}
+}
+
+// TestBuildBaseEnvRefusesAMirrorMissingTheApp: absent is not empty. A mirror
+// without the github-app item must stop the pass, not hand tofu a blank
+// identity that fails three steps later inside a provider.
+func TestBuildBaseEnvRefusesAMirrorMissingTheApp(t *testing.T) {
+	dir, _ := testSecretsDir(t) // nothing written
+	d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root"}
+	if _, err := buildBaseEnv(d, ""); err == nil {
+		t.Fatal("buildBaseEnv accepted a mirror with no github-app item")
+	}
+}

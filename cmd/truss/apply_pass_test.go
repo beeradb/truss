@@ -25,6 +25,12 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 	dir, write := testSecretsDir(t)
 	fl := newFakeLedger(t, "state-bucket")
 	writeLedgerSecret(t, write, fl)
+	// ⚠️ THE GITHUB APP ITEM IS PART OF THE MIRROR AND THIS FIXTURE OMITTED
+	// IT. Every tofu run gets GITHUB_APP_ID/INSTALLATION_ID/PEM_FILE, which
+	// the `github` provider's app_auth block requires; leaving them out of
+	// the fixture is what let buildBaseEnv ship without them at all. Found
+	// by the second shadow run against the real cluster, 2026-09-08.
+	writeGitHubAppSecret(t, write)
 	write(itemCFTokenMint, fieldCFCredential, "fake-mint-token")
 	write(itemGCPApply, fieldGCPCredentials, "fake-google-creds")
 	write(itemTofuEncryption, fieldTofuPassphrase, "fake-passphrase")
