@@ -6,9 +6,19 @@ and untick the box" is a step nobody can review, repeat or automate.
 
 ## Branch protection: the only way past a stuck gate
 
+    export TRUSS_REPO=<owner>/<the repository the applier applies>
+
     scripts/protection show     # what is set right now
     scripts/protection on       # set it to what the applier requires
     scripts/protection off      # remove it
+
+⚠️ **`TRUSS_REPO` is the repository truss APPLIES, never the one truss is
+built in.** There is no default, on purpose. These settings require a status
+check named `plan`, which is filed by the plan job of a managed repository —
+so pointing them at truss's own source repository requires a context that
+cannot exist there, and `enforce_admins` leaves no way to merge past it. The
+script now refuses a required check the target has never reported, but the
+variable is the thing to get right.
 
 The applier refuses to run at all unless protection is exactly as
 [docs/design.md](design.md) specifies, and it re-reads it from the API on
@@ -29,6 +39,35 @@ an "off" nobody turned back on is loud rather than silent.
 **Turn it back on in the same sitting.** The window where protection is off is
 a window where an unreviewed commit can reach `main` and the applier will not
 apply it — work piles up behind a gate that is not actually guarding anything.
+
+### Protecting this repository is a different job
+
+    scripts/repo-protection show | on | off | verify
+
+`scripts/protection` states what the applier demands of a repository it
+**manages**. This repository is not one of those: it declares no OpenTofu
+roots, so nothing here ever files a `plan`, and requiring one deadlocked every
+merge on 2026-09-08 — with `enforce_admins` on there was no override, so not
+even the fix could land.
+
+So the two are separate scripts with separate payloads, and neither pretends
+to be the other. What this one asks for is ordinary hygiene: the `check` job
+must pass, the branch must be current, stale approvals are dismissed, and
+history cannot be force-pushed or deleted by accident.
+
+Two settings differ from the applier's on purpose. `enforce_admins` is **off**,
+because the maintainer needs a force push to remove the AI-trailer commits
+before this repository is opened, and binding admins would mean turning
+protection off to do it — which is how it came to be off in the first place.
+Required approvals are **zero**, because a sole maintainer cannot approve their
+own pull request and a rule nobody can satisfy is a rule that gets switched off.
+
+`verify` answers "is what is live still what the file asks for", comparing
+field by field against the payload rather than a list typed out again. A
+setting changed by hand shows up as a line naming it:
+
+    repo-protection: live settings differ from scripts/repo-protection
+      enforce_admins: want False, live True
 
 ### What the payload is, and why it is not written down twice
 

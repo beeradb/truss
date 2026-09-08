@@ -19,8 +19,27 @@
 # these values anywhere else -- a second copy is the one that goes stale.
 set -euo pipefail
 
-REPO="${TRUSS_REPO:-beeradb/truss}"
+# ⚠️ NO DEFAULT REPOSITORY, DELIBERATELY. This defaulted to truss's own
+# repository and that is the one repository these settings are wrong for:
+# truss does not manage itself, it has no OpenTofu roots, and so nothing here
+# ever files a `plan`. Enabling it here required a status context that cannot
+# exist, and with enforce_admins on and no admin override, NOTHING could merge
+# -- including the fix. The payload was right for its real target and aimed at
+# the wrong one, which a default is very good at hiding.
+#
+# The target is the repository the applier APPLIES, not the one it is built in.
+REPO="${TRUSS_REPO:-}"
 BRANCH="${TRUSS_BRANCH:-main}"
+
+# Demanded by the subcommands that reach a repository, and NOT by `payload`,
+# which only prints and is what the Go test reads.
+need_repo() {
+  [ -n "$REPO" ] || {
+    echo "refusing to start: TRUSS_REPO is unset -- name the repository the applier applies," >&2
+    echo "                   which is not the repository truss is built in." >&2
+    exit 2
+  }
+}
 
 # Keep in step with config.Config.RequiredCheck, which is "plan".
 read -r -d '' PAYLOAD <<'JSON' || true
@@ -47,17 +66,49 @@ case "$1" in
   payload) printf '%s\n' "$PAYLOAD" ;;
 
   on)
+    need_repo
+    # ⚠️ REFUSE A REQUIRED CHECK THE TARGET HAS NEVER REPORTED. Requiring a
+    # context nothing produces is not a stricter setting, it is a merge
+    # deadlock: GitHub waits forever for a status that will never arrive, and
+    # `enforce_admins` means nobody can override it. That is how this script
+    # bricked a repository the first time it was run.
+    #
+    # Asked of the target's own recent history rather than of a list kept here,
+    # because what matters is whether THAT repository has ever emitted the
+    # context -- a fact about the world, not about our configuration. The three
+    # vacuous guards found on 2026-09-08 all shared one shape: they compared a
+    # thing to itself.
+    required=$(printf '%s' "$PAYLOAD" | tr -d ' \n' | sed 's/.*"contexts":\["//;s/"\].*//')
+    head_sha=$(gh api "repos/$REPO/commits/$BRANCH" --jq '.sha')
+    seen=$(
+      { gh api "repos/$REPO/commits/$head_sha/status"     --jq '.statuses[].context' 2>/dev/null || true
+        gh api "repos/$REPO/commits/$head_sha/check-runs" --jq '.check_runs[].name'  2>/dev/null || true
+      } | sort -u
+    )
+    case "$seen" in
+      *"$required"*) ;;
+      *)
+        echo "refusing: $REPO has never reported a status named \"$required\"." >&2
+        echo "          Requiring it would deadlock every merge, and enforce_admins" >&2
+        echo "          leaves no override. Contexts seen on $BRANCH:" >&2
+        printf '            %s\n' ${seen:-"(none)"} >&2
+        exit 1
+        ;;
+    esac
+
     printf '%s' "$PAYLOAD" |
       gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" --input - >/dev/null
     echo "protection: on ($REPO/$BRANCH)"
     ;;
 
   off)
+    need_repo
     gh api -X DELETE "repos/$REPO/branches/$BRANCH/protection" >/dev/null
     echo "protection: OFF ($REPO/$BRANCH) -- the applier will refuse every commit until this is back on"
     ;;
 
   show)
+    need_repo
     # A 404 here is a real answer -- "not protected" -- not an error, so it is
     # reported as such rather than dumping GitHub's message and exiting non-zero.
     if out=$(gh api "repos/$REPO/branches/$BRANCH/protection" 2>/dev/null); then
