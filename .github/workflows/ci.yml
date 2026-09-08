@@ -40,7 +40,31 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
+
+      # ⚠️ jq IS A TEST DEPENDENCY, AND ITS ABSENCE MUST BE LOUD. The plan
+      # digest has to be byte-identical to what `jq -S -c | sha256sum`
+      # produces, and the only thing that proves it is a differential test
+      # that runs the real pipeline. That test SKIPS when jq is missing --
+      # so without this step a runner image that drops jq would leave CI
+      # green on a comparison it never made.
+      - run: jq --version
+
+      # TRUSS_REQUIRE_JQ=1 turns that skip into a failure. Setting it here is
+      # what makes the differential test mean something in CI.
       - run: go test ./...
+        env:
+          TRUSS_REQUIRE_JQ: "1"
+
+      # ⚠️ A SHORT FUZZ RUN, ON PURPOSE. The seed corpus only replays
+      # divergences already found; fuzzing is what found them. Three genuine
+      # ones came out of it, including a lone UTF-16 high surrogate that Go
+      # accepts and jq refuses. Thirty seconds will not explore much, but a
+      # new divergence is a real defect in the one value in this system that
+      # must be exactly equal -- so failing here is the correct outcome, not
+      # flakiness.
+      - run: go test ./internal/plan/ -run 'XXX_none' -fuzz FuzzCanonicalAgreesWithJQ -fuzztime 30s
+        env:
+          TRUSS_REQUIRE_JQ: "1"
 
       # ⚠️ THE SCANNER'S OWN TEST RUNS FIRST, AND THAT ORDER IS THE POINT.
       # A leak scan that has quietly stopped matching reports success, so the
