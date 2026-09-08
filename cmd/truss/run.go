@@ -19,6 +19,7 @@ var subcommands = []string{
 	"expiry",
 	"notify",
 	"apply",
+	"publish",
 }
 
 func isSubcommand(name string) bool {
@@ -47,6 +48,8 @@ subcommands:
   expiry                sweep credential expiry
   notify                compose and send a status report (stdin: JSON)
   apply                 run the applier pass
+  publish                serve one publish request over a Unix socket
+                         (internal; runs only in the publisher container)
 `
 
 // run is the binary's only entry point besides main, and main's only job
@@ -80,6 +83,8 @@ func runEnv(ctx context.Context, args []string, getenv func(string) string, stdi
 		return cmdNotify(ctx, rest, getenv, stdin, stdout, stderr)
 	case "apply":
 		return cmdApply(ctx, rest, getenv, stdout, stderr)
+	case "publish":
+		return cmdPublish(ctx, rest, getenv, stdout, stderr)
 	default:
 		// Unreachable: isSubcommand already filtered args[0]. Kept as an
 		// explicit refusal rather than a panic so a future subcommand

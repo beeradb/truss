@@ -7,9 +7,16 @@ import (
 
 // TestSubcommandsAreExactlyTheDocumentedSet pins the dispatch table to
 // docs/port-plan.md §4.9's table exactly: ledger, plan-digest, token, gate,
-// expiry, notify, apply -- no more, no fewer. "ledger get"/"ledger put" and
-// "gate protection"/"gate commit" collapse to one top-level verb each,
-// which is why this is seven entries against the doc's eight rows.
+// expiry, notify, apply, publish -- no more, no fewer. "ledger get"/"ledger
+// put" and "gate protection"/"gate commit" collapse to one top-level verb
+// each, which is why this is eight entries against the doc's nine rows.
+//
+// `publish` is the separate publisher identity's entry point: the same binary,
+// run in a container that mounts a DIFFERENT audience-scoped Vault token, so
+// the applier keeps its read-only policy. Shipping it here does not weaken
+// that -- the separation is the kubelet projecting a token into one container
+// and the kernel keeping mount namespaces apart, and code presence is not a
+// capability.
 func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 	want := []string{
 		"ledger",
@@ -19,6 +26,7 @@ func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 		"expiry",
 		"notify",
 		"apply",
+		"publish",
 	}
 	if !reflect.DeepEqual(subcommands, want) {
 		t.Fatalf("subcommands = %v, want %v", subcommands, want)
