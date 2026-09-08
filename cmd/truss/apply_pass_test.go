@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,12 @@ import (
 // HTTP client, and whatever gitDriver/forgeGateway/tofuFactory the caller
 // supplies. It returns the deps plus the fake ledger and fake Telegram so
 // a test can inspect what was written and sent.
+//
+// Stderr defaults to io.Discard -- most tests here do not care about
+// narration (logf, apply_cmd.go) and a nil Writer would panic the first time
+// any of the nine call sites fired. A test that DOES want to inspect
+// narration overrides deps.Stderr with its own *bytes.Buffer after this
+// returns; see apply_narration_test.go.
 func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu tofuFactory) (applyDeps, *fakeLedger, *fakeTelegram) {
 	t.Helper()
 
@@ -71,6 +78,7 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 			Addr: vaultSrv.URL, Mount: "platform", Role: "applier", JWTPath: testJWTFile(t),
 		},
 		PATH: "/usr/bin", HOME: "/root",
+		Stderr: io.Discard,
 	}
 	return deps, fl, ft
 }

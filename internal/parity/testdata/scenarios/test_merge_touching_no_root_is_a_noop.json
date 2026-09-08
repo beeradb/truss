@@ -1,10 +1,10 @@
 {
   "bash": {
-    "alert_b64": "cGxhdGZvcm0gYXBwbGllcjogYXBwbGllZD0wIG5vb3A9MSBsYXN0PXNoYTE7IEVYUElSSU5HOiBjZi10b2tlbi1taW50IChubyBleHBpcnkgcmVjb3JkZWQp",
+    "alert_b64": "cGxhdGZvcm0gYXBwbGllcjogYXBwbGllZD0wIG5vb3A9MSBsYXN0PXNoYTE=",
     "bucket_after": {
       "applied/HEAD": "c2hhMQ==",
       "applied/sha1": "eyJub29wIjp0cnVlfQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6MzlaIiwKICAibGFzdF9zaGEiOiAic2hhMSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMSwKICAiZmFpbHVyZSI6IG51bGwsCiAgInJvdGF0aW9uIjogewogICAgInJlc291cmNlX2NoYW5nZXMiOiAwCiAgfSwKICAiZHJpZnQiOiB7CiAgICAic2tpcHBlZCI6ICJub3QgYSBkcmlmdCBydW4iCiAgfSwKICAiZXhwaXJpbmciOiBbCiAgICB7CiAgICAgICJuYW1lIjogImNmLXRva2VuLW1pbnQiLAogICAgICAiZGF5c19sZWZ0IjogbnVsbAogICAgfQogIF0KfQ=="
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NDdaIiwKICAibGFzdF9zaGEiOiAic2hhMSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMSwKICAiZmFpbHVyZSI6IG51bGwsCiAgInJvdGF0aW9uIjogewogICAgInNraXBwZWQiOiAicm90YXRpb24gcnVucyBvbiB0aGUgZGFpbHkgcGFzcyIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogIm5vdCBhIGRyaWZ0IHJ1biIKICB9LAogICJleHBpcmluZyI6IFtdCn0="
     },
     "exit_code": 0
   },

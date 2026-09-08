@@ -3,8 +3,8 @@
     "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogcm90YXRpb24gb2YgY3JlZGVudGlhbHMgYXQgYmFzZTogdG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIChhcHBsaWVkPTAgbm9vcD0wKQ==",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "failed/rotation-<ts>": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIiwKICAiYXQiOiAiMjAyNi0wOS0wOFQwNDoyMzo1MloiCn0=",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NTNaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJyb3RhdGlvbiBvZiBjcmVkZW50aWFscyBhdCBiYXNlOiB0b2Z1IGFwcGx5IGZhaWxlZCBmb3IgY3JlZGVudGlhbHMiLAogICJyb3RhdGlvbiI6IHsKICAgICJmYWlsZWQiOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIgogIH0sCiAgImRyaWZ0IjogewogICAgInNraXBwZWQiOiAibm90IGEgZHJpZnQgcnVuIgogIH0sCiAgImV4cGlyaW5nIjogW10KfQ=="
+      "failed/rotation-<ts>": "ewogICJyZWFzb24iOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIiwKICAiYXQiOiAiMjAyNi0wOS0wOFQxNTowNjo1M1oiCn0=",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTNaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJyb3RhdGlvbiBvZiBjcmVkZW50aWFscyBhdCBiYXNlOiB0b2Z1IGFwcGx5IGZhaWxlZCBmb3IgY3JlZGVudGlhbHMiLAogICJyb3RhdGlvbiI6IHsKICAgICJmYWlsZWQiOiAidG9mdSBhcHBseSBmYWlsZWQgZm9yIGNyZWRlbnRpYWxzIgogIH0sCiAgImRyaWZ0IjogewogICAgImRyaWZ0ZWQiOiBbXSwKICAgICJlcnJvcmVkIjogW10KICB9LAogICJleHBpcmluZyI6IFtdCn0="
     },
     "exit_code": 1
   },
@@ -14,6 +14,7 @@
   },
   "env": {
     "APPROVER": "alice",
+    "DRIFT_CHECK": "1",
     "HEARTBEAT_KEY": "heartbeat/applier.json",
     "LEDGER_APPLIED_PREFIX": "applied",
     "LEDGER_BUCKET": "state-bucket",
@@ -82,7 +83,7 @@
           "expires": "@+60d"
         },
         "nyt-cookie": {
-          "expires": "@+300d!"
+          "expires": "@+299d!"
         },
         "registry-pull": {
           "expires": "@+60d"

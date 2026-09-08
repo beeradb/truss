@@ -21,9 +21,10 @@ import (
 // ⚠️ DO NOT ADD AN ENTRY TO MAKE A TEST PASS. An entry claims somebody
 // decided this difference on purpose, with a reference that can be read.
 // A difference nobody decided is a finding to take to the owner. Status
-// says which is which, and five of the entries below say FINDING: they are
-// here so the other thirty-two scenarios can be tested at all, and every
-// one of them is reported as a defect rather than an approval.
+// says which is which: two of the entries below say FINDING, because they
+// are real defects nobody has decided to accept, not because the corpus
+// needs them to pass -- every one of them is reported as a defect rather
+// than an approval.
 type Divergence struct {
 	// ID is stable and is what a failure message names.
 	ID string
@@ -254,12 +255,11 @@ func alertReasonIsTheExitStatus(d Diff) bool {
 
 // Divergences is the whole list. Read the type doc before adding to it.
 //
-// ⚠️ THE apply.sh LINE NUMBERS BELOW ARE AGAINST THE 851-LINE FILE THIS
-// CORPUS WAS RECORDED FROM, WHICH IS NOT THE ONE docs/port-plan.md CITES
-// (it names a 1,114-line version). Line numbers in a file somebody else is
-// still editing rot; each entry therefore also names the FUNCTION or the
-// exact code it refers to, which is what to search for if the number has
-// moved.
+// Re-recorded 2026-09-08 against origin/main's 1,114-line apply.sh, the
+// same version docs/port-plan.md cites. Line numbers below are against
+// that file, but a file somebody else is still editing rots regardless;
+// each entry therefore also names the FUNCTION or the exact code it
+// refers to, which is what to search for if a number has moved again.
 var Divergences = []Divergence{
 	// -----------------------------------------------------------------
 	// INTENDED
@@ -355,32 +355,55 @@ var Divergences = []Divergence{
 			"pass put that straight into the reason, which lands in a ledger object anyone holding the bucket " +
 			"credential can read AND in a Telegram chat. A provider makes no promise about what it prints in an " +
 			"error -- a request body, a resource attribute, a token -- and TrimReason's 800-byte cap yields 800 " +
-			"bytes of provider output rather than none. apply.sh:170-180 records the same reasoning under its own " +
+			"bytes of provider output rather than none. apply.sh:335-345 records the same reasoning under its own " +
 			"\"Security review, 2026-09-07\"; the port reintroduced exactly what that review removed, and this " +
 			"harness printed it as a diff on 2026-09-08. Fixed: the transcript and the pod's absolute working " +
 			"directory are gone, and the full output still reaches the pod log. What remains is the bare exit " +
 			"status, kept ON PURPOSE because it separates a tofu that ran and refused from one that could not be " +
 			"executed at all -- the bash reports both identically.",
-		Ref: "applier/apply.sh:170-180; internal/plan/runner.go wrapExecError; " +
+		Ref: "applier/apply.sh:335-345; internal/plan/runner.go wrapExecError; " +
 			"internal/plan/runner_test.go TestAFailureReasonIsNotATranscript",
 	},
 	{
-		ID:     "FAILURE-PRECEDENCE-COMMIT-BEFORE-ROTATION",
+		ID:     "EXPIRY-SWEEP-CANNOT-FAIL-LIKE-1PASSWORD",
 		Status: StatusIntended,
 		Scenarios: []string{
-			"test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
-			"test_tofu_apply_failure_stops_the_pass_and_leaves_later_commit_unapplied",
+			"test_a_spent_allowance_fails_the_daily_sweep_and_still_reports",
 		},
-		Accept: firstFailureWins,
-		Bash:   "the rotation failure overwrites the commit's, so the alert names rotation and not the commit that failed",
-		Truss:  "the commit's failure is kept and rotation's is reported only in the rotation summary",
-		Why: "RATIFIED BY THE OWNER 2026-09-08, having been raised as a finding rather than assumed. The bash " +
-			"assigns `failure=` unconditionally in rotate_credentials, clobbering whatever the commit loop set; " +
-			"truss guards it with `failure == \"\"`. The commit failure is the one somebody has to act on, and " +
-			"the bash's alert hides it behind a rotation failure that is usually a consequence of the same broken " +
-			"root. Note this is precedence only: rotation's failure is not lost, it is in the rotation summary in " +
-			"the heartbeat AND now in its own failed/rotation-<ts> record.",
-		Ref: "applier/apply.sh:698 vs cmd/truss/apply_cmd.go's `if rotErr != nil && failure == \"\"`",
+		Accept: expirySweepCannotFailLike1Password,
+		Bash:   "the daily pass fails outright (exit 1) when it cannot list the 1Password `platform` vault -- rate-limited or otherwise unreachable",
+		Truss:  "the daily pass succeeds; nothing it reads can be rate-limited",
+		Why: "The same cause as EXPIRY-ONE-VAULT-MOUNT, seen at its widest: truss's expiry sweep reads a local " +
+			"Vault KV mount, never 1Password, so a fixture that simulates 1Password's rate limit or an unreadable " +
+			"vault has no analogue on the truss side -- there is no network call to fail. Decision 4 took `op` out " +
+			"of the image entirely, and 'the sweep can no longer be rate-limited by a store it never asks' is the " +
+			"direct, unavoidable consequence of that, not a new decision. Recorded separately from " +
+			"EXPIRY-ONE-VAULT-MOUNT because the blast radius here is the whole pass -- exit code and alert, not " +
+			"just the EXPIRING clause -- which that entry's matcher does not and should not forgive.",
+		Ref: "docs/port-plan.md §7 decision 4 and §4.7; same gap as EXPIRY-ONE-VAULT-MOUNT, a different scenario",
+	},
+
+	// -----------------------------------------------------------------
+	// FINDINGS -- nobody decided these. Reported to the owner as defects.
+	// -----------------------------------------------------------------
+	{
+		ID:     "BASH-DIES-SILENT-BEFORE-HEARTBEAT",
+		Status: StatusFinding,
+		Scenarios: []string{
+			"test_a_pass_with_work_still_needs_the_applying_credentials",
+		},
+		Accept: silentDeathBeforeHeartbeat,
+		Bash:   "exits 1 with NO alert and NO heartbeat/failed record at all -- die() exits before write_heartbeat and send_telegram, the last two lines of the script",
+		Truss:  "exits 1 (exit code agrees) but also sends an alert and writes failed/<sha> and heartbeat/applier.json",
+		Why: "Nobody decided this either. apply.sh's own comment on write_heartbeat says heartbeat and alert run " +
+			"'ALWAYS, at the very end -- a job that speaks only on failure cannot be told apart from one that is " +
+			"no longer running' -- but a `die()` for a credential that failed to mount (line 136) happens long " +
+			"before those two calls, so the bash breaks its own promise silently in exactly the case that promise " +
+			"exists for. truss keeps the promise: buildBaseEnv's error still reaches runApplyPass's failure path, " +
+			"which always writes a heartbeat. Reported rather than matched away because it is truss disagreeing " +
+			"with what the bash actually does, even though truss is plainly the more correct of the two -- the " +
+			"owner should decide whether the bash gets fixed to match, or this becomes an accepted improvement.",
+		Ref: "applier/apply.sh:136 (die) vs :1112-1113 (write_heartbeat; send_telegram, unconditionally last)",
 	},
 }
 
@@ -414,28 +437,41 @@ func exitStatusAnywhere(d Diff) bool {
 	return exitStatusSuffix(d)
 }
 
-// firstFailureWins matches the one shape FAILURE-PRECEDENCE names: the
-// bash blames rotation where truss blames the commit that actually failed.
-//
-// Both sides must still BE a failure -- an entry that accepted "one failed
-// and the other did not" would forgive the pass going green, which is the
-// only thing this scenario is really guarding. In the alert the two
-// divergences arrive together (truss's reason also carries the transcript,
-// see REASON-CARRIES-TOFU-TRANSCRIPT), so the alert branch checks both
-// halves rather than pretending they can be separated.
-func firstFailureWins(d Diff) bool {
+// expirySweepCannotFailLike1Password matches EXPIRY-SWEEP-CANNOT-FAIL-LIKE-
+// 1PASSWORD's one shape: the bash fails the whole daily pass because it
+// could not list the 1Password `platform` vault, and truss -- which never
+// asks 1Password anything -- has nothing to fail on and reports a clean,
+// empty pass instead. All three sinks must show exactly that shape, or the
+// diff is not this one.
+func expirySweepCannotFailLike1Password(d Diff) bool {
+	const bashClause = "the expiry sweep could not list the 'platform' vault"
+	switch d.Kind {
+	case "exit":
+		return d.Bash == "1" && d.Truss == "0"
+	case "alert":
+		return strings.Contains(d.Bash, bashClause) && d.Truss == "platform applier: nothing to apply"
+	case "value":
+		return d.Key == "heartbeat/applier.json" && d.Path == "/failure" &&
+			strings.Contains(d.Bash, bashClause) && d.Truss == "null"
+	default:
+		return false
+	}
+}
+
+// silentDeathBeforeHeartbeat matches BASH-DIES-SILENT-BEFORE-HEARTBEAT's one
+// shape: the bash produced nothing at all in the sinks a failure normally
+// reaches (an alert that never sent, a failed/<sha> record that was never
+// written, a heartbeat that was never written), because `die()` exited
+// before write_heartbeat and send_telegram ever ran. truss's side must be a
+// real, well-formed failure naming the same underlying cause -- a
+// credential that failed to mount -- or this does not match.
+func silentDeathBeforeHeartbeat(d Diff) bool {
+	const cause = "is not mounted -- is the credential mirror applied and syncing?"
 	switch d.Kind {
 	case "alert":
-		return strings.Contains(d.Bash, "FAILED at ") &&
-			strings.Contains(d.Bash, ": rotation of credentials at ") &&
-			strings.Contains(d.Truss, "FAILED at ") &&
-			!strings.Contains(d.Truss, "rotation of credentials at ") &&
-			strings.Contains(d.Truss, " failed for ") &&
-			strings.Contains(d.Truss, "exit status ")
-	case "value":
-		return strings.HasPrefix(d.Bash, "rotation of credentials at ") &&
-			!strings.HasPrefix(d.Truss, "rotation of credentials at ") &&
-			strings.Contains(d.Truss, " failed for ")
+		return d.Bash == "" && strings.Contains(d.Truss, cause)
+	case "extra-key":
+		return (d.Key == "failed/sha1" || d.Key == "heartbeat/applier.json") && strings.Contains(d.Truss, cause)
 	default:
 		return false
 	}

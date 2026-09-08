@@ -3,8 +3,8 @@
     "alert_b64": "cGxhdGZvcm0gYXBwbGllciBGQUlMRUQgYXQgYmFzZTogbm8gQVBQUk9WRUQgcmV2aWV3IGJ5IGFsaWNlIGF0IGhlYWQgc2hhIGhlYWRzaGExIGZvciBQUiAjNDIgKGFuIGFwcHJvdmFsIG9uIGFuIGVhcmxpZXIgcHVzaCBkb2VzIG5vdCBjb3VudCkgKGFwcGxpZWQ9MCBub29wPTAp",
     "bucket_after": {
       "applied/HEAD": "YmFzZQ==",
-      "failed/sha1": "ewogICJyZWFzb24iOiAibm8gQVBQUk9WRUQgcmV2aWV3IGJ5IGFsaWNlIGF0IGhlYWQgc2hhIGhlYWRzaGExIGZvciBQUiAjNDIgKGFuIGFwcHJvdmFsIG9uIGFuIGVhcmxpZXIgcHVzaCBkb2VzIG5vdCBjb3VudCkiLAogICJhdCI6ICIyMDI2LTA5LTA4VDA0OjIzOjUwWiIKfQ==",
-      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMDQ6MjM6NTBaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJubyBBUFBST1ZFRCByZXZpZXcgYnkgYWxpY2UgYXQgaGVhZCBzaGEgaGVhZHNoYTEgZm9yIFBSICM0MiAoYW4gYXBwcm92YWwgb24gYW4gZWFybGllciBwdXNoIGRvZXMgbm90IGNvdW50KSIsCiAgInJvdGF0aW9uIjogewogICAgInJlc291cmNlX2NoYW5nZXMiOiAwCiAgfSwKICAiZHJpZnQiOiB7CiAgICAic2tpcHBlZCI6ICJub3QgYSBkcmlmdCBydW4iCiAgfSwKICAiZXhwaXJpbmciOiBbXQp9",
+      "failed/sha1": "ewogICJyZWFzb24iOiAibm8gQVBQUk9WRUQgcmV2aWV3IGJ5IGFsaWNlIGF0IGhlYWQgc2hhIGhlYWRzaGExIGZvciBQUiAjNDIgKGFuIGFwcHJvdmFsIG9uIGFuIGVhcmxpZXIgcHVzaCBkb2VzIG5vdCBjb3VudCkiLAogICJhdCI6ICIyMDI2LTA5LTA4VDE1OjA2OjUyWiIKfQ==",
+      "heartbeat/applier.json": "ewogICJ0aW1lIjogIjIwMjYtMDktMDhUMTU6MDY6NTJaIiwKICAibGFzdF9zaGEiOiAiYmFzZSIsCiAgImFwcGxpZWQiOiAwLAogICJub29wIjogMCwKICAiZmFpbHVyZSI6ICJubyBBUFBST1ZFRCByZXZpZXcgYnkgYWxpY2UgYXQgaGVhZCBzaGEgaGVhZHNoYTEgZm9yIFBSICM0MiAoYW4gYXBwcm92YWwgb24gYW4gZWFybGllciBwdXNoIGRvZXMgbm90IGNvdW50KSIsCiAgInJvdGF0aW9uIjogewogICAgInNraXBwZWQiOiAicm90YXRpb24gcnVucyBvbiB0aGUgZGFpbHkgcGFzcyIKICB9LAogICJkcmlmdCI6IHsKICAgICJza2lwcGVkIjogIm5vdCBhIGRyaWZ0IHJ1biIKICB9LAogICJleHBpcmluZyI6IFtdCn0=",
       "plans/headsha1/platform.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA==",
       "plans/headsha1/projects-recipes.digest": "Mzc1MTdlNWYzZGM2NjgxOWY2MWY1YTdiYjhhY2UxOTIxMjgyNDE1ZjEwNTUxZDJkZWZhNWMzZWIwOTg1YjU3MA=="
     },
@@ -113,7 +113,7 @@
           "expires": "@+60d"
         },
         "nyt-cookie": {
-          "expires": "@+300d!"
+          "expires": "@+299d!"
         },
         "registry-pull": {
           "expires": "@+60d"
