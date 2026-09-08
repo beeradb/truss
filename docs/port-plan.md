@@ -776,53 +776,84 @@ provider mirror is not shrinkable and must not be**, because baking it is what s
 holding write credentials for four clouds from reaching a package registry at apply time.
 Measure the real split with `podman history` before quoting a final number.
 
-## 7. Open questions — for the owner, not to be guessed
+## 7. Decisions
 
-1. **1Password from Go.** The expiry sweep needs `item list --vault <v>`, a single field read,
-   and `service-account ratelimit`. The last names *which* allowance ran out — the fix of
-   2026-09-07 — and there is no evidence it is exposed anywhere but the CLI. If it is not: keep
-   `op` (41 MB stays), drop the diagnostic, or move the sweep out of the applier. This decides
-   step 4's headline number.
-2. **The ledger endpoint.** Three things not readable from code: the addressing style
-   (path vs virtual-host), the **region** string to sign with — nothing sets `AWS_REGION`, so
-   production requests were signed with whatever botocore defaults to — and whether the endpoint
-   honours a create-if-absent precondition under HMAC auth. The third gates `PutIfAbsent` and
-   any move of `publish-plan-digest` off `gcloud`. All three are answerable by §5.4.
-3. **Which jq produced the digests now in the bucket, and are CI's and the image's the same
-   today?** Both are jq 1.7.x now, pinned to nothing; jq 1.6 canonicalises numbers to doubles
-   and 1.7 does not. If they diverge, digests recorded by CI stop matching those computed by the
-   applier — under the *bash* implementation, independent of this port. Should truss become the
-   single implementation on both sides, and does CI pin a truss version?
-4. **Vault or 1Password for `expires`?** The applier reads per-pass credentials from Vault-rendered
-   files, while `check_credential_lifetimes` still lists two **1Password** vaults (909, 956-987).
-   Which store is authoritative? If Vault, the sweep is a different function and `op` leaves the
-   image at step 4 regardless of question 1.
-5. **Dependency policy.** `internal/ledger` is either `aws-sdk-go-v2` (well-trodden, ~20
-   transitive modules, and the checksum default that broke GCS in 2026-09-06 was an SDK default
-   flip) or ~150 lines of hand-rolled SigV4 with no dependency. Leaning SDK with checksum
-   settings pinned and asserted on the wire; the counter-argument — that the SDK's defaults have
-   already broken this exact bucket once — is real.
-6. **How truss enters the platform image, and how a step is rolled back.** A builder stage doing
-   `go install …@<version>` reaches `proxy.golang.org` at build time, which the Dockerfile's
-   philosophy permits but which should be said out loud. And `applier/build` imports into
-   containerd without a registry — is the previous tag still on the box, or is a bad step a
-   rebuild-and-redeploy?
-7. **`leakscan` and testdata.** Real `tofu show -json` fixtures contain 32+ character hex ids,
-   IPs, emails and bucket names; scrubbing may remove the very shapes the digest tests exercise.
-   Options: synthetic fixtures only (weaker coverage), a narrow exemption for
-   `internal/plan/testdata/**` (weakens a guard that has already been vacuous once), or the
-   base64 convention in §5.1 plus scrubbed-but-realistic fixtures (recommended). Whichever, add a
-   `scripts/leakscan-test` case for it.
-8. **`internal/gates:99` — an absent `merge_commit_sha` currently passes.**
-   `if pr.MergeCommitSHA != "" && pr.MergeCommitSHA != sha` treats an absent value as compliant;
-   the bash (529) refuses it. This is the "absent is not false" failure, in the package written
-   to prevent it. `TestAnEmptyMergeCommitSHAIsRefused` is specified on the assumption that this
-   is a bug; confirm.
-9. **`internal/gates:104-121` — a stale approval alongside a fresh one.** The bash counts only
-   reviews at the head sha and applies; the Go appends a problem and therefore refuses. The Go
-   direction is fail-closed and defensible, but it is a divergence that changes when a real merge
-   applies. Which behaviour, and should the test be named `…StillRefuses` or `…IsIgnored`?
-10. **Two shareable-engine warts not scoped here.** `main`/`origin/main` are hardcoded in three
-    places (375, 459, 760) and the alert text begins with the literal `platform applier`
-    (411-415). `Subject` is specified as a field so the emitted text is unchanged; the branch name
-    is left hardcoded. Both are scope decisions for the extraction, not for the port.
+The questions this plan opened were put to the owner and answered on 2026-09-08. They are
+recorded here as decisions, with the reasoning, because an implementer needs the *why* to
+tell a faithful port from a plausible one.
+
+1. **Dependency policy: hand-rolled SigV4, zero dependencies.** `internal/ledger` signs its
+   own requests in roughly 150 lines rather than taking `aws-sdk-go-v2`. The deciding
+   argument is that an SDK default flip — checksum trailers — already broke this exact bucket
+   on 2026-09-06, with an error that reads like a bad key and is not one. A vendor cannot
+   change a default underneath a signer we own. This makes the rule uniform: **every package
+   in Truss is standard library only**, which is easier to hold than a per-package exception.
+
+2. **An absent `merge_commit_sha` is refused.** `gates.go:99` treated it as compliant; the
+   bash (`apply.sh:529`) refuses it, and the package header says absent "must never read as
+   compliant". Fixed, with the test watched failing against the original line first. An audit
+   of every other optional field in the package found no second instance.
+
+3. **A stale approval alongside a fresh one is ignored.** Matches the bash. GitHub's
+   `dismiss_stale_reviews` already dismisses on push and the gate separately requires an
+   approval AT the head sha, so a stale entry is API noise rather than evidence. Refusing on
+   it would wedge any PR that got a second push. The converse is asserted too: a stale
+   approval and nothing at the head is a refusal.
+
+4. **Vault is authoritative for credential lifetimes; the expiry sweep moves there and `op`
+   leaves the image entirely.** One store for what the applier reads, one fewer credential in
+   the pod, 41 MB gone.
+
+   ⚠️ **This has a prerequisite that is not yet built.** `credentials/` mints into 1Password
+   through the 1Password provider — `providers.allow` carries no Vault provider — while the
+   applier reads `platform/*` from Vault, seeded once by `bootstrap-vault.sh`. Nothing
+   re-seeds Vault after a mint, so at the next 45-day boundary the applier renders a stale
+   credential. Vault cannot be authoritative for `expires` until something writes it there.
+   **This decision and that fix are one piece of work, not two.**
+
+5. **The 1Password-from-Go question is moot.** Decision 4 removes the CLI, so nothing needs a
+   Go client and the `service-account ratelimit` diagnostic goes with it. If a rate-limit
+   diagnostic is wanted later it belongs wherever the 1Password writes still happen, which is
+   `credentials/`, not the applier.
+
+6. **Truss is built in its own repository and the binary is copied in.** Truss CI attaches
+   the binary and a `SHA256SUMS` to a tagged GitHub release; the platform image fetches it
+   with the App token it already holds and **verifies the checksum before copying**. This
+   works while the repo is private, and the version that shipped is a tag rather than a
+   commit nobody recorded. Rollback is editing the tag and rebuilding.
+
+7. **Truss becomes the single digest implementation, on both sides.** CI's
+   `publish-plan-digest` and the applier both download the same released binary, so one
+   implementation produces both artifacts. Today two unpinned `jq` installations on two
+   machines produce a value that must agree byte-for-byte forever, and jq 1.6 canonicalises
+   numbers to doubles where 1.7 does not — a drift that would surface as a refusal reading
+   like tampering. CI pins a truss version.
+
+   ⚠️ The swap happens on both sides **in one change**, and only after §5.2 proves byte
+   parity. If the bytes are identical the swap is a no-op by construction; if they are not,
+   the swap does not happen.
+
+8. **The branch and the alert subject become configuration, defaulting to today's values.**
+   `main` and `platform applier` stay as defaults so the emitted text and behaviour do not
+   change, and the engine stops naming one deployment in three places. This is the difference
+   between an engine and a copy of somebody's.
+
+9. **Fixtures are scrubbed and pinned digests are base64.** Realistic structure, identifying
+   values replaced, and the expected digest stored as base64 of the raw 32 bytes so
+   `leakscan` stays fully armed over every file. No directory-level exemption: this scanner
+   has already been vacuous once without anyone noticing, and a guard with a hole in it is
+   the thing that failure teaches you not to build.
+
+## 8. Still to be measured, not asked
+
+These are facts about a running system, answerable by §5.4 against a scratch prefix. Nobody
+should guess them and nobody needs to decide them.
+
+- **The ledger endpoint's addressing style** (path versus virtual-host), the **region string**
+  to sign with — nothing in `applier/`, `bootstrap/` or the manifests sets `AWS_REGION`, so
+  the working production requests were signed with whatever botocore defaults to — and
+  whether the endpoint honours a **create-if-absent precondition** under HMAC auth. The last
+  gates `PutIfAbsent` and any move of `publish-plan-digest` off `gcloud`.
+- **Which jq version produced the digests currently in the bucket**, and whether CI's and the
+  image's are the same today. Decision 7 removes the question going forward; it still needs
+  answering for digests already recorded against commits that have not applied.
