@@ -105,6 +105,24 @@ func (h *Harness) Run(ctx context.Context, s Scenario, now time.Time) (Outcome, 
 		if err := os.WriteFile(filepath.Join(workdir, r, "backend.hcl"), []byte("# dummy, tofu is shimmed\n"), 0o644); err != nil {
 			return Outcome{}, "", err
 		}
+		// ⚠️ A REAL CHECKOUT HAS A LOCKFILE, AND THE PASS NOW READS IT.
+		// `-lockfile=readonly` makes the committed .terraform.lock.hcl the
+		// authoritative provider set, so applyOneRoot and runDrift read it to
+		// decide which credentials a root needs -- a root that declares no
+		// Cloudflare provider is no longer handed the account's broadest
+		// Cloudflare token. Without this file every root errored, and the
+		// whole corpus went red on "could not read ... .terraform.lock.hcl".
+		//
+		// The CONTENT is faithful rather than uniform: `platform/` really does
+		// declare only the github provider -- verified against the live repo,
+		// and it is exactly why it must not get a Cloudflare token. A fixture
+		// that gave every root an identical lockfile would let the gate pass
+		// while testing nothing, which is the "fixture more forgiving than
+		// production" failure this project has already paid a day for.
+		if err := os.WriteFile(filepath.Join(workdir, r, ".terraform.lock.hcl"),
+			[]byte(lockfileFor(r)), 0o644); err != nil {
+			return Outcome{}, "", err
+		}
 	}
 
 	// --- the fixtures the tofu/git shim answers from -------------------
@@ -363,4 +381,15 @@ func asExitError(err error, target **exec.ExitError) bool {
 		return true
 	}
 	return false
+}
+
+// lockfileFor is the committed provider set a root would really have.
+// `platform/` declares only github; everything else here touches Cloudflare.
+func lockfileFor(root string) string {
+	const github = "provider \"registry.opentofu.org/integrations/github\" {\n  version = \"6.0.0\"\n}\n"
+	const cloudflare = "provider \"registry.opentofu.org/cloudflare/cloudflare\" {\n  version = \"5.0.0\"\n}\n"
+	if root == "platform" {
+		return github
+	}
+	return cloudflare + github
 }

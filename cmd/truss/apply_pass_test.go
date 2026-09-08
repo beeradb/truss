@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,35 @@ import (
 	"github.com/beeradb/truss/internal/notify"
 	"github.com/beeradb/truss/internal/secrets"
 )
+
+// seedRootLockfiles gives the fixture a WORKING TREE, which it did not have:
+// Workdir was "" and no root existed on disk, so any code reading a checked-out
+// file was untestable here and, worse, looked fine.
+//
+// ⚠️ THE FIXTURE MUST MATCH PRODUCTION, and the contents matter rather than
+// merely the file existing. `platform/` genuinely declares only the github
+// provider -- verified against the real repo's committed lockfile -- and that
+// is exactly why it must not be handed a Cloudflare token. A fixture that gave
+// every root an identical lockfile would let the gate pass while doing nothing.
+func seedRootLockfiles(t *testing.T, workdir string) {
+	t.Helper()
+	const cloudflare = "provider \"registry.opentofu.org/cloudflare/cloudflare\" {\n  version = \"5.0.0\"\n}\n"
+	const github = "provider \"registry.opentofu.org/integrations/github\" {\n  version = \"6.0.0\"\n}\n"
+	for root, body := range map[string]string{
+		"projects/recipes": cloudflare,
+		"projects/other":   cloudflare,
+		"credentials":      cloudflare + github,
+		"platform":         github, // no Cloudflare, on purpose -- see above
+	} {
+		dir := filepath.Join(workdir, root)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("seeding %s: %v", root, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".terraform.lock.hcl"), []byte(body), 0o644); err != nil {
+			t.Fatalf("seeding %s lockfile: %v", root, err)
+		}
+	}
+}
 
 // buildTestDeps assembles applyDeps against a fake ledger (real
 // ledger.Journal/Store over httptest), a fake Vault (real secrets.KV over
@@ -61,8 +92,13 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 
 	ft := newFakeTelegram(t)
 
+	workdir := t.TempDir()
+	seedRootLockfiles(t, workdir)
+	cfg := testConfig()
+	cfg.Workdir = workdir
+
 	deps := applyDeps{
-		Cfg:     testConfig(),
+		Cfg:     cfg,
 		Dir:     dir,
 		Journal: journal,
 		Forge:   forgeFake,
