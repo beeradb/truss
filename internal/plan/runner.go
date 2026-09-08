@@ -74,7 +74,8 @@ func (r Runner) PlanDetailed(ctx context.Context, dir string) (changes bool, err
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
 		return true, nil
 	}
-	return false, fmt.Errorf("tofu plan (detailed-exitcode) failed in %s: %w\n%s", dir, runErr, out)
+	// No transcript and no dir here either -- see wrapExecError.
+	return false, runErr
 }
 
 // Apply runs `tofu apply` against exactly the plan file it was given —
@@ -144,8 +145,28 @@ func (r Runner) run(ctx context.Context, dir string, args []string) (combined st
 }
 
 // wrapExecError turns a raw exec error and its captured output into either
-// ErrLockBusy or an error carrying the combined output, per §4.3b's error
-// semantics. It returns nil when err is nil.
+// ErrLockBusy or a short error naming the step. It returns nil when err is
+// nil.
+//
+// ⚠️ IT DELIBERATELY DOES NOT CARRY TOFU'S OUTPUT, AND IT USED TO. The error
+// returned here becomes the pass's failure reason, which is written to a
+// ledger object anyone holding the bucket credential can read AND sent to a
+// Telegram chat. Handing that a provider's full transcript means whatever
+// the provider chose to print -- a request body, a resource attribute, a
+// token in an error string -- lands in both. OpenTofu redacts values it
+// knows are sensitive; it makes no promise about what a provider writes in
+// an error. TrimReason's 800-byte cap does not help: it yields 800 bytes of
+// provider output rather than none.
+//
+// This is not a new judgement. apply.sh:170-180 carries the same reasoning
+// under its own "Security review, 2026-09-07", and the port reintroduced
+// exactly what that review removed; the parity harness printed it as a diff
+// on 2026-09-08, which is what the harness is for.
+//
+// Nothing is lost: run() has already written the full combined output to
+// r.Stderr, which is the pod log. The dir is dropped for the same reason --
+// it is the pod's absolute working directory, useful in a log and noise in
+// an alert.
 func wrapExecError(step, dir, out string, err error) error {
 	if err == nil {
 		return nil
@@ -153,7 +174,13 @@ func wrapExecError(step, dir, out string, err error) error {
 	if lockBusy(out) {
 		return ErrLockBusy
 	}
-	return fmt.Errorf("tofu %s failed in %s: %w\n%s", step, dir, err, out)
+	// The raw exec error and nothing else: "exit status 1". Every caller
+	// already names the step and the root ("tofu plan failed for %s: %v"),
+	// so wrapping it here would only duplicate that in the alert. What is
+	// deliberately kept over the bash's wording is the exit status itself,
+	// which distinguishes a tofu that ran and refused from a tofu that could
+	// not be executed at all -- the bash reports both identically.
+	return err
 }
 
 // lockBusy matches OpenTofu's own state-lock message and nothing looser

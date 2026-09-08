@@ -95,17 +95,25 @@ func exact(bash, truss string) func(Diff) bool {
 	return func(d Diff) bool { return d.Bash == bash && d.Truss == truss }
 }
 
-// tofuTranscript accepts a reason that is the bash's bare sentence on one
-// side and the SAME sentence followed by tofu's raw output on the other.
-// It pins the bash side exactly and requires truss's to start with it, so
-// the only thing it forgives is the appended transcript -- see
-// REASON-CARRIES-TOFU-TRANSCRIPT.
-func tofuTranscript(bash string) func(Diff) bool {
-	return func(d Diff) bool {
-		return d.Bash == bash &&
-			strings.HasPrefix(d.Truss, bash+": tofu ") &&
-			strings.Contains(d.Truss, "exit status ")
+// exitStatusSuffix accepts a reason that is the bash's sentence on one side
+// and EXACTLY that sentence plus ": exit status <N>" on the other -- nothing
+// more.
+//
+// ⚠️ IT IS DELIBERATELY THIS STRICT, AND ITS PREDECESSOR WAS NOT. The
+// earlier matcher forgave the bash's sentence followed by anything at all
+// containing "exit status", which is what a transcript looks like -- so it
+// would have gone on passing after tofu's combined output came back. This
+// one reconstructs the accepted string and compares it, so the only
+// difference it can ever forgive is the exit status itself.
+func exitStatusSuffix(d Diff) bool {
+	rest, ok := strings.CutPrefix(d.Truss, d.Bash+": exit status ")
+	if !ok || rest == "" {
+		return false
 	}
+	if _, err := strconv.Atoi(rest); err != nil {
+		return false
+	}
+	return true
 }
 
 // runtimeVaultItems are the credentials that live in the second vault the
@@ -211,24 +219,37 @@ func parseExpiringClause(text string) map[string]*int {
 	return out
 }
 
-// alertReasonIsTheTranscript accepts an alert whose only difference is that
-// truss's failure sentence carries tofu's transcript where the bash's does
-// not. Both alerts are otherwise identical, including the trailing
-// "(applied=N noop=M)" and any EXPIRING clause.
-func alertReasonIsTheTranscript(d Diff) bool {
+// alertReasonIsTheExitStatus accepts an alert whose ONLY difference is that
+// truss's failure sentence ends ": exit status <N>" where the bash's ends at
+// the sentence. Everything else -- the whole head, the trailing
+// "(applied=N noop=M)", any EXPIRING clause -- must be identical.
+//
+// ⚠️ IT RECONSTRUCTS THE ACCEPTED STRING RATHER THAN PATTERN-MATCHING IT,
+// and the version this replaces did not. That one asked whether truss's
+// alert began with the bash's head plus ": tofu " and contained "exit
+// status" somewhere -- which is also true of the head followed by a
+// transcript, so it would have gone on passing after tofu's combined output
+// came back. Building the one string that is allowed and comparing it means
+// the only thing forgivable is the exit status itself.
+func alertReasonIsTheExitStatus(d Diff) bool {
 	if d.Kind != "alert" {
 		return false
 	}
-	// The bash's whole alert must be a prefix-and-suffix of truss's, with
-	// only a transcript inserted at the point the reason ends.
 	cut := strings.Index(d.Bash, " (applied=")
 	if cut < 0 {
 		return false
 	}
 	head, tail := d.Bash[:cut], d.Bash[cut:]
-	return strings.HasPrefix(d.Truss, head+": tofu ") &&
-		strings.HasSuffix(d.Truss, tail) &&
-		strings.Contains(d.Truss, "exit status ")
+	rest, ok := strings.CutPrefix(d.Truss, head+": exit status ")
+	if !ok {
+		return false
+	}
+	status, ok := strings.CutSuffix(rest, tail)
+	if !ok || status == "" {
+		return false
+	}
+	_, err := strconv.Atoi(status)
+	return err == nil
 }
 
 // Divergences is the whole list. Read the type doc before adding to it.
@@ -319,23 +340,29 @@ var Divergences = []Divergence{
 	// FINDINGS -- nobody decided these. Reported to the owner as defects.
 	// -----------------------------------------------------------------
 	{
-		ID:     "REASON-CARRIES-TOFU-TRANSCRIPT",
-		Status: StatusFinding,
+		ID:     "REASON-NAMES-THE-EXIT-STATUS",
+		Status: StatusIntended,
 		Scenarios: []string{
 			"test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
 			"test_tofu_apply_failure_stops_the_pass_and_leaves_later_commit_unapplied",
 			"test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
 		},
-		Accept: transcriptAnywhere,
-		Bash:   "\"tofu apply failed for credentials\" -- the sentence and nothing else",
-		Truss:  "the same sentence, plus tofu's combined output and the pod's absolute working directory",
-		Why: "⚠️ SECURITY. apply.sh:171-180 is explicit that a failure reason is not a transcript, because it " +
-			"lands in a ledger object anyone holding the bucket credential can read AND in a Telegram chat, and " +
-			"a provider makes no promise about what it prints in an error -- request bodies, resource attributes, " +
-			"a token. plan.Runner's wrapExecError embeds the combined output in the error, and the pass puts the " +
-			"error straight into the reason. TrimReason caps it at 800 bytes, which is 800 bytes of provider " +
-			"output rather than none. Nothing in §3 permits this and the bash's own comment argues against it.",
-		Ref: "applier/apply.sh:171-180; docs/port-plan.md §2 item 13; internal/plan/runner.go wrapExecError",
+		Accept: exitStatusAnywhere,
+		Bash:   "\"tofu apply failed for credentials\"",
+		Truss:  "the same sentence plus \": exit status 1\", and nothing else",
+		Why: "⚠️ THIS ENTRY REPLACES A SECURITY FINDING, AND THE FINDING WAS REAL. It used to read " +
+			"REASON-CARRIES-TOFU-TRANSCRIPT: plan.Runner embedded tofu's combined output in the error and the " +
+			"pass put that straight into the reason, which lands in a ledger object anyone holding the bucket " +
+			"credential can read AND in a Telegram chat. A provider makes no promise about what it prints in an " +
+			"error -- a request body, a resource attribute, a token -- and TrimReason's 800-byte cap yields 800 " +
+			"bytes of provider output rather than none. apply.sh:170-180 records the same reasoning under its own " +
+			"\"Security review, 2026-09-07\"; the port reintroduced exactly what that review removed, and this " +
+			"harness printed it as a diff on 2026-09-08. Fixed: the transcript and the pod's absolute working " +
+			"directory are gone, and the full output still reaches the pod log. What remains is the bare exit " +
+			"status, kept ON PURPOSE because it separates a tofu that ran and refused from one that could not be " +
+			"executed at all -- the bash reports both identically.",
+		Ref: "applier/apply.sh:170-180; internal/plan/runner.go wrapExecError; " +
+			"internal/plan/runner_test.go TestAFailureReasonIsNotATranscript",
 	},
 	{
 		ID:     "ROTATION-FAILURE-NOT-LEDGERED",
@@ -410,14 +437,14 @@ func exactOrAlert(bash, truss string) func(Diff) bool {
 
 // transcriptAnywhere is REASON-CARRIES-TOFU-TRANSCRIPT's matcher across all
 // three sinks a reason reaches: failed/<sha>, the heartbeat, and the alert.
-func transcriptAnywhere(d Diff) bool {
+func exitStatusAnywhere(d Diff) bool {
 	if d.Kind == "alert" {
-		return alertReasonIsTheTranscript(d)
+		return alertReasonIsTheExitStatus(d)
 	}
 	if d.Kind != "value" {
 		return false
 	}
-	return tofuTranscript(d.Bash)(d)
+	return exitStatusSuffix(d)
 }
 
 // firstFailureWins matches the one shape FAILURE-PRECEDENCE names: the

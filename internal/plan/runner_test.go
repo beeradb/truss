@@ -481,3 +481,66 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestAFailureReasonIsNotATranscript guards the security property
+// apply.sh:170-180 records under its own "Security review, 2026-09-07", and
+// that this port reintroduced: the error wrapExecError returns becomes the
+// pass's failure reason, which is written to a ledger object anyone holding
+// the bucket credential can read AND sent to a Telegram chat.
+//
+// A provider makes no promise about what it prints in an error -- a request
+// body, a resource attribute, a token. OpenTofu redacts what it knows to be
+// sensitive and nothing more. Found again by internal/parity on 2026-09-08,
+// which printed it as a diff against the bash.
+func TestAFailureReasonIsNotATranscript(t *testing.T) {
+	const marker = "SENSITIVE-PROVIDER-OUTPUT-MARKER"
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "tofu")
+	script := "#!/bin/sh\necho '" + marker + "'\necho 'Bearer aaaaaaaaaaaaaaaa'\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing stub tofu: %v", err)
+	}
+
+	var podLog bytes.Buffer
+	r := Runner{Bin: bin, Stderr: &podLog}
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"init", func() error { return r.Init(context.Background(), dir) }},
+		{"plan", func() error { return r.Plan(context.Background(), dir, "tfplan") }},
+		{"apply", func() error { return r.Apply(context.Background(), dir, "tfplan") }},
+		{"plan-detailed", func() error { _, err := r.PlanDetailed(context.Background(), dir); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			podLog.Reset()
+			err := tc.call()
+			if err == nil {
+				t.Fatal("no error from a stub that exits 1, so this test proves nothing")
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("the failure reason carries tofu's output, which reaches the ledger and Telegram:\n%s", err)
+			}
+			if strings.Contains(err.Error(), dir) {
+				t.Errorf("the failure reason carries the pod's working directory:\n%s", err)
+			}
+			// The real property: a reason is a short sentence, never a
+			// transcript. Every caller prefixes the step and the root
+			// ("tofu plan failed for %s: %v"), so what belongs here is the
+			// bare cause. A newline or a long body means output leaked back
+			// in, whatever it happens to contain.
+			if strings.Contains(err.Error(), "\n") {
+				t.Errorf("the failure reason spans lines, so it is a transcript: %q", err)
+			}
+			if len(err.Error()) > 120 {
+				t.Errorf("the failure reason is %d bytes; a reason is a sentence, not a body:\n%s", len(err.Error()), err)
+			}
+			// And nothing is lost: the transcript is in the pod log.
+			if !strings.Contains(podLog.String(), marker) {
+				t.Errorf("the transcript did not reach the pod log, so dropping it from the reason DOES lose it:\n%s", podLog.String())
+			}
+		})
+	}
+}
