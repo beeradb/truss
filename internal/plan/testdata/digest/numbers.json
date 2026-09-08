@@ -1,0 +1,13 @@
+{
+  "resource_changes": [
+    {"address": "a01", "change": {"actions": ["update"], "before": 1.0, "after": 2.50}},
+    {"address": "a02", "change": {"actions": ["update"], "before": 0.1000, "after": -0}},
+    {"address": "a03", "change": {"actions": ["update"], "before": 100, "after": 1e3}},
+    {"address": "a04", "change": {"actions": ["update"], "before": 1E+2, "after": 1.5e-3}},
+    {"address": "a05", "change": {"actions": ["update"], "before": 2.5e+1, "after": 1e21}},
+    {"address": "a06", "change": {"actions": ["update"], "before": 123456789012345678901234, "after": 0}},
+    {"address": "a07", "change": {"actions": ["update"], "before": 0.0, "after": 1e-6}},
+    {"address": "a08", "change": {"actions": ["update"], "before": 1e-7, "after": 10E10}},
+    {"address": "a09", "change": {"actions": ["update"], "before": 1.230000e2, "after": -1.5e-3}}
+  ]
+}

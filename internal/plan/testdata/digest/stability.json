@@ -1,0 +1,7 @@
+{
+  "resource_changes": [
+    {"address": "x", "change": {"actions": ["1"], "before": null, "after": null}},
+    {"address": "x", "change": {"actions": ["2"], "before": null, "after": null}},
+    {"address": "x", "change": {"actions": ["3"], "before": null, "after": null}}
+  ]
+}

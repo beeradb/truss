@@ -1,0 +1,13 @@
+{
+  "resource_changes": [
+    {"address": "zzz", "change": {"actions": ["a"]}},
+    {"address": 5, "change": {"actions": ["b"]}},
+    {"address": null, "change": {"actions": ["c"]}},
+    {"address": true, "change": {"actions": ["d"]}},
+    {"address": false, "change": {"actions": ["e"]}},
+    {"address": [1, 2], "change": {"actions": ["f"]}},
+    {"address": {"x": 1}, "change": {"actions": ["g"]}},
+    {"address": "aaa", "change": {"actions": ["h"]}},
+    {"address": 1.5, "change": {"actions": ["i"]}}
+  ]
+}

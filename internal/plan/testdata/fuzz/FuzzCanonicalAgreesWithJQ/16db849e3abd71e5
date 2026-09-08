@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"resource_changes\":[{\"000000\": {\"00000\":0e00}},{\"change\": {\"before\":0e1000000000}}]} ")

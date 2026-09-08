@@ -1,0 +1,47 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.7.0",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "configuration": {"provider_config": {"random": {}}},
+  "prior_state": {"values": {"root_module": {}}},
+  "resource_changes": [
+    {
+      "address": "random_id.example",
+      "mode": "managed",
+      "type": "random_id",
+      "name": "example",
+      "provider_name": "example.test/hashicorp/random",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {"byte_length": 4, "keepers": null},
+        "after_unknown": {"hex": true, "id": true},
+        "before_sensitive": false,
+        "after_sensitive": {"keepers": false}
+      }
+    },
+    {
+      "address": "local_file.example",
+      "mode": "managed",
+      "type": "local_file",
+      "name": "example",
+      "provider_name": "example.test/hashicorp/local",
+      "change": {
+        "actions": ["update"],
+        "before": {"content": "old", "filename": "out.txt"},
+        "after": {"content": "new", "filename": "out.txt"},
+        "after_unknown": {},
+        "before_sensitive": false,
+        "after_sensitive": false
+      }
+    },
+    {
+      "address": "null_resource.noop",
+      "mode": "managed",
+      "type": "null_resource",
+      "name": "noop",
+      "provider_name": "example.test/hashicorp/null",
+      "change": {"actions": ["no-op"], "before": {"id": "1"}, "after": {"id": "1"}}
+    }
+  ]
+}
