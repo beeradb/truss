@@ -99,11 +99,39 @@ scan '\b(op://|cloudflare account|gs://|s3://)' \
 # was something to find. Seven trailers sat in this history while it printed
 # "clean". `grep -c` reads its input to the end, so nothing gets a SIGPIPE
 # and the count is the answer.
-trailers=$(git log --format='%b' 2>/dev/null |
-  grep -ciE '^[[:space:]]*co-authored-by:.*(claude|anthropic)' || true)
-if [ "${trailers:-0}" -gt 0 ]; then
-  note "$trailers Co-Authored-By trailer(s) naming an AI assistant"
+#
+# ⚠️ AND IT IS ASKED PER COMMIT, NOT OVER ONE BLOB OF MESSAGES. Seven commits
+# already in public history carry a trailer; they come out in one rewrite when
+# the repository is opened, and until then a whole-history answer would refuse
+# every pull request for a fault in commits nobody is proposing to touch. The
+# excused SHAs are listed in scripts/leakscan-grandfathered, which is a
+# reviewed file rather than a flag, and each entry must still match a real
+# commit that still carries a trailer -- so the list cannot outlive the debt
+# it records.
+grandfathered_file="$(dirname "$0")/leakscan-grandfathered"
+grandfathered=""
+if [ -f "$grandfathered_file" ]; then
+  grandfathered=$(sed 's/#.*//' "$grandfathered_file" | tr -d '[:blank:]' | grep -v '^$' || true)
 fi
+
+offenders=$(git log --all -i --format='%H' \
+  --grep='^[[:space:]]*co-authored-by:.*\(claude\|anthropic\)' 2>/dev/null | sort -u || true)
+
+for sha in $offenders; do
+  case "$grandfathered" in
+    *"$sha"*) continue ;;
+  esac
+  note "commit ${sha} carries a Co-Authored-By trailer naming an AI assistant"
+done
+
+# An exemption that no longer excuses anything is a line nobody will remember
+# to delete, so it fails rather than passes.
+for sha in $grandfathered; do
+  case "$offenders" in
+    *"$sha"*) ;;
+    *) note "leakscan-grandfathered lists ${sha}, which carries no such trailer -- remove it" ;;
+  esac
+done
 
 [ "$fail" -eq 0 ] || { echo "leakscan: refusing" >&2; exit 1; }
 echo "leakscan: clean"

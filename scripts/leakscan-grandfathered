@@ -1,0 +1,26 @@
+# Commits that carry a Co-Authored-By trailer naming an AI assistant, and are
+# excused from the guard in scripts/leakscan because they are already public
+# history.
+#
+# ⚠️ THIS FILE IS TEMPORARY AND IS MEANT TO BE DELETED. The trailers come out
+# in one filter-branch when the repository is opened, deliberately, at a moment
+# when nothing else is in flight -- rewriting them now would rewrite twenty
+# commits from the same day that CI has already run green against, and orphan
+# every branch cut from them. Until then the guard would refuse every pull
+# request for a fault in commits nobody is proposing to change.
+#
+# ⚠️ IT CANNOT GROW SILENTLY. Each entry must still name a commit that exists
+# AND still carries a trailer; an entry that matches nothing fails the scan, so
+# an exemption cannot outlive what it excuses. Adding a line here is the only
+# way past the guard and it is a reviewed diff, which is the point: this is a
+# ledger of known debt, not a switch.
+#
+# Full SHAs, one per line. Anything after a # is a comment.
+
+14c9255ceaef473f38bcf2c189c0871e32d06721
+1904435252eb045412aa34842a30814cd484c2bd
+257ae40c2972f0292ff614ebf2c96b7e0552ade2
+44b1452395476d4ea323d84be0ca47c001b0abf3
+5f3f67159d41ca62278a259afe7426969253e0cd
+784e0ec86f3444dd11a68969b34497c409c54de8
+f8cf1f0f0a290c8bf97e92fbe0697951932e374f

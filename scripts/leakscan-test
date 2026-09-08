@@ -72,6 +72,14 @@ check_msg() { # name want message [deep]
     rm -f "$dir/.bulkmsg"
   fi
   git -C "$dir" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "$message"
+
+  # grandfather=self  excuse the commit just made, by its real SHA
+  # grandfather=stale excuse a SHA that is not in this repository at all
+  case "${5:-}" in
+    self)  git -C "$dir" rev-parse HEAD > "$dir/scripts/leakscan-grandfathered" ;;
+    stale) printf '%040d\n' 0 > "$dir/scripts/leakscan-grandfathered" ;;
+  esac
+
   set +e
   out="$(cd "$dir" && ./scripts/leakscan 2>&1)"; rc=$?
   set -e
@@ -157,6 +165,19 @@ check_msg 'ai co-author, deep history' refuse \
   'Fix the thing
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>' deep
+
+# ⚠️ The grandfather list is the only way past the trailer guard, so it needs
+# testing in both directions and in the direction nobody thinks of: an
+# exemption that has stopped excusing anything. Left alone, a stale line sits
+# there permanently widening the guard for a commit that no longer exists.
+check_msg 'trailer, grandfathered'   clean  \
+  'Fix the thing
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>' '' self
+check_msg 'stale grandfather entry'  refuse \
+  'Fix the thing
+
+no trailer here' '' stale
 
 echo
 echo "leakscan-test: $pass passed, $fail failed"
