@@ -40,6 +40,35 @@ an "off" nobody turned back on is loud rather than silent.
 a window where an unreviewed commit can reach `main` and the applier will not
 apply it — work piles up behind a gate that is not actually guarding anything.
 
+### Protecting this repository is a different job
+
+    scripts/repo-protection show | on | off | verify
+
+`scripts/protection` states what the applier demands of a repository it
+**manages**. This repository is not one of those: it declares no OpenTofu
+roots, so nothing here ever files a `plan`, and requiring one deadlocked every
+merge on 2026-09-08 — with `enforce_admins` on there was no override, so not
+even the fix could land.
+
+So the two are separate scripts with separate payloads, and neither pretends
+to be the other. What this one asks for is ordinary hygiene: the `check` job
+must pass, the branch must be current, stale approvals are dismissed, and
+history cannot be force-pushed or deleted by accident.
+
+Two settings differ from the applier's on purpose. `enforce_admins` is **off**,
+because the maintainer needs a force push to remove the AI-trailer commits
+before this repository is opened, and binding admins would mean turning
+protection off to do it — which is how it came to be off in the first place.
+Required approvals are **zero**, because a sole maintainer cannot approve their
+own pull request and a rule nobody can satisfy is a rule that gets switched off.
+
+`verify` answers "is what is live still what the file asks for", comparing
+field by field against the payload rather than a list typed out again. A
+setting changed by hand shows up as a line naming it:
+
+    repo-protection: live settings differ from scripts/repo-protection
+      enforce_admins: want False, live True
+
 ### What the payload is, and why it is not written down twice
 
 `scripts/protection` holds one copy of the required settings.

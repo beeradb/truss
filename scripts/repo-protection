@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Protects THIS repository -- the one truss is built in.
+#
+# ⚠️ THIS IS NOT scripts/protection, AND THE SPLIT IS THE WHOLE POINT.
+# scripts/protection states what the APPLIER demands of a repository it
+# manages: a `plan` status filed by that repository's plan job, checked back
+# from the API on every pass, and refused if absent. This repository is not
+# managed by truss. It declares no OpenTofu roots, nothing here ever files a
+# `plan`, and requiring one deadlocked every merge for half an hour on
+# 2026-09-08 -- enforce_admins leaves no override, so not even the fix could
+# land.
+#
+# Merging the two would mean one payload asserting two different requirements,
+# and scripts/protection's payload is tied to CheckProtection by a test
+# precisely so it states exactly one. So: two scripts, two payloads, neither
+# pretending to be the other.
+#
+# What this asks for is ordinary hygiene for a repository with an owner and a
+# CI job -- review before merge, no rewriting history, and the check that
+# actually runs here.
+set -euo pipefail
+
+REPO="${REPO:-beeradb/truss}"
+BRANCH="${BRANCH:-main}"
+
+# ⚠️ `check` is the job name in .github/workflows/ci.yml, and it is the only
+# context this repository has ever reported. If that job is renamed this must
+# change with it -- `verify` below is what tells you, rather than a deadlock.
+read -r -d '' PAYLOAD <<'JSON' || true
+{
+  "required_status_checks": { "strict": true, "contexts": ["check"] },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "require_code_owner_reviews": false,
+    "dismiss_stale_reviews": true,
+    "required_approving_review_count": 0
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+
+# ⚠️ enforce_admins is FALSE here and true in scripts/protection, deliberately.
+# There the owner being bound is the point -- an applier that trusts a human to
+# not walk past the gate is not a gate. Here there is one maintainer, no
+# applier reading these settings back, and the history rewrite that removes the
+# AI-trailer commits before this repository is opened NEEDS a force push by
+# that maintainer. Binding admins would mean turning protection off to do it,
+# which is how it ended up off in the first place.
+#
+# required_approving_review_count is 0 for the same reason: one maintainer
+# cannot approve their own pull request, and a rule nobody can satisfy is a
+# rule that gets switched off. The check still has to pass and history still
+# cannot be rewritten by accident.
+
+usage() { echo "usage: $0 {on|off|show|verify}" >&2; exit 2; }
+[ $# -eq 1 ] || usage
+
+# Refuses to require a context this repository has never reported -- the same
+# guard scripts/protection carries, for the same reason, since the failure it
+# prevents does not care which payload caused it.
+assert_context_exists() {
+  local required head_sha seen
+  required=$(printf '%s' "$PAYLOAD" | tr -d ' \n' | sed 's/.*"contexts":\["//;s/"\].*//')
+  head_sha=$(gh api "repos/$REPO/commits/$BRANCH" --jq '.sha')
+  seen=$(
+    { gh api "repos/$REPO/commits/$head_sha/status"     --jq '.statuses[].context' 2>/dev/null || true
+      gh api "repos/$REPO/commits/$head_sha/check-runs" --jq '.check_runs[].name'  2>/dev/null || true
+    } | sort -u
+  )
+  case "$seen" in
+    *"$required"*) ;;
+    *)
+      echo "refusing: $REPO has never reported a status named \"$required\"." >&2
+      echo "          Requiring it would deadlock every merge. Contexts seen:" >&2
+      printf '            %s\n' ${seen:-"(none)"} >&2
+      exit 1
+      ;;
+  esac
+}
+
+case "$1" in
+  on)
+    assert_context_exists
+    printf '%s' "$PAYLOAD" |
+      gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" --input - >/dev/null
+    echo "repo-protection: on ($REPO/$BRANCH)"
+    ;;
+
+  off)
+    gh api -X DELETE "repos/$REPO/branches/$BRANCH/protection" >/dev/null
+    echo "repo-protection: OFF ($REPO/$BRANCH)"
+    ;;
+
+  show)
+    if out=$(gh api "repos/$REPO/branches/$BRANCH/protection" 2>/dev/null); then
+      printf '%s\n' "$out"
+    else
+      echo "repo-protection: none on $REPO/$BRANCH"
+      exit 1
+    fi
+    ;;
+
+  # Answers "is what is live still what this file asks for" -- so a setting
+  # changed by hand in the web UI is visible, rather than discovered the next
+  # time something cannot merge.
+  verify)
+    assert_context_exists
+    live=$(gh api "repos/$REPO/branches/$BRANCH/protection" 2>/dev/null) || {
+      echo "repo-protection: none on $REPO/$BRANCH" >&2; exit 1; }
+
+    # Compared field by field against THIS FILE's payload rather than against a
+    # list typed out again here -- a second copy of the wanted values is the
+    # one that goes stale, which is the same reason scripts/protection prints
+    # its payload for its own test.
+    # ⚠️ The payload goes by environment, not down the same pipe as the live
+    # response. Both are multi-line JSON, so a first attempt that read one with
+    # readline() and the rest with read() split the payload after its opening
+    # brace and died on invalid JSON.
+    printf '%s' "$live" | WANT="$PAYLOAD" python3 -c '
+import json, os, sys
+want, live = json.loads(os.environ["WANT"]), json.load(sys.stdin)
+
+# GitHub echoes booleans back nested under "enabled"; unwrap so the two shapes
+# can be compared at all.
+def norm(v):
+    # GitHub returns {"url": ..., "enabled": false}, not a bare false, so key
+    # presence is the test -- an exact {"enabled"} match missed every one.
+    return v["enabled"] if isinstance(v, dict) and "enabled" in v else v
+
+bad = []
+for key, wanted in want.items():
+    if wanted is None:          # "restrictions": null is an absence, not a value
+        continue
+    got = norm(live.get(key))
+    if isinstance(wanted, dict):
+        for sub, subwant in wanted.items():
+            subgot = (live.get(key) or {}).get(sub)
+            if subgot != subwant:
+                bad.append(f"  {key}.{sub}: want {subwant!r}, live {subgot!r}")
+    elif got != wanted:
+        bad.append(f"  {key}: want {wanted!r}, live {got!r}")
+
+if bad:
+    print("repo-protection: live settings differ from scripts/repo-protection", file=sys.stderr)
+    print("\n".join(bad), file=sys.stderr)
+    sys.exit(1)
+'
+    echo "repo-protection: live settings match ($REPO/$BRANCH)"
+    ;;
+
+  *) usage ;;
+esac
