@@ -333,3 +333,99 @@ func TestTheSignedPathIsThePathOnTheWire(t *testing.T) {
 		})
 	}
 }
+
+// knownUnsignedTransportHeaders are the headers net/http.Transport adds
+// after sign() has run, so they cannot be inside SignedHeaders. They are
+// listed EXACTLY rather than matched by shape, so that a new unsigned header
+// -- one this package starts setting outside the signature, or a future Go
+// release starts adding -- fails this test instead of widening silently.
+//
+// None is exploitable: the signed body hash bounds Content-Length, and the
+// other two are inert. The point of pinning them is that the invariant is
+// now checked against the wire rather than asserted in a comment.
+var knownUnsignedTransportHeaders = map[string]bool{
+	"Accept-Encoding": true,
+	"User-Agent":      true,
+	"Content-Length":  true,
+}
+
+// TestOnlyKnownTransportHeadersTravelUnsigned replaces a claim with a
+// measurement. sigv4.go used to say "there is no code path here that sends an
+// unsigned header", and the test named for it never sent a request -- it
+// inspected sign()'s own return value. Found by the 2026-09-08 code audit and
+// security review, independently.
+func TestOnlyKnownTransportHeadersTravelUnsigned(t *testing.T) {
+	var got http.Header
+	store, srv := newStoreWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		got.Set("Host", r.Host) // Host is not in r.Header, but it is signed
+		w.WriteHeader(http.StatusOK)
+	})
+	defer srv.Close()
+
+	if err := store.Put(context.Background(), "applier/head", []byte("abc")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no headers reached the server, so this test could not have failed")
+	}
+
+	signed := map[string]bool{}
+	for _, n := range signedHeaderList(t, got.Get("Authorization")) {
+		signed[n] = true
+	}
+	if len(signed) == 0 {
+		t.Fatal("no SignedHeaders on the request")
+	}
+
+	for name := range got {
+		if name == "Authorization" {
+			continue // carries the signature; cannot be inside it
+		}
+		if signed[strings.ToLower(name)] {
+			continue
+		}
+		if knownUnsignedTransportHeaders[name] {
+			continue
+		}
+		t.Errorf("header %q is on the wire but is not signed and is not a known transport header", name)
+	}
+}
+
+// TestTheHeaderValueSignedIsTheHeaderValueSent is the value-level counterpart
+// of TestTheSignedPathIsThePathOnTheWire. sign canonicalises a header value
+// (trim, collapse internal runs of spaces) before hashing it, per SigV4; do()
+// used to send the RAW value, so the two differed for any padded value. Fail-
+// closed and latent -- no caller passes a padded value today -- but the same
+// signed-bytes-versus-sent-bytes class as the Path/RawPath bug.
+//
+// ⚠️ THE OBVIOUS ASSERTION HERE IS VACUOUS AND WAS WRITTEN FIRST. Re-signing
+// the value the server received cannot detect this bug: sign() collapses
+// whatever it is handed, so the collapse is idempotent and the re-signed
+// header reproduces the sent one either way. Verified by mutation -- sending
+// the raw value left that version green. The assertion has to compare the
+// received value against the COLLAPSED form directly, because that is the
+// byte sequence the signature actually covers.
+func TestTheHeaderValueSignedIsTheHeaderValueSent(t *testing.T) {
+	const padded = "  application/json;   charset=utf-8  "
+
+	var gotValue string
+	store, srv := newStoreWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		gotValue = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	})
+	defer srv.Close()
+
+	if _, err := store.do(context.Background(), http.MethodPut, "applier/head",
+		[]byte("abc"), map[string]string{"content-type": padded}); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+
+	want := collapseSpaces(padded)
+	if want == padded {
+		t.Fatal("the fixture value needs no collapsing, so this test could not have failed")
+	}
+	if gotValue != want {
+		t.Errorf("the value on the wire is not the value signed\n wire %q\nsigned %q", gotValue, want)
+	}
+}

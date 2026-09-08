@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +50,9 @@ func New(cfg Config, opts ...Option) (*Store, error) {
 	}
 
 	cfg.Endpoint = strings.TrimRight(cfg.Endpoint, "/")
+	if err := checkEndpoint(cfg.Endpoint); err != nil {
+		return nil, err
+	}
 	if cfg.Region == "" {
 		cfg.Region = defaultRegion
 	}
@@ -62,6 +66,68 @@ func New(cfg Config, opts ...Option) (*Store, error) {
 		opt(s)
 	}
 	return s, nil
+}
+
+// checkEndpoint refuses an endpoint that is anything other than a scheme
+// and a host.
+//
+// ⚠️ THE SCHEME IS A SECURITY CONTROL, NOT TIDINESS. SigV4 authenticates
+// the REQUEST; nothing authenticates the RESPONSE. TLS is the only thing
+// establishing that an approved plan digest read back out of this bucket is
+// the one CI wrote -- and over http an on-path attacker gets the digest gate
+// in two passes, because a mismatch refusal names BOTH digests ("approved
+// %s, ours %s") and is then PUT to failed/<sha> over that same plaintext
+// channel. The attacker reads our real digest off our own refusal and echoes
+// it back as the approved one on the next pass. Found by the 2026-09-08
+// security review; the endpoint had been validated for non-emptiness only.
+//
+// Loopback is exempt because httptest servers are http and are not on a
+// network. That is a property of the ADDRESS, not a flag: there is
+// deliberately no option to disable this, because a config value permitting
+// plaintext is exactly the misconfiguration being prevented.
+//
+// A query, fragment or userinfo is refused outright rather than ignored.
+// requestURL copies the parsed endpoint wholesale, so a RawQuery on it
+// reaches the wire while sign hardcodes the canonical query to "" -- signed
+// bytes and sent bytes diverging, the same class as the Path/RawPath bug.
+// Refusing the input is a smaller rule than teaching two places to agree.
+func checkEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("ledger: refusing to construct a Store: Endpoint %q does not parse: %w", endpoint, err)
+	}
+	var problems []string
+	if u.Host == "" {
+		problems = append(problems, "it names no host")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
+		problems = append(problems, fmt.Sprintf("scheme is %q, want https (http is permitted only for loopback)", u.Scheme))
+	}
+	if u.User != nil {
+		problems = append(problems, "it carries userinfo")
+	}
+	if u.RawQuery != "" {
+		problems = append(problems, "it carries a query string, which would reach the wire unsigned")
+	}
+	if u.Fragment != "" {
+		problems = append(problems, "it carries a fragment")
+	}
+	if u.Path != "" {
+		problems = append(problems, fmt.Sprintf("it carries a path (%q); Endpoint is a scheme and a host only", u.Path))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("ledger: refusing to construct a Store: Endpoint %q: %s", endpoint, strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// isLoopback is a fact about the address, deliberately not a configurable
+// exemption. A hostname that is not an IP is never loopback here --
+// "localhost" resolves through DNS, which is the thing an attacker on the
+// path controls.
+func isLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // requestURL builds the URL and Host header for one key, per cfg.Addressing.
@@ -99,7 +165,15 @@ func (s *Store) requestURL(key string) (*url.URL, string, error) {
 
 // do signs and sends one request, with body already computed so its hash
 // can be signed. extraHeaders are attached AND signed -- see sign, which
-// covers every header this client sends. There is no unsigned header here.
+// covers every header this PACKAGE sets.
+//
+// ⚠️ "Every header on the wire" would be false, and this comment used to say
+// it. net/http.Transport adds Accept-Encoding, User-Agent and Content-Length
+// after sign has returned, so those three travel outside SignedHeaders.
+// Measured 2026-09-08 by dumping a real request. It is not exploitable --
+// the body hash is signed, which bounds Content-Length, and the other two are
+// inert -- but the overclaim is what invited a caller to assume more than the
+// signature gives.
 func (s *Store) do(ctx context.Context, method, key string, body []byte, extraHeaders map[string]string) (*http.Response, error) {
 	u, host, err := s.requestURL(key)
 	if err != nil {
@@ -127,7 +201,16 @@ func (s *Store) do(ctx context.Context, method, key string, body []byte, extraHe
 		req.ContentLength = int64(len(body))
 	}
 	for k, v := range extraHeaders {
-		req.Header.Set(k, v)
+		// collapseSpaces here too, so the bytes SENT are the bytes
+		// SIGNED. sign canonicalises the value before hashing it, per
+		// SigV4; sending the raw value left the two differing for any
+		// value with padding or a double space. Fail-closed (the server
+		// canonicalises and would answer SignatureDoesNotMatch), and
+		// latent because no caller passes a padded value today -- but it
+		// is the same signed-bytes-versus-sent-bytes class as the
+		// Path/RawPath bug, and it would have bitten whoever added the
+		// next header. Found by the 2026-09-08 code audit.
+		req.Header.Set(k, collapseSpaces(v))
 	}
 
 	// Deliberately absent, always: X-Amz-Trailer, Content-Encoding:

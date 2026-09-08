@@ -232,11 +232,20 @@ func TestSigningKeyIsDerivedFromTheConfiguredRegion(t *testing.T) {
 	}
 }
 
-// TestEveryHeaderSentIsSigned is the direct answer to mutation M2: building
-// SignedHeaders from a subset of the headers actually sent. A header the
-// server honours but the signature does not cover is one an intermediary can
-// add, drop or rewrite without invalidating the request.
-func TestEveryHeaderSentIsSigned(t *testing.T) {
+// TestEveryHeaderThisPackageSetsIsSigned is the direct answer to mutation
+// M2: building SignedHeaders from a subset of the headers actually set. A
+// header the server honours but the signature does not cover is one an
+// intermediary can add, drop or rewrite without invalidating the request.
+//
+// ⚠️ THIS TEST USED TO BE CALLED TestEveryHeaderSentIsSigned AND ASSERTED A
+// CLAIM IT COULD NOT SEE. It never sent a request -- it called sign() and
+// checked the returned list contained what it had just passed in -- and its
+// "exactly 5" assertion encoded the false belief that those were the only
+// headers on the wire. net/http.Transport adds three more. The wire is
+// checked by TestOnlyKnownTransportHeadersTravelUnsigned in store_test.go;
+// what is checked HERE is the narrower, true property, under a name that
+// says which one it is. Found by the 2026-09-08 code audit.
+func TestEveryHeaderThisPackageSetsIsSigned(t *testing.T) {
 	cfg := testCfg()
 	now := time.Date(2015, 8, 30, 12, 36, 0, 0, time.UTC)
 	extra := map[string]string{
@@ -250,11 +259,11 @@ func TestEveryHeaderSentIsSigned(t *testing.T) {
 		"content-type", "host", "x-amz-content-sha256", "x-amz-date", "x-amz-storage",
 	} {
 		if !contains(signed, want) {
-			t.Errorf("header %q is sent but is not in SignedHeaders=%v", want, signed)
+			t.Errorf("header %q is set by this package but is not in SignedHeaders=%v", want, signed)
 		}
 	}
 	if len(signed) != 5 {
-		t.Errorf("SignedHeaders has %d entries, want exactly the 5 sent: %v", len(signed), signed)
+		t.Errorf("SignedHeaders has %d entries, want exactly the 5 this package set: %v", len(signed), signed)
 	}
 	for i := 1; i < len(signed); i++ {
 		if signed[i-1] >= signed[i] {

@@ -28,7 +28,7 @@ import (
 func TestNoSubcommandPrintsASecret(t *testing.T) {
 	dir, write := testSecretsDir(t)
 	writeGitHubAppSecret(t, write)
-	write(itemLedger, fieldLedgerEndpoint, "http://ledger.invalid")
+	write(itemLedger, fieldLedgerEndpoint, "https://ledger.invalid")
 	write(itemLedger, fieldLedgerAccessKey, "AKIALEDGERSECRETMARKERVALUE")
 	write(itemLedger, fieldLedgerSecretKey, "LEDGER-SECRET-MARKER-9f3a1c7e2b")
 	write(itemTelegram, fieldTelegramBotToken, "TELEGRAM-SECRET-MARKER-7b2e9f14")

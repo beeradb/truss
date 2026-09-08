@@ -45,12 +45,19 @@ type signedRequest struct {
 }
 
 // sign covers host, x-amz-content-sha256 and x-amz-date -- always -- plus
-// every header in extra. Signing everything the client sends is deliberate
+// every header in extra. Signing everything this package sets is deliberate
 // and is the stronger of the two available rules: a header that reaches the
 // server but sits outside the signature is a header an intermediary can add,
 // drop or rewrite without invalidating the request, so the server may act on
-// something the signature never vouched for. There is no code path here that
-// sends an unsigned header.
+// something the signature never vouched for.
+//
+// ⚠️ IT IS NOT TRUE THAT NOTHING UNSIGNED REACHES THE WIRE, AND THIS COMMENT
+// USED TO CLAIM THAT. net/http.Transport adds Accept-Encoding, User-Agent
+// and Content-Length after this function has returned; measured 2026-09-08 by
+// dumping a real request. Not exploitable -- the signed body hash bounds
+// Content-Length and the other two are inert -- but the honest invariant is
+// "every header this package SETS is signed", and the test that certified the
+// stronger claim never sent a request at all.
 //
 // It is also load-bearing rather than merely tidy: an x-goog-* header left
 // out of SignedHeaders is rejected with a bare 400, so anything this client
