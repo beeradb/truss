@@ -84,6 +84,12 @@ check 'a bucket uri'         refuse docs/d.md 'state lives in gs://a-real-bucket
 check 'svg namespace'        clean  m.svg '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
 check 'real url in an svg'   refuse m.svg '<image xlink:href="https://assets.example.com/logo/mark.png"/>'
 
+# ⚠️ A vendor's documented API root is the same for everybody; a URL carrying
+# our bucket name is not. The second case is the one that must keep biting.
+check 'telegram api root'    clean  n.go 'const ep = "https://api.telegram.org/bot%s/sendMessage"'
+check 'github api root'      clean  n.go 'const ep = "https://api.github.com/repos/%s/pulls"'
+check 'our bucket in a url'  refuse n.go 'const u = "https://storage.googleapis.com/some-real-tfstate/key"'
+
 echo
 echo "leakscan-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -55,6 +55,17 @@ scan() { # pattern description
   # written. Exempted as the exact string, so a real URL in an SVG (an
   # xlink:href to an asset host, say) is still caught.
   hits=$(echo "$hits" | grep -vF 'xmlns="http://www.w3.org/2000/svg"' || true)
+  # ⚠️ PUBLIC VENDOR API ENDPOINTS, LISTED EXACTLY. A URL path into a host is
+  # refused because it usually names OUR deployment -- a bucket, a hostname we
+  # own, an account. A vendor's documented API root names the vendor and is
+  # identical for every user of it: api.telegram.org/bot<token>/sendMessage is
+  # the only address Telegram has.
+  #
+  # Listed host by host rather than matched by shape, so the exemption is
+  # auditable and cannot widen by accident. Note what is NOT here:
+  # storage.googleapis.com, because the path after it carries a bucket name
+  # and that IS this deployment.
+  hits=$(echo "$hits" | grep -vE 'https://api\.(telegram\.org|github\.com)/' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
