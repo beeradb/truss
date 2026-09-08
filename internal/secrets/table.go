@@ -37,16 +37,33 @@ type expiryEntry struct {
 //     "2006-01-02" date) or is exactly "never". Nothing else is accepted
 //     silently -- an unparseable value here would otherwise reach Vault
 //     verbatim and the sweep would silently fail to alarm on it.
+//
 //  2. No entry names a probed item. A probed item's expiry comes from its
 //     own issuer (internal/secrets.Probe), read live on every sweep; a
 //     table entry for it would be dead data that could contradict the
 //     issuer and nothing would ever notice, because Sweep.Run skips
 //     probed items before it ever looks at what a Store recorded for
 //     them.
-//  3. Not every entry is "never". An all-"never" table is the exact motion
-//     that silences the daily alarm forever, and it must not be
-//     expressible by an honest reading of this file -- see the design's
-//     "blast radius 2".
+//
+//  3. Every "never" carries a non-empty `why`. This REPLACED an earlier
+//     rule that refused a table in which every entry was "never", and the
+//     replacement is the point rather than a relaxation.
+//
+//     The earlier rule was aimed at the right danger -- an all-"never"
+//     table silences the daily alarm forever -- but it was aimed at the
+//     wrong signal, and it collided with the truth the moment this table
+//     met a real deployment: EVERY hand-made credential in this system
+//     genuinely never expires. A GitHub App private key has no expiry, a
+//     Telegram bot token has none, a passphrase is not an issued
+//     credential. So the honest table IS all-"never", and a rule that
+//     refuses the honest table teaches the reader to lie to it.
+//
+//     What actually protects the alarm is that a "never" cannot be set
+//     SILENTLY. Requiring a stated reason makes each one a sentence a
+//     reviewer reads, in a file that only changes by reviewed commit --
+//     which is a stronger guard than a count, because it survives the case
+//     where all-"never" is correct.
+//
 //  4. The file is not empty. A table with nothing in it is indistinguishable
 //     from a table that was never wired up, and refusing it loudly is
 //     cheaper than a caller silently treating "no entries" as "nothing to
@@ -87,7 +104,6 @@ func LoadExpiries(r io.Reader, probed []string) (Expiries, error) {
 
 	var problems []string
 	out := make(Expiries, len(raw))
-	allNever := true
 
 	for _, name := range names {
 		entry := raw[name]
@@ -97,12 +113,18 @@ func LoadExpiries(r io.Reader, probed []string) (Expiries, error) {
 			continue
 		}
 
-		if entry.Expires != "never" {
-			if _, ok := DaysUntil(time.Time{}, entry.Expires); !ok {
-				problems = append(problems, fmt.Sprintf("%q has an expires value %q that is neither a valid date nor exactly \"never\"", name, entry.Expires))
+		if entry.Expires == "never" {
+			// ⚠️ A "never" MUST BE JUSTIFIED IN THE FILE. This is what
+			// replaced the all-"never" refusal: the danger is a "never"
+			// nobody had to defend, not a table that happens to be all
+			// "never" because every credential in it really is permanent.
+			if strings.TrimSpace(entry.Why) == "" {
+				problems = append(problems, fmt.Sprintf("%q is \"never\" with no `why` -- a credential exempted from the expiry alarm has to say what makes it permanent, in this file, where a reviewer reads it", name))
 				continue
 			}
-			allNever = false
+		} else if _, ok := DaysUntil(time.Time{}, entry.Expires); !ok {
+			problems = append(problems, fmt.Sprintf("%q has an expires value %q that is neither a valid date nor exactly \"never\"", name, entry.Expires))
+			continue
 		}
 
 		out[name] = entry.Expires
@@ -111,9 +133,5 @@ func LoadExpiries(r io.Reader, probed []string) (Expiries, error) {
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("secrets: the expiry table is invalid: %s", strings.Join(problems, "; "))
 	}
-	if allNever {
-		return nil, fmt.Errorf("secrets: every entry in the expiry table is \"never\" -- that silences the daily expiry alarm for every hand-made item permanently, and must be a deliberate, reviewed exception per item rather than the whole table")
-	}
-
 	return out, nil
 }
