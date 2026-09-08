@@ -630,6 +630,8 @@ type fakeGit struct {
 	checkouts []string
 	current   string
 	token     string
+	clones    int
+	fetches   int
 }
 
 // WithToken records the token so a test can assert every git call carries
@@ -648,8 +650,34 @@ func (g *fakeGit) tokenSeen() string {
 	return g.token
 }
 
-func (g *fakeGit) EnsureClone(ctx context.Context, repoURL string) error  { return nil }
-func (g *fakeGit) Fetch(ctx context.Context, remote, branch string) error { return nil }
+func (g *fakeGit) EnsureClone(ctx context.Context, repoURL string) error {
+	g.mu.Lock()
+	g.clones++
+	g.mu.Unlock()
+	return nil
+}
+
+func (g *fakeGit) Fetch(ctx context.Context, remote, branch string) error {
+	g.mu.Lock()
+	g.fetches++
+	g.mu.Unlock()
+	return nil
+}
+
+// cloned and fetched are the only thing a fake CAN observe about the clone:
+// a fake filesystem succeeds whether or not one happened, which is exactly
+// why the missing drift-run clone reached production.
+func (g *fakeGit) cloned() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.clones > 0
+}
+
+func (g *fakeGit) fetched() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fetches > 0
+}
 
 func (g *fakeGit) Commits(ctx context.Context, from, to string) ([]string, error) {
 	if g.CommitsErr != nil {

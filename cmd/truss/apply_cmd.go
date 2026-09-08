@@ -198,10 +198,51 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	} else {
 		gateOK = true
 	}
+	// protectionOK remembers WHY gateOK went false, so the skip reason names
+	// the real cause rather than blaming branch protection for a clone that
+	// failed.
+	protectionOK := gateOK
+
+	// ⚠️ THE CLONE HAPPENS HERE, BEFORE THE DRIFT BRANCH, AND IT USED TO LIVE
+	// INSIDE runCommitLoop -- WHICH A DRIFT RUN SKIPS ENTIRELY. So a
+	// drift-only pass never cloned, and the checkout it then tried failed
+	// with "chdir /work/repo: no such file or directory". apply.sh calls
+	// ensure_workdir unconditionally at top level (apply.sh:207-212), before
+	// its own DRIFT_ONLY branch, which is why the bash's drift job works.
+	//
+	// ⚠️ NO UNIT TEST COULD SEE THIS AND THE PARITY HARNESS COULD NOT EITHER:
+	// every fake git succeeds whether or not a clone happened, so "check out
+	// a ref in a directory that does not exist" has no counterpart in a fake.
+	// It was found by the FIRST SHADOW RUN against the real cluster on
+	// 2026-09-08, which is the whole argument for running one.
+	if gateOK {
+		tok, _, err := d.Forge.InstallationToken(ctx)
+		if err != nil {
+			failure = fmt.Sprintf("could not mint an installation token: %v", err)
+			gateOK = false
+		} else {
+			// Every git call from here on carries the token -- the clone is
+			// --filter=blob:none, so checkout and diff lazily fetch blobs and
+			// are network operations too. See gitDriver.WithToken.
+			d.Git = d.Git.WithToken(tok)
+			repoURL := "https://github.com/" + d.Cfg.Repo + ".git"
+			if err := d.Git.EnsureClone(ctx, repoURL); err != nil {
+				failure = fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err)
+				gateOK = false
+			} else if err := d.Git.Fetch(ctx, "origin", "main"); err != nil {
+				failure = fmt.Sprintf("could not fetch origin main: %v", err)
+				gateOK = false
+			}
+		}
+	}
 
 	if !gateOK {
-		rotationSummary = map[string]string{"skipped": "branch protection gate failed"}
-		driftSummary = map[string]string{"skipped": "branch protection gate failed"}
+		skipped := "branch protection gate failed"
+		if protectionOK {
+			skipped = "the repository could not be prepared"
+		}
+		rotationSummary = map[string]string{"skipped": skipped}
+		driftSummary = map[string]string{"skipped": skipped}
 	} else if driftRun {
 		rotationSummary = map[string]string{"skipped": "drift run"}
 		drifted, errored, driftSkipped = runDrift(ctx, d, last)
@@ -364,22 +405,10 @@ func toLedgerExpiring(in []secrets.Expiring) []ledger.Expiring {
 // item 7): no failed/<sha> is filed, HEAD is not advanced past the
 // contended commit, and the returned failure is empty.
 func runCommitLoop(ctx context.Context, d applyDeps, last string) (newLast string, applied, noop int, failure string, credentialsAppliedAt string, lockContended bool) {
-	tok, _, err := d.Forge.InstallationToken(ctx)
-	if err != nil {
-		return last, 0, 0, fmt.Sprintf("could not mint an installation token: %v", err), "", false
-	}
-	// Every git call from here on carries the token -- the clone is
-	// --filter=blob:none, so checkout and diff lazily fetch blobs and are
-	// network operations too. See gitDriver.WithToken.
-	d.Git = d.Git.WithToken(tok)
-
-	repoURL := "https://github.com/" + d.Cfg.Repo + ".git"
-	if err := d.Git.EnsureClone(ctx, repoURL); err != nil {
-		return last, 0, 0, fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err), "", false
-	}
-	if err := d.Git.Fetch(ctx, "origin", "main"); err != nil {
-		return last, 0, 0, fmt.Sprintf("could not fetch origin main: %v", err), "", false
-	}
+	// The clone, the fetch and the installation token are runApplyPass's job
+	// now, done BEFORE the drift branch so both paths get a repository -- see
+	// the note there. This function is handed a Git that already carries the
+	// token.
 
 	// §3 item 1: a failed rev-list is a refusal here, not the silent empty
 	// queue the bash's `mapfile` produced -- the vacuous-pass shape

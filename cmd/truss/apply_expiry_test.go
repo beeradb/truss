@@ -71,3 +71,44 @@ func TestACleanPassStaysCleanWithAnUnusableSweep(t *testing.T) {
 		t.Errorf("the sweep's problem was swallowed entirely: %q", text)
 	}
 }
+
+// TestADriftRunStillClonesTheRepository covers a regression that shipped and
+// that NOTHING in this suite or in internal/parity could see: EnsureClone and
+// Fetch lived inside runCommitLoop, which a drift run skips entirely, so a
+// drift-only pass never cloned and every checkout it then attempted failed
+// with "chdir /work/repo: no such file or directory".
+//
+// apply.sh calls ensure_workdir unconditionally at top level (apply.sh:
+// 207-212), before its own DRIFT_ONLY branch, which is why the bash's drift
+// job works.
+//
+// ⚠️ IT WAS FOUND BY THE FIRST SHADOW RUN AGAINST THE REAL CLUSTER, not by a
+// test, and the reason is worth keeping: every fake git succeeds whether or
+// not a clone happened, so "check out a ref in a directory that does not
+// exist" has no counterpart in a fake. This test therefore asserts the CALL,
+// which is the only thing a fake can observe.
+func TestADriftRunStillClonesTheRepository(t *testing.T) {
+	const head = "headsha1"
+
+	forgeFake := compliantCommitGate("alice", head, head)
+	forgeFake.ProtectionResult = compliantGatesProtection()
+
+	git := &fakeGit{DirsAtRef: map[string][]string{"": {"platform"}, head: {"platform"}}}
+	tofu := &fakeTofu{}
+	deps, _, _ := buildTestDeps(t, forgeFake, git, func(env []string) tofuRunner { return tofu })
+	deps.Cfg.DriftOnly = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runApplyPass(ctx, deps, head)
+
+	if !git.cloned() {
+		t.Error("a drift run did not clone the repository, so every checkout it makes will fail")
+	}
+	if !git.fetched() {
+		t.Error("a drift run did not fetch origin main, so it plans against a stale tree")
+	}
+	if git.tokenSeen() == "" {
+		t.Error("a drift run never attached the installation token, so the clone is unauthenticated")
+	}
+}
