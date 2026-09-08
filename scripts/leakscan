@@ -91,8 +91,18 @@ scan '\b(op://|cloudflare account|gs://|s3://)' \
 
 # ⚠️ Co-authored-by trailers are refused here as well as by the commit hook,
 # because a hook lives on one machine and this runs for everybody.
-if git log --format='%b' 2>/dev/null | grep -qiE '^[[:space:]]*co-authored-by:.*(claude|anthropic)'; then
-  note 'a Co-Authored-By trailer naming an AI assistant'
+#
+# ⚠️ COUNTED, NOT `grep -q`, AND THAT IS THE WHOLE POINT. Under `pipefail`
+# this guard was VACUOUS for its entire life: `grep -q` exits on its first
+# match and closes the pipe, `git log` dies of SIGPIPE with 141, and pipefail
+# hands the `if` that 141 -- so the condition read FALSE precisely when there
+# was something to find. Seven trailers sat in this history while it printed
+# "clean". `grep -c` reads its input to the end, so nothing gets a SIGPIPE
+# and the count is the answer.
+trailers=$(git log --format='%b' 2>/dev/null |
+  grep -ciE '^[[:space:]]*co-authored-by:.*(claude|anthropic)' || true)
+if [ "${trailers:-0}" -gt 0 ]; then
+  note "$trailers Co-Authored-By trailer(s) naming an AI assistant"
 fi
 
 [ "$fail" -eq 0 ] || { echo "leakscan: refusing" >&2; exit 1; }

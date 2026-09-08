@@ -43,6 +43,48 @@ check() { # name want filename content
   fi
 }
 
+# ⚠️ `check` stages but never COMMITS, so `git log` is empty in its fixture and
+# it cannot express a commit-message case at all. That is why the trailer guard
+# had no test, and why it stayed vacuous under pipefail for its whole life. A
+# fixture that cannot ask a question is indistinguishable from one whose answer
+# is always "clean".
+#
+# ⚠️ AND THE FIXTURE MUST BE DEEP, WHICH A ONE-COMMIT ONE IS NOT. The bug was
+# SIGPIPE: `grep -q` exits at its first match, `git log` dies writing the rest,
+# and pipefail hands the `if` that failure. With a single small commit git log
+# finishes writing before grep exits, nothing gets a signal, and the broken
+# guard PASSES -- verified, by reverting the fix and watching this file stay
+# green. `deep` puts bulk BEHIND the match: the trailer is newest so grep quits
+# immediately, and git log still has ~200 KB of older history to write.
+check_msg() { # name want message [deep]
+  local name="$1" want="$2" message="$3" deep="${4:-}"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/scripts"
+  cp "$SCAN" "$dir/scripts/leakscan"
+  printf 'placeholder\n' > "$dir/file.txt"
+  git -C "$dir" init -q -b main
+  git -C "$dir" add -A
+  if [ -n "$deep" ]; then
+    # Via a file, not argv: 200 KB of -m is "Argument list too long".
+    { printf 'older history\n\n'; head -c 200000 /dev/zero | tr '\0' 'x'; } \
+      > "$dir/.bulkmsg"
+    git -C "$dir" -c user.name=t -c user.email=t@t commit -q -F "$dir/.bulkmsg"
+    rm -f "$dir/.bulkmsg"
+  fi
+  git -C "$dir" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "$message"
+  set +e
+  out="$(cd "$dir" && ./scripts/leakscan 2>&1)"; rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1)); echo "ok    $name ($got)"
+  else
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+  fi
+}
+
 # One per class the scanner claims to catch. If any of these starts passing
 # as clean, that scan has stopped working -- which is exactly what happened.
 check 'email address'      refuse notes.md   'ask someone@example.org about it'
@@ -89,6 +131,32 @@ check 'real url in an svg'   refuse m.svg '<image xlink:href="https://assets.exa
 check 'telegram api root'    clean  n.go 'const ep = "https://api.telegram.org/bot%s/sendMessage"'
 check 'github api root'      clean  n.go 'const ep = "https://api.github.com/repos/%s/pulls"'
 check 'our bucket in a url'  refuse n.go 'const u = "https://storage.googleapis.com/some-real-tfstate/key"'
+
+# ⚠️ The trailer guard reads history, not the tree, so these are the only cases
+# here that need a real commit. The clean case matters as much as the refusing
+# one: a guard that refuses every message is as useless as one that refuses
+# none, and only the pair proves it is reading what it claims to read.
+check_msg 'ordinary commit message' clean \
+  'Fix the thing
+
+Because it was broken.'
+check_msg 'ai co-author trailer'    refuse \
+  'Fix the thing
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>'
+check_msg 'ai co-author, odd case'  refuse \
+  'Fix the thing
+
+co-authored-by: SOME ANTHROPIC MODEL <x@y>'
+
+# ⚠️ THIS IS THE CASE THAT ACTUALLY GUARDS THE GUARD. The three above stay
+# green against the broken `grep -q` version; only this one goes red, because
+# only this one gives git log enough to write that closing the pipe early
+# raises SIGPIPE. Revert the fix in leakscan and this must fail.
+check_msg 'ai co-author, deep history' refuse \
+  'Fix the thing
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>' deep
 
 echo
 echo "leakscan-test: $pass passed, $fail failed"
