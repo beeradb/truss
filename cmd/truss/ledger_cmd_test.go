@@ -10,10 +10,12 @@ import (
 )
 
 // TestLedgerGetExitsTwoWhenAbsentAndOneOnAnyOtherError is the exit-code
-// contract §4.9 states in words: "0 found, 2 absent, 1 any other error --
-// this is what lets apply.sh keep `|| die` for HEAD and refuse-with-a-true-
-// reason for a digest." The two failure codes must stay distinct, so this
-// test drives both, plus the success path, through the same command.
+// contract §4.9 states in words: "0 found, 2 absent, 1 any other error".
+// A caller can then die outright on an absent HEAD while giving an absent
+// digest its own true reason, which it cannot do if "not there" and "the
+// bucket is unreachable" share an exit code. The two failure codes must stay
+// distinct, so this test drives both, plus the success path, through the
+// same command.
 func TestLedgerGetExitsTwoWhenAbsentAndOneOnAnyOtherError(t *testing.T) {
 	dir, write := testSecretsDir(t)
 	fl := newFakeLedger(t, "state-bucket")

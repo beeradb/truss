@@ -10,9 +10,9 @@ import (
 
 // Probe asks an issuer directly for one credential's expiry, rather than
 // reading it out of Vault. The Cloudflare API is asked first, for the one
-// hand-made token (cf-token-mint) whose true answer only Cloudflare has
-// (apply.sh:917-924): a value written to Vault could go stale in a way the
-// issuer's own answer cannot.
+// hand-made token (cf-token-mint) whose true answer only Cloudflare has: a
+// value written to Vault could go stale in a way the issuer's own answer
+// cannot.
 type Probe interface {
 	Expiry(ctx context.Context) (t time.Time, ok bool, err error)
 }
@@ -30,8 +30,9 @@ type CloudflareToken struct {
 // Expiry asks Cloudflare directly. A transport failure, a non-2xx status
 // or a body that will not parse all report as (zero, false, nil) -- a
 // probe failure is "no expiry recorded", not an error that could halt the
-// sweep (§4.7's own reading of apply.sh:917-924, where `curl ... || true`
-// and jq's `// empty` swallow exactly this).
+// sweep (§4.7). Asking the issuer is an improvement on what Vault holds,
+// and an improvement that is unavailable must not cost the sweep every
+// other credential it was about to report on.
 func (c CloudflareToken) Expiry(ctx context.Context) (time.Time, bool, error) {
 	base := c.BaseURL
 	if base == "" {

@@ -256,9 +256,11 @@ func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// Reads strip trailing whitespace, matching the bash's command
-		// substitution ($(...) drops trailing newlines) on every caller
-		// that read a ledger value into a shell variable.
+		// Reads strip trailing whitespace. Every value in this ledger is a
+		// single token -- a sha, a digest -- and whatever wrote the object
+		// may well have ended it with a newline; left on, that newline
+		// becomes part of the value and fails the comparison it was read
+		// for.
 		return bytes.TrimRight(body, "\r\n\t "), nil
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("ledger: get %q: %w", key, ErrNotFound)

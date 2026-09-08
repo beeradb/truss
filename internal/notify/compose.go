@@ -11,7 +11,7 @@ import (
 // Expiring is one credential the sweep found close to (or past, or with no
 // recorded) expiry.
 //
-// ⚠️ This is a stand-in for secrets.Expiring (port-plan.md §4.7), which the
+// ⚠️ This is a stand-in for secrets.Expiring (§4.7), which the
 // spec for this package names directly (`Expiring []secrets.Expiring`).
 // internal/secrets does not exist in this tree yet and building it is out of
 // scope here, so Report carries this package's own copy of the same two
@@ -48,13 +48,13 @@ type Report struct {
 	// Failure made every clean pass exit 1 and send FAILED, ~288 times a
 	// day -- an alert channel nobody reads is where a real digest-gate
 	// refusal goes to die, which is why both 2026-09-08 reviewers called
-	// this a security cost rather than noise. The reference bash never set
-	// failure for it either (check_credential_lifetimes is `|| true`
-	// throughout).
+	// this a security cost rather than noise. A sweep that could not look
+	// has found nothing; it has not found a problem, and it must not be
+	// reported as one.
 	ExpiryUnavailable string
 }
 
-// Compose builds the exact text send_telegram (apply.sh:408-448) sends.
+// Compose builds the exact text of the alert.
 //
 // The opening clause is one of three: a failure, an idle run, or a normal
 // applied/noop summary. Five more clauses are appended, in this fixed order,
@@ -105,12 +105,12 @@ func Compose(r Report) string {
 	return text
 }
 
-// trimReason reproduces trim_reason (apply.sh:345-354): NUL bytes are
-// dropped, the text is cut at 800 bytes, and a truncation marker is
-// appended when the ORIGINAL text (before NUL-stripping) was over 800 bytes
-// -- the same quirk the bash has, preserved rather than corrected.
+// trimReason drops NUL bytes, cuts the text at 800 bytes, and appends a
+// truncation marker when the ORIGINAL text -- before NUL-stripping -- was
+// over 800 bytes. Measuring before the strip is deliberate: see
+// ledger.TrimReason, which states the rule and the reason for it.
 //
-// ⚠️ This duplicates ledger.TrimReason (port-plan.md §4.2), which does not
+// ⚠️ This duplicates ledger.TrimReason (§4.2), which does not
 // exist in this tree yet. Once internal/ledger lands, Compose should take an
 // already-trimmed Report.Failure (trimmed by whoever populates the Report,
 // the same place PutFailed trims it) and this function should be deleted --

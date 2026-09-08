@@ -6,7 +6,7 @@ import (
 )
 
 // TestSubcommandsAreExactlyTheDocumentedSet pins the dispatch table to
-// docs/port-plan.md §4.9's table exactly: ledger, plan-digest, token, gate,
+// §4.9's table exactly: ledger, plan-digest, token, gate,
 // expiry, notify, apply -- no more, no fewer. "ledger get"/"ledger put" and
 // "gate protection"/"gate commit" collapse to one top-level verb each,
 // which is why this is seven entries against the doc's eight rows.

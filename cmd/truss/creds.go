@@ -1,6 +1,6 @@
 // Credential wiring: which 1Password-mirrored item and field each secret
 // this binary needs lives under, read through internal/secrets.Dir (the
-// unchanged file-mount seam, docs/port-plan.md §4.7). None of this carries
+// file-mount seam, §4.7). None of this carries
 // a value -- only names -- so nothing here can appear in an error string
 // that would violate the "no secret in any error" constraint; secrets.Dir's
 // own errors already name only a path, an item and a field, never a value.
@@ -157,10 +157,10 @@ func loadCFMintToken(dir secrets.Dir) (string, error) {
 // "credentials/ has not minted this yet" and "there is no such item,
 // because the name is wrong" -- and the caller carries on for the first,
 // which turns drift detection into a permanent no-op that reports success
-// forever. These item names were reverse-engineered from an older apply.sh
-// and are the one part of this port with no authoritative source, so the
-// wrong-name case has to be the loud one. Raised by the 2026-09-08 code
-// audit.
+// forever. These item names are the one part of the wiring with no
+// authoritative source to check them against -- nothing in this repository
+// creates the mirror -- so the wrong-name case has to be the loud one.
+// Raised by the 2026-09-08 code audit.
 func loadCFInfraAdminToken(dir secrets.Dir) (string, bool, error) {
 	mounted, err := dir.ItemMounted(itemCFInfraAdmin)
 	if err != nil {

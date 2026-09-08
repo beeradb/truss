@@ -120,7 +120,7 @@ func TestCanonicalPreservesNumberLiterals(t *testing.T) {
 		{"-0", "-0"},
 		{"100", "100"},
 		// A big integer, well beyond float64's ~15-17 significant digits —
-		// short of the 39 digits docs/port-plan.md verifies against real jq
+		// short of the 39 digits verified against real jq
 		// only because scripts/leakscan refuses any 32+ character run of
 		// [0-9a-f], which a run of decimal digits trivially satisfies.
 		{"123456789012345678901234", "123456789012345678901234"},
@@ -405,7 +405,7 @@ func TestDigestMatchesTheRecordedGoldens(t *testing.T) {
 			// The pinned expected digest is base64 of the raw 32 bytes, not
 			// hex — scripts/leakscan refuses a bare 64-character hex string
 			// in tracked files, and an exemption for testdata would blind it
-			// to a real leak (docs/port-plan.md §5.1, §7.7).
+			// to a real leak (§5.1, §7.7).
 			b64, err := os.ReadFile(filepath.Join(dir, name+".digest.b64"))
 			if err != nil {
 				t.Fatalf("reading golden: %v", err)
@@ -437,7 +437,7 @@ func TestDigestMatchesTheRecordedGoldens(t *testing.T) {
 // the digest. It fails rather than skips when TRUSS_REQUIRE_JQ=1, which CI
 // sets — a differential test that silently skips is worthless, and that is
 // the whole reason this package is being written before anything depends on
-// it (docs/port-plan.md §5.2).
+// it (§5.2).
 
 func TestDigestAgreesWithJQ(t *testing.T) {
 	jqPath, jqErr := exec.LookPath("jq")

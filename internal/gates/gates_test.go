@@ -12,9 +12,10 @@ import (
 
 // --- fixtures -----------------------------------------------------------
 //
-// Fake shas throughout follow the reference suite's own convention
-// (docs/port-plan.md §4): non-hex strings like "sha1" and "headsha1", never
-// anything that could pass for a real 32+ character hex id.
+// Fake shas throughout are deliberately NOT hex: "sha1", "headsha1", never
+// anything that could pass for a real 32+ character hex id. A fixture that
+// looks like a commit is a fixture somebody eventually goes looking for in
+// the real repository.
 
 func boolPtr(b bool) *bool    { return &b }
 func intPtr(i int) *int       { return &i }
@@ -83,7 +84,7 @@ func TestAMissingKeyIsNotReadAsCompliant(t *testing.T) {
 	// forge's JSON), must refuse. AllowForcePushes is the interesting case:
 	// its COMPLIANT value is false, so a naive truthiness test would let a
 	// missing key through exactly where the field's own doc comment warns
-	// that this went wrong in the shell version.
+	// that this goes wrong.
 	cases := []struct {
 		name   string
 		mutate func(*Protection)
@@ -207,9 +208,8 @@ func TestAMergeCommitThatIsNotThePRsIsRefused(t *testing.T) {
 }
 
 // TestAnEmptyMergeCommitSHAIsRefused was specified in §7.8 on the
-// assumption that gates.go:99 was a bug (an absent merge_commit_sha read as
-// compliant, where apply.sh:529 refuses it unconditionally). The owner has
-// now confirmed it is a bug and gates.go has been fixed to match: this test
+// assumption that an absent merge_commit_sha being read as compliant was a
+// bug. The owner has confirmed it is, and gates.go has been fixed: this test
 // was watched failing against the pre-fix line before the fix landed (see
 // the report), and now passes.
 func TestAnEmptyMergeCommitSHAIsRefused(t *testing.T) {
@@ -224,10 +224,10 @@ func TestAnEmptyMergeCommitSHAIsRefused(t *testing.T) {
 	}
 }
 
-// TestAStaleApprovalAlongsideAFreshOneIsIgnored resolves §7.9. apply.sh's
-// jq select (534-540) counts only reviews AT THE HEAD SHA; a stale review
-// outside that filter produces no message at all, so a fresh APPROVED
-// review still merges cleanly. The owner's ruling: match the bash.
+// TestAStaleApprovalAlongsideAFreshOneIsIgnored resolves §7.9. Only reviews
+// AT THE HEAD SHA are counted; a stale review outside that filter produces
+// no message at all, so a fresh APPROVED review still merges cleanly. The
+// owner's ruling: leave it that way.
 // dismiss_stale_reviews already dismisses a review on push, and the
 // applier separately requires an approval at the head, so a stale entry
 // sitting in the list is ordinary API noise, not evidence -- refusing on
@@ -370,12 +370,12 @@ func TestGatesImportsNothingThatDoesIO(t *testing.T) {
 // plan changed. It used to fall through to the mismatch branch and print
 // "(approved , ours <digest>): the world moved between review and apply" --
 // a sentence describing a race that did not happen, with a blank where a
-// digest should be. apply.sh:462 tests `[ -z "$theirs" ]` for exactly this.
+// digest should be.
 //
 // Both outcomes refuse, so nothing was unsafe; what was wrong was telling
 // the operator the wrong story. The doc comment had called this case
 // "impossible in practice", which is the kind of claim that stops anyone
-// handling it. Found by internal/parity, 2026-09-08.
+// handling it. Found by the 2026-09-08 code audit.
 func TestCheckPlanDigestTellsAnEmptyDigestApartFromAMismatch(t *testing.T) {
 	const key = "digests/headsha1/platform.digest"
 
@@ -397,9 +397,10 @@ func TestCheckPlanDigestTellsAnEmptyDigestApartFromAMismatch(t *testing.T) {
 }
 
 // TestAnUnreviewedRefusalNamesTheLedgerKey: the key is what an operator goes
-// and looks at, and apply.sh:462 names it in this refusal. Deliberately only
-// this one -- a mismatch already prints both digests, and adding the key
-// there would be a divergence in alert text that nobody asked for.
+// and looks at when nothing was recorded, so this refusal names it.
+// Deliberately only this one -- a mismatch already prints both digests, and
+// adding the key there would be noise in an alert that already says
+// everything it needs to.
 func TestAnUnreviewedRefusalNamesTheLedgerKey(t *testing.T) {
 	const key = "digests/headsha1/platform.digest"
 	for _, tc := range []struct {
@@ -427,8 +428,8 @@ func TestAnUnreviewedRefusalNamesTheLedgerKey(t *testing.T) {
 // "approved". Scanning for any APPROVED review counts an approval that was
 // afterwards withdrawn.
 //
-// ⚠️ A DELIBERATE DIVERGENCE from apply.sh:358, which counts APPROVED
-// reviews and never looks at CHANGES_REQUESTED. GitHub's own protection
+// ⚠️ SO CHANGES_REQUESTED AND DISMISSED ARE READ, NOT JUST APPROVED: a gate
+// that counts only APPROVED cannot see a withdrawal. GitHub's own protection
 // would block such a merge, but this gate exists precisely because it does
 // not take the merge's legitimacy on trust. Raised by the 2026-09-08
 // security review.

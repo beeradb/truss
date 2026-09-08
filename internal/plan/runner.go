@@ -1,6 +1,6 @@
 // This file is the exec half of package plan: it shells out to `tofu` for
-// init, plan, apply and show, and enforces the invariants the bash applier
-// paid for. See docs/port-plan.md §4.3b and §2 items 4, 7, 9 and 17.
+// init, plan, apply and show, and enforces the invariants an unattended
+// applier has to hold. See §4.3b and §2 items 4, 7, 9 and 17.
 package plan
 
 import (
@@ -94,7 +94,7 @@ func (r Runner) Apply(ctx context.Context, dir, planFile string) error {
 // planFile is required: `show -json` with no file argument prints current
 // STATE, which has no resource_changes at all, so a caller that dropped the
 // argument would silently digest an empty plan and match anything (§2
-// item... see docs/port-plan.md §4.3b).
+// item... see §4.3b).
 func (r Runner) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, error) {
 	if planFile == "" {
 		return nil, errors.New("show -json: refuses to run without a plan file")
@@ -124,8 +124,9 @@ func (r Runner) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, err
 }
 
 // run executes tofu with args in dir, capturing stdout and stderr together
-// (the bash's own `2>&1`) and forwarding every byte of that combined output
-// to r.Stderr — never to this process's real stdout. It returns the
+// into one buffer -- interleaved as tofu wrote them, so the log reads in
+// the order things happened -- and forwarding every byte of that combined
+// output to r.Stderr, never to this process's real stdout. It returns the
 // combined output (for lock-message matching and for embedding in an error)
 // alongside cmd.Run's error, unmodified.
 func (r Runner) run(ctx context.Context, dir string, args []string) (combined string, err error) {
@@ -158,10 +159,10 @@ func (r Runner) run(ctx context.Context, dir string, args []string) (combined st
 // an error. TrimReason's 800-byte cap does not help: it yields 800 bytes of
 // provider output rather than none.
 //
-// This is not a new judgement. apply.sh:170-180 carries the same reasoning
-// under its own "Security review, 2026-09-07", and the port reintroduced
-// exactly what that review removed; the parity harness printed it as a diff
-// on 2026-09-08, which is what the harness is for.
+// This is not a new judgement: it is what the security review of
+// 2026-09-07 concluded, and it was undone once and had to be restored on
+// 2026-09-08. Anyone tempted to attach the transcript back onto this error
+// for debuggability should reach for the pod log instead.
 //
 // Nothing is lost: run() has already written the full combined output to
 // r.Stderr, which is the pod log. The dir is dropped for the same reason --
@@ -177,9 +178,10 @@ func wrapExecError(step, dir, out string, err error) error {
 	// The raw exec error and nothing else: "exit status 1". Every caller
 	// already names the step and the root ("tofu plan failed for %s: %v"),
 	// so wrapping it here would only duplicate that in the alert. What is
-	// deliberately kept over the bash's wording is the exit status itself,
-	// which distinguishes a tofu that ran and refused from a tofu that could
-	// not be executed at all -- the bash reports both identically.
+	// deliberately kept, rather than replaced with a fixed sentence, is the
+	// exit status itself: it distinguishes a tofu that ran and refused from a
+	// tofu that could not be executed at all, and a hand-written message
+	// reports both identically.
 	return err
 }
 

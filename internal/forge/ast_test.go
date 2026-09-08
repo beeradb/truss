@@ -32,7 +32,7 @@ func parseNonTestFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 }
 
 // TestPullNumbersForCommitCannotCarryMerged is the load-bearing guard named
-// in docs/port-plan.md §4.6: `commits/{sha}/pulls` has no `merged` field, so
+// in §4.6: `commits/{sha}/pulls` has no `merged` field, so
 // PullNumbersForCommit must return `[]int` -- a type that has no room for one
 // -- rather than a struct slice a later "convenience" change could grow a
 // Merged field onto. This is checked structurally, over the AST, so the test
@@ -94,8 +94,9 @@ func describeExpr(e ast.Expr) string {
 // TestTheKeyNeverTouchesDisk enforces §4.6's refusal directly rather than
 // trusting review: the GitHub App private key is bytes in memory only, and a
 // call to os.WriteFile, os.Create or os.CreateTemp anywhere in this
-// package's production code would be exactly how the bash's mktemp mistake
-// (apply.sh 296-299) came back.
+// package's production code would put it in a file on disk -- which is the
+// obvious convenience the moment anything wants to hand the key to a
+// subprocess, and exactly the refusal §4.6 exists to hold.
 func TestTheKeyNeverTouchesDisk(t *testing.T) {
 	_, files := parseNonTestFiles(t)
 

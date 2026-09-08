@@ -1,12 +1,11 @@
 // git.go drives the git binary that backs root discovery and checkout.
-// docs/port-plan.md §4.4 specifies a Git type living in internal/repo, but
-// the package as actually built (internal/repo/roots.go) contains only the
-// pure TouchedRoots function -- no Git struct exists anywhere in the tree.
-// Rather than guess at, or silently add, an exported API to a package the
-// task described as already built and pushed, the git driver lives here in
-// cmd/truss instead: it is only ever used by the apply pass, behind the
-// gitDriver interface below so tests can fake it. See the final report for
-// this as a named deviation.
+// §4.4 specifies a Git type living in internal/repo, but the package as
+// actually built (internal/repo/roots.go) contains only the pure
+// TouchedRoots function -- no Git struct exists anywhere in the tree.
+// Rather than silently add an exported API to a package that is already
+// built and settled, the git driver lives here in cmd/truss instead: it is
+// only ever used by the apply pass, behind the gitDriver interface below so
+// tests can fake it. A named deviation from §4.4, not an oversight.
 package main
 
 import (
@@ -25,7 +24,7 @@ import (
 )
 
 // gitDriver is the subset of git operations the apply pass needs, matching
-// docs/port-plan.md §4.4's Git type shape. A local interface rather than a
+// §4.4's Git type shape. A local interface rather than a
 // concrete dependency on execGit so tests exercise the pass without a real
 // git binary or network.
 type gitDriver interface {
@@ -39,15 +38,16 @@ type gitDriver interface {
 	// --name-only` does it for rename detection and `checkout` does it to
 	// materialise a working tree. Both ran unauthenticated, so on a private
 	// repo they 401 -- and the error names checkout or diff, not auth.
-	// apply.sh got away with it because the token lived in
-	// remote.origin.url. Moving it out of the URL was right; it just was not
-	// carried to the rest. Found by the 2026-09-08 code audit.
+	// Leaving the token in remote.origin.url would authenticate every call
+	// for free, at the price of writing the credential to disk inside the
+	// clone. Keeping it out of the URL is right; it just has to be carried
+	// to every call instead. Found by the 2026-09-08 code audit.
 	//
 	// It returns a copy rather than mutating, so the token is still never
 	// stored anywhere longer-lived than one pass, and it still travels only
 	// in the child's environment -- never argv, never a URL, and never
-	// `git config`-ed into the clone, which would restore the on-disk leak
-	// the port removed.
+	// `git config`-ed into the clone, which is exactly the on-disk leak this
+	// arrangement exists to avoid.
 	WithToken(token string) gitDriver
 
 	EnsureClone(ctx context.Context, repoURL string) error
@@ -95,11 +95,11 @@ var treeRootPattern = regexp.MustCompile(`^(platform|projects/[^/]+)$`)
 //
 // ⚠️ IT REJECTS WHAT IS DANGEROUS, NOT WHAT IS UNFAMILIAR, AND §4.4'S LITERAL
 // RULE WAS TRIED FIRST. That rule -- "a full hex sha or origin/<branch>" --
-// is true of every ref in production and it BROKE internal/parity, whose
-// recorded corpus carries the bash suite's own synthetic refs ("sha1",
-// "base"). Breaking the acceptance test to satisfy a sentence in the spec is
-// the wrong trade: parity is the evidence, the sentence is a description of
-// it. A ref that is merely not a sha cannot do harm -- git fails to resolve
+// is true of every ref in production, and it refuses the synthetic refs the
+// test corpus is built on ("sha1", "base") -- so adopting it would have meant
+// rewriting the tests to satisfy a sentence in the spec, which is the wrong
+// trade: the tests are the evidence, the sentence is a description of it.
+// A ref that is merely not a sha cannot do harm -- git fails to resolve
 // it, which is a refusal. A ref that begins with "-" is an OPTION, and one
 // carrying whitespace or a control character is smuggling a second argument.
 // Those are the two things worth refusing, so those are what this refuses.
@@ -160,9 +160,9 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 }
 
 // TreeRoots lists the "platform" and "projects/<name>" directories present
-// in sha's own tree, reproducing derive_touched_roots' shared-input branch
-// (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
-// '^(platform|projects/[^/]+)$'`), filter included.
+// in sha's own tree. This is what feeds repo.TouchedRoots' shared-input
+// branch, so the filter is part of the contract: only entries matching
+// `^(platform|projects/[^/]+)$` come back, and nothing deeper.
 func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 	if err := checkRef(sha); err != nil {
 		return nil, err
@@ -251,9 +251,11 @@ func (g execGit) run(ctx context.Context, dir string, args []string) (string, er
 	return out, nil
 }
 
-// basicAuth builds the same "x-access-token:<token>" Basic credential the
-// bash embedded in the clone URL (apply.sh:373); here it travels as a
-// header value in the child's environment, never in argv or in the URL.
+// basicAuth builds the "x-access-token:<token>" Basic credential GitHub
+// expects for an installation token. The obvious place to put it is the
+// clone URL; instead it travels as a header value in the child's
+// environment, never in argv and never in the URL, so it is not written to
+// disk and not visible in a process listing.
 func basicAuth(token string) string {
 	return base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 }

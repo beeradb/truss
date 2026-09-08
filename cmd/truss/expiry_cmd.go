@@ -52,13 +52,13 @@ func loadVaultConfig(getenv func(string) string) (secrets.KVConfig, []string) {
 // the apply pass; this function is just the sweep itself, deliberately
 // unopinionated about what happens with its result).
 //
-// ⚠️ Only the "platform" Vault mount is swept. Decision 4's own gap
-// analysis (docs/port-plan.md §4.7, "A SECOND GAP, LARGER THAN DECISION 4
-// STATES") records that the bash also swept a 1Password "platform" vault
-// and the whole "recipes-runtime" vault, neither of which has a Vault
-// mount yet -- Sweep.Stores is a slice specifically so this is a
-// configuration change once a second mount exists, not a code change. That
-// gap is real today and is not fixed here.
+// ⚠️ Only the "platform" Vault mount is swept, and that is NARROWER THAN
+// THE CREDENTIALS THAT CAN LAPSE. §4.7's gap analysis ("A SECOND GAP,
+// LARGER THAN DECISION 4 STATES") records that a 1Password "platform" vault
+// and the whole "recipes-runtime" vault also hold hand-held credentials, and
+// neither has a Vault mount yet -- Sweep.Stores is a slice specifically so
+// this is a configuration change once a second mount exists, not a code
+// change. That gap is real today and is not fixed here.
 // cfBaseURL overrides the Cloudflare API host, read from
 // $CLOUDFLARE_API_BASE_URL. Empty leaves the real one in place.
 //
@@ -67,9 +67,8 @@ func loadVaultConfig(getenv func(string) string) (secrets.KVConfig, []string) {
 // doc says it "overrides the Cloudflare API host for tests" -- and nothing
 // ever set it, so the probe reached the real api.cloudflare.com from every
 // run including a test one. That made the one credential whose lapse takes
-// the applier down the one credential no whole-pass test could drive
-// (internal/parity, added 2026-09-08, is what could not be written without
-// this), and it meant any such test would egress from CI. Optional, never
+// the applier down the one credential no whole-pass test could drive, and
+// it meant any such test would egress from CI. Optional, never
 // part of config.Config's required names, and never a route a credential
 // can travel -- the same shape loadForgeConfig's baseURL has.
 func runExpirySweep(ctx context.Context, cfg config.Config, dir secrets.Dir, vcfg secrets.KVConfig, cfBaseURL string, now func() time.Time) ([]secrets.Expiring, error) {
@@ -92,8 +91,8 @@ func runExpirySweep(ctx context.Context, cfg config.Config, dir secrets.Dir, vcf
 	return sweep.Run(ctx)
 }
 
-// cmdExpiry replaces check_credential_lifetimes as a standalone subcommand
-// (§4.9): run one sweep and print its findings as JSON. Exit 1 (message on
+// cmdExpiry is the expiry sweep as a standalone subcommand (§4.9): run one
+// sweep and print its findings as JSON. Exit 1 (message on
 // stderr) if the sweep itself failed -- never a synonym for "nothing is
 // expiring" (§4.7) -- exit 0 otherwise, findings or not.
 func cmdExpiry(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {

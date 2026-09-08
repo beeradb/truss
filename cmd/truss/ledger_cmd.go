@@ -11,8 +11,8 @@ import (
 	"github.com/beeradb/truss/internal/secrets"
 )
 
-// cmdLedger dispatches `ledger get <key>` and `ledger put <key>`, replacing
-// ledger_get_text and ledger_put_text (§4.9). Both need the full
+// cmdLedger dispatches `ledger get <key>` and `ledger put <key>`, exposing
+// the ledger's read and write paths as commands (§4.9). Both need the full
 // config -- internal/config has no partial-load path, and the bucket name
 // alone is not enough to build a ledger.Store (§4.2 needs the endpoint and
 // credentials too, which live under secrets.Dir).

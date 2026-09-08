@@ -27,11 +27,11 @@ func TestTrimReasonCutsAt800BytesAndSaysSo(t *testing.T) {
 	}
 }
 
-// TestTrimReasonCountsBytesNotRunes: trim_reason's own comment (apply.sh:347)
-// says as much -- `-c` counts bytes, `${#1}` counts characters, and mixing
-// them cuts a multibyte reason under 800 characters but over 800 bytes with
-// no marker. "é" is two bytes in UTF-8, so 500 of them is 500 runes and
-// 1000 bytes: over the byte limit, under a rune-counted one.
+// TestTrimReasonCountsBytesNotRunes: the budget is 800 BYTES, and counting
+// characters instead cuts a multibyte reason that is under 800 characters
+// but over 800 bytes with no marker at all. "é" is two bytes in UTF-8, so
+// 500 of them is 500 runes and 1000 bytes: over the byte limit, under a
+// rune-counted one.
 func TestTrimReasonCountsBytesNotRunes(t *testing.T) {
 	reason := repeatRune('é', 500) // 500 runes, 1000 bytes
 	if len(reason) != 1000 {
@@ -48,13 +48,13 @@ func TestTrimReasonCountsBytesNotRunes(t *testing.T) {
 	}
 }
 
-// TestTrimReasonDropsNULBytes: NULs are stripped before the 800-byte cut
-// (apply.sh: `tr -d '\000'`), but the truncation MARKER is decided from the
-// length of the ORIGINAL, un-stripped text (apply.sh:351, `wc -c` runs on
-// $1, not on the tr'd output). So a reason that is only over 800 bytes
-// because of NUL padding still gets the marker appended, even though the
-// stripped content alone is short. That is the bash's exact behaviour, not
-// a bug this port introduces.
+// TestTrimReasonDropsNULBytes: NULs are stripped before the 800-byte cut,
+// but the truncation MARKER is decided from the length of the ORIGINAL,
+// un-stripped text. So a reason that is only over 800 bytes because of NUL
+// padding still gets the marker appended, even though the stripped content
+// alone is short. That is deliberate and TrimReason's own doc comment says
+// why: the marker's claim is that what you are reading is not what the run
+// produced, and once NULs have been taken out that is already true.
 func TestTrimReasonDropsNULBytes(t *testing.T) {
 	short := "boom"
 	padded := short + string(make([]byte, 1000)) // 1000 NUL bytes appended

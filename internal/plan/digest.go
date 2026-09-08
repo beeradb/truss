@@ -1,5 +1,5 @@
 // Package plan canonicalises an OpenTofu `show -json` plan into the exact
-// bytes the reference pipeline produces, and hashes them.
+// bytes this pipeline produces, and hashes them.
 //
 //	jq -S -c '<the filter in Canonical's doc comment>' | sha256sum | cut -d" " -f1
 //
@@ -7,8 +7,8 @@
 // already recorded in the ledger was computed by that jq pipeline, at every
 // head sha whose commit has not yet applied. A single byte of divergence
 // here invalidates all of them, silently, as refusals that look like
-// tampering rather than as a bug in this package. See docs/port-plan.md
-// §2 item 1 and §4.3a.
+// tampering rather than as a bug in this package. See §2 item 1 and
+// §4.3a.
 //
 // encoding/json's Marshal cannot produce these bytes, and this package does
 // not use it to write output. Measured against jq 1.7: it escapes <, >, &
@@ -34,8 +34,9 @@ import (
 	"strings"
 )
 
-// theFilter is the reference bash's own jq program, reproduced verbatim so
-// a diff against applier/plan-digest is a diff against this constant.
+// theFilter is the jq program the digest is DEFINED by, written out
+// verbatim and in one place so that anything claiming to compute this digest
+// can be diffed against this constant rather than against a paraphrase.
 const theFilter = `[ (.resource_changes // [])[] | { address, actions: .change.actions, before: .change.before, after: .change.after } ] | sort_by(.address)`
 
 // Canonical returns the exact bytes that
@@ -48,7 +49,7 @@ const theFilter = `[ (.resource_changes // [])[] | { address, actions: .change.a
 // every object's keys sorted recursively by byte order, compact, no
 // whitespace other than the single trailing newline jq itself always
 // writes after a -c value. That newline is part of what sha256sum hashes
-// in the reference pipeline, so it is part of what Canonical returns too:
+// in that pipeline, so it is part of what Canonical returns too:
 // Canonical is exported precisely so a mismatch is a byte diff, not two
 // unequal hashes with nothing to compare them against.
 //
@@ -512,8 +513,8 @@ var minusSix = big.NewInt(-6)
 
 // formatDecimal renders d the way decNumber's to-scientific-string does —
 // which is to say, the way Java's BigDecimal.toString() does, which is what
-// jq 1.7 uses. Verified against real jq for every case in
-// docs/port-plan.md §4.3a plus the boundary cases in digest_test.go: plain
+// jq 1.7 uses. Verified against real jq for every case in §4.3a plus the
+// boundary cases in digest_test.go: plain
 // notation when the scale is non-negative and the adjusted exponent is at
 // least -6, scientific otherwise.
 func formatDecimal(d decimal) string {

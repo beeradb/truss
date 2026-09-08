@@ -10,9 +10,9 @@ import (
 	"github.com/beeradb/truss/internal/secrets"
 )
 
-// cmdToken replaces gh-app-token: mint a fresh GitHub App installation
-// token and print it to stdout with no trailing newline, matching the
-// bash's own `printf '%s'` (§4.9). Exit 0 on success; on any failure the
+// cmdToken mints a fresh GitHub App installation token and prints it to
+// stdout with no trailing newline (§4.9), so a caller capturing it gets the
+// token and nothing else. Exit 0 on success; on any failure the
 // message is on stderr and nothing resembling a token is ever printed --
 // forge.Client already redacts its own errors (TestNoTokenAppearsInAnyError).
 func cmdToken(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {

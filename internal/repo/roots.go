@@ -23,8 +23,8 @@ var projectPath = regexp.MustCompile(`^projects/([^/]+)/`)
 // filtered to "platform" and "projects/<name>" entries by whatever read the
 // tree -- this function does no filesystem or git I/O of its own).
 //
-// It reproduces derive_touched_roots (apply.sh:572-590) exactly: if any
-// changed path matches a shared input, the result is "credentials" (only if
+// The rule: if any changed path matches a shared input, the result is
+// "credentials" (only if
 // "credentials/" also changed) followed by every root in treeRoots, sorted,
 // and nothing else. Otherwise: "credentials" if "credentials/" changed,
 // "platform" if "platform/" changed, then each distinct "projects/<name>"

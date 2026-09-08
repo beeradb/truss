@@ -29,10 +29,12 @@ func newStoreWithHandler(t *testing.T, handler http.HandlerFunc) (*Store, *httpt
 	return store, srv
 }
 
-// TestGetReturnsErrNotFoundOnlyForAbsence: §3.2, a deliberate divergence
-// from ledger_get_text (apply.sh:325-332), which returns 1 for a 404, a
-// 403, a 500 and a DNS failure alike. Get must distinguish "does not exist"
-// from every other way a request can fail to come back with a value.
+// TestGetReturnsErrNotFoundOnlyForAbsence: §3.2. A reader that reports one
+// failure for a 404, a 403, a 500 and a DNS failure alike makes "nobody has
+// written this yet" indistinguishable from "the bucket is unreachable", and
+// the applier's refusals turn on exactly that difference. Get must
+// distinguish "does not exist" from every other way a request can fail to
+// come back with a value.
 func TestGetReturnsErrNotFoundOnlyForAbsence(t *testing.T) {
 	t.Run("404 is ErrNotFound", func(t *testing.T) {
 		store, srv := newStoreWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
@@ -203,9 +205,9 @@ func TestPutIsExactBytes(t *testing.T) {
 	}
 }
 
-// TestReadStripsATrailingNewline: Get strips trailing whitespace, matching
-// every bash caller that read a ledger value through command substitution
-// ($(...) drops trailing newlines).
+// TestReadStripsATrailingNewline: Get strips trailing whitespace, because
+// every value in the ledger is a single token and a newline left on the end
+// of one fails the comparison it was read for.
 func TestReadStripsATrailingNewline(t *testing.T) {
 	store, _, srv := newFakeServerStore(t, PathStyle)
 	defer srv.Close()

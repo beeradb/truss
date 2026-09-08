@@ -7,7 +7,7 @@ import (
 	"github.com/beeradb/truss/internal/plan"
 )
 
-// cmdPlanDigest replaces applier/plan-digest: read a `tofu show -json` plan
+// cmdPlanDigest is the digest as a command: read a `tofu show -json` plan
 // from stdin, print its digest to stdout with no trailing newline (§4.9,
 // TestPlanDigestReadsStdinAndWritesNoTrailingNewline), exit 0. Any error in
 // reading stdin or computing the digest is a refusal: exit 1, message on

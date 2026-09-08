@@ -1,7 +1,7 @@
 // Package secrets is the applier's read path for credentials: files rendered
-// under a mount (Dir, unchanged from secret_field/secret_field_if_present),
-// and the daily expiry sweep that used to shell out to `op` and now speaks
-// Vault KV v2 directly over net/http (decision 4, docs/port-plan.md §4.7).
+// under a mount (Dir), and the daily expiry sweep, which speaks Vault KV v2
+// directly over net/http rather than shelling out to the `op` CLI
+// (decision 4, §4.7).
 //
 // Two things this package is deliberately NOT. It is not a Vault client:
 // Store can only list item names and read one metadata field, never a

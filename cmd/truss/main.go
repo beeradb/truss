@@ -1,5 +1,5 @@
 // Command truss composes the internal/ packages into the applier CLI
-// described in docs/port-plan.md §4.9. It is deliberately thin: every real
+// described in §4.9. It is deliberately thin: every real
 // decision lives in internal/config, internal/gates, internal/plan,
 // internal/forge, internal/ledger, internal/secrets and internal/notify;
 // this file and its siblings in package main only wire them together and

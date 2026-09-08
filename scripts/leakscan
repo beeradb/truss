@@ -2,11 +2,11 @@
 # Refuses to let anything identifying the author's own deployment reach this
 # repository.
 #
-# ⚠️ THIS REPOSITORY IS WRITTEN TO BE PUBLIC, AND IS PORTED FROM A PRIVATE
-# ONE. That is the whole risk: the reference implementation is a live
-# platform with real account ids, bucket names, hostnames and vault names in
-# it, and porting is a copying exercise. A grep is cheap; noticing an account
-# id in a commit six months later is not.
+# ⚠️ THIS REPOSITORY IS WRITTEN TO BE PUBLIC, AND THE DEPLOYMENT IT MANAGES
+# IS NOT. That is the whole risk: the thing this code runs against is a live
+# platform with real account ids, bucket names, hostnames and vault names,
+# and every one of those is one paste away from a commit here. A grep is
+# cheap; noticing an account id in a commit six months later is not.
 #
 # It scans for CLASSES of thing, not a list of the author's secrets -- a
 # denylist of real values would itself be the leak.
@@ -85,7 +85,7 @@ scan '\b[A-Za-z0-9-]+\.(com|net|org|io|dev|pw)\b/[A-Za-z0-9._/-]+' \
 # document that integrates with them has to be able to say so. What identifies
 # a deployment is a reference INTO a store: `op://<vault>/<item>`, a bucket
 # URI, an account id. Those stay. Measured 2026-09-08: the bare vendor name
-# refused docs/port-plan.md for naming the product it ports away from.
+# refused a design document for naming the product it integrates with.
 scan '\b(op://|cloudflare account|gs://|s3://)' \
      'a reference to a concrete store or account'
 

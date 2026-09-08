@@ -19,7 +19,9 @@ type Expiring struct {
 // Sweep is one daily pass over every configured Store and Probe.
 type Sweep struct {
 	// Stores are swept in order; the same item title in two mounts is
-	// reported twice (the bash does not dedupe).
+	// reported twice, and deliberately not deduped -- a title is only
+	// unique within a mount, so two mounts sharing one hold two different
+	// credentials and merging them would hide whichever expires first.
 	Stores []Store
 	// Probes maps an item name to the issuer that answers for it directly.
 	// A probed item's name is never read out of a Store's metadata (§4.7:
@@ -158,9 +160,8 @@ func daysBetween(now, target time.Time) int {
 
 // DaysUntil parses raw as an RFC3339 instant or a bare "2006-01-02" date
 // and returns the whole number of days from now to it, truncated toward
-// zero to match the bash's `$(( (target - now) / 86400 ))` (bash and Go
-// integer division both truncate toward zero, so a date twelve hours past
-// reads 0, not -1). ok is false when raw parses as neither shape.
+// zero -- Go's integer division truncates, so a date twelve hours past
+// reads 0, not -1. ok is false when raw parses as neither shape.
 func DaysUntil(now time.Time, raw string) (days int, ok bool) {
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
 		return daysBetween(now, t), true

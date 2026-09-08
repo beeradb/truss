@@ -19,10 +19,9 @@ func testJournal(t *testing.T) (*Journal, *fakeBucket, func()) {
 	return j, fb, srv.Close
 }
 
-// TestFailedRecordIsReasonThenAt: ledger_put_failed builds its object with
-// jq -n --arg reason ... --arg at ... '{reason:$reason, at:$at}'
-// (apply.sh:358) -- reason first, at second, and that is a byte-order claim
-// about the object, not just a claim about which fields exist.
+// TestFailedRecordIsReasonThenAt: a failed record's object is reason first,
+// at second, and that is a byte-order claim about the object, not just a
+// claim about which fields exist.
 func TestFailedRecordIsReasonThenAt(t *testing.T) {
 	j, fb, closeSrv := testJournal(t)
 	defer closeSrv()
@@ -80,11 +79,11 @@ func TestFailedRecordTrimsTheReasonItself(t *testing.T) {
 	}
 }
 
-// TestHeartbeatFieldOrderIsStable: write_heartbeat's jq object is built
-// time, last_sha, applied, noop, failure, rotation, drift, expiring, in
-// that order (apply.sh:399-405). Go's encoding/json marshals struct fields
-// in declaration order, so this is really a claim about Heartbeat's field
-// order, checked against the bytes it actually produces.
+// TestHeartbeatFieldOrderIsStable: the heartbeat object is time, last_sha,
+// applied, noop, failure, rotation, drift, expiring, in that order. Go's
+// encoding/json marshals struct fields in declaration order, so this is
+// really a claim about Heartbeat's field order, checked against the bytes it
+// actually produces.
 func TestHeartbeatFieldOrderIsStable(t *testing.T) {
 	failure := "boom"
 	days := 23
@@ -131,9 +130,9 @@ func TestHeartbeatFailureIsNullWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestAppliedRecordForANoopIsExactlyNoopTrue: apply.sh:773,
-// ledger_put_applied "$sha" '{"noop":true}' -- exact bytes, nothing else in
-// the object.
+// TestAppliedRecordForANoopIsExactlyNoopTrue: a commit that touched no root
+// is recorded as {"noop":true} -- exact bytes, nothing else in the
+// object.
 func TestAppliedRecordForANoopIsExactlyNoopTrue(t *testing.T) {
 	j, fb, closeSrv := testJournal(t)
 	defer closeSrv()
@@ -146,10 +145,10 @@ func TestAppliedRecordForANoopIsExactlyNoopTrue(t *testing.T) {
 	}
 }
 
-// TestAppliedRecordSortsRootsForDeterminism: the bash iterates a bash
-// associative array whose order is unspecified (§3.4); nothing hashes this
-// object, so the Go port sorts instead, deterministically, which is a
-// documented divergence and not a bug.
+// TestAppliedRecordSortsRootsForDeterminism: nothing hashes this object, so
+// its key order is free -- and a sorted, deterministic order is what makes
+// two applied records for the same set of roots comparable by eye and by
+// diff (§3.4).
 func TestAppliedRecordSortsRootsForDeterminism(t *testing.T) {
 	j, fb, closeSrv := testJournal(t)
 	defer closeSrv()
@@ -201,9 +200,9 @@ func TestAdvanceHeadThenHeadRoundTrips(t *testing.T) {
 	}
 }
 
-// An absent HEAD is ErrNotFound -- apply.sh:368-369 refuses to start rather
-// than guess one, and "absent" is exactly what ErrNotFound has to mean for
-// that refusal to be reachable from Go.
+// An absent HEAD is ErrNotFound -- the applier refuses to start rather than
+// guess one, and "absent" is exactly what ErrNotFound has to mean for that
+// refusal to be reachable.
 func TestHeadOfAnEmptyLedgerIsErrNotFound(t *testing.T) {
 	j, _, closeSrv := testJournal(t)
 	defer closeSrv()
@@ -215,9 +214,8 @@ func TestHeadOfAnEmptyLedgerIsErrNotFound(t *testing.T) {
 }
 
 // ApprovedDigest of a sha/root with no recorded digest is ErrNotFound --
-// verify_plan_digest's "no approved plan recorded" refusal (apply.sh:640)
-// is the caller's decision to make from this, not something Journal
-// papers over.
+// the "no approved plan recorded" refusal is the caller's decision to make
+// from this, not something Journal papers over.
 func TestApprovedDigestOfAnUnrecordedRootIsErrNotFound(t *testing.T) {
 	j, _, closeSrv := testJournal(t)
 	defer closeSrv()
@@ -228,14 +226,13 @@ func TestApprovedDigestOfAnUnrecordedRootIsErrNotFound(t *testing.T) {
 	}
 }
 
-// TestExpiringMatchesTheBashHeartbeatSchema pins the field names and JSON
-// types write_heartbeat (apply.sh:730-732) emits. The Go port shipped
-// {"name":…,"expires":"in 5d"} against the bash's
+// TestExpiringMatchesTheHeartbeatSchema pins the field names and JSON types
+// the heartbeat's expiring array is published with. It once shipped
+// {"name":…,"expires":"in 5d"} against the contracted
 // {"name":…,"days_left":<number|null>} -- the field renamed and the number
-// stringified, which breaks any consumer and specifically defeats §5's plan
-// to validate the rollout by diffing a bash heartbeat against a Go one.
-// Found by the 2026-09-08 code audit.
-func TestExpiringMatchesTheBashHeartbeatSchema(t *testing.T) {
+// stringified, which breaks any consumer and makes two heartbeats
+// undiffable. Found by the 2026-09-08 code audit.
+func TestExpiringMatchesTheHeartbeatSchema(t *testing.T) {
 	days := 5
 	body, err := json.Marshal([]Expiring{
 		{Name: "cf-infra-admin", DaysLeft: &days},

@@ -2,9 +2,10 @@
 //
 // Every refusal in the system lives here, and nothing here performs I/O: each
 // gate is a pure function over state somebody else fetched. That is the whole
-// point of the package. In the shell version these decisions were interleaved
-// with the `gh` calls that fed them, so the only way to test "an approval on
-// an earlier push does not count" was to drive the entire script against stub
+// point of the package. Interleave these decisions with the API calls that
+// feed them -- the obvious arrangement, since each refusal needs data only
+// the previous call can supply -- and the only way to test "an approval on
+// an earlier push does not count" is to drive the whole applier against stub
 // binaries and read a ledger object afterwards. Here it is a function call.
 package gates
 
@@ -16,11 +17,11 @@ import (
 // Protection is main's branch protection, as the forge reports it.
 //
 // ⚠️ Pointers, not bools. A missing key and an explicit false are different
-// facts about a repository, and treating them alike is how this went wrong in
-// the shell version: `jq '.allow_force_pushes.enabled // true'` replaced a
-// COMPLIANT false with a non-compliant true, because `//` fires on false as
-// readily as on null. Absent must be its own case and must never read as
-// compliant.
+// facts about a repository, and collapsing them is how this goes wrong: a
+// default applied with "use true when this is unset" replaces a COMPLIANT
+// false with a non-compliant true, because that kind of default usually
+// fires on false as readily as on null. Absent must be its own case and must
+// never read as compliant.
 type Protection struct {
 	RequiredApprovals     *int
 	RequireCodeOwners     *bool
@@ -105,7 +106,7 @@ func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []str
 	}
 	// ⚠️ Absent must be its own case, same as everywhere else in this file:
 	// an empty MergeCommitSHA is not "no opinion", it is "unmerged, or
-	// unreadable", and apply.sh:529 refuses it unconditionally.
+	// unreadable", and both are refused unconditionally.
 	if pr.MergeCommitSHA == "" {
 		problems = append(problems, fmt.Sprintf("PR #%d has no merge commit recorded", pr.Number))
 	} else if pr.MergeCommitSHA != sha {
@@ -131,9 +132,9 @@ func CheckApproval(pr PullRequest, reviews []Review, approver, sha string) []str
 	// protection would block that merge, but this gate exists precisely
 	// because it does not take the merge's legitimacy on trust.
 	//
-	// ⚠️ This is a DELIBERATE DIVERGENCE from apply.sh:358, which counts
-	// APPROVED reviews and never looks at CHANGES_REQUESTED. Recorded in
-	// internal/parity as intended. Raised by the 2026-09-08 security review.
+	// ⚠️ So CHANGES_REQUESTED and DISMISSED are read as well as APPROVED,
+	// and that is deliberate: a gate that only counts APPROVED cannot see a
+	// withdrawal. Raised by the 2026-09-08 security review.
 	approved := false
 	for _, r := range reviews {
 		if r.User != approver || r.CommitID != pr.HeadSHA {
@@ -199,12 +200,12 @@ func CheckMergeCommit(c Commit) []string {
 // MATCH", and this used to fall through to the mismatch branch and print
 // "(approved , ours <digest>): the world moved between review and apply" --
 // a sentence describing a race that did not happen, with a blank where a
-// digest should be. apply.sh:462 tests `[ -z "$theirs" ]` for exactly this.
-// Both outcomes are a refusal, so nothing was ever unsafe; what was wrong
-// was telling the operator the wrong story about why. The comment here
-// previously called an empty recorded digest "impossible in practice",
-// which is the kind of claim that stops anyone handling it -- the reference
-// suite has a test for it. Found by internal/parity, 2026-09-08.
+// digest should be. An empty recorded digest is its own case and is tested
+// as one. Both outcomes are a refusal, so nothing was ever unsafe; what was
+// wrong was telling the operator the wrong story about why. The comment here
+// previously called an empty recorded digest "impossible in practice", which
+// is the kind of claim that stops anyone from handling it. Found by the
+// 2026-09-08 code audit.
 //
 // The credentials root is the one exemption (631, and §2.10): CI never
 // plans it, so there is never anything to compare against.
@@ -221,10 +222,10 @@ func CheckPlanDigest(root, headSHA, key, mine string, approved string, approvedF
 	if mine != approved {
 		problems = append(problems,
 			// The key is deliberately NOT named here, only in the
-			// unreviewed branch above -- which is where apply.sh:462 names
-			// it. A mismatch already prints both digests, and the key is
-			// derivable from the root and the sha; adding it would be a
-			// divergence in alert text that nobody asked for.
+			// unreviewed branch above, where the key IS the thing to go and
+			// look at. A mismatch already prints both digests, and the key is
+			// derivable from the root and the sha; adding it would be noise
+			// in an alert that already says everything it needs to.
 			fmt.Sprintf("the plan for %s does not match the one approved at %s (approved %s, ours %s): the world moved between review and apply", root, short(headSHA), approved, mine))
 	}
 	return problems

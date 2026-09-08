@@ -10,8 +10,8 @@ import (
 	"github.com/beeradb/truss/internal/gates"
 )
 
-// cmdGate dispatches `gate protection` and `gate commit <sha>`, replacing
-// check_branch_protection and validate_pr + verify_github_merge_commit
+// cmdGate dispatches `gate protection` and `gate commit <sha>`, exposing
+// the branch-protection gate and the PR/merge-commit gates as commands
 // (§4.9). Exit codes: 0 pass, 1 refuse with the reason on stdout, 2
 // could-not-ask -- the three must never collapse into two, because a
 // compromised or broken checker must not be able to look like either a pass
@@ -77,8 +77,8 @@ func cmdGate(ctx context.Context, args []string, getenv func(string) string, std
 	}
 }
 
-// checkCommitGate is validate_pr and verify_github_merge_commit fused into
-// one call, shared by `truss gate commit` and the apply pass's own loop.
+// checkCommitGate is the PR gate and the merge-commit gate fused into one
+// call, shared by `truss gate commit` and the apply pass's own loop.
 //
 // It returns exactly one of: a non-nil ioErr (a forge call failed -- "could
 // not ask"), a non-empty reason (a gate refused the commit), or both empty

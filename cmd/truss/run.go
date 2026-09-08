@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// subcommands is the documented set from docs/port-plan.md §4.9, exactly.
+// subcommands is the documented set from §4.9, exactly.
 // TestSubcommandsAreExactlyTheDocumentedSet reads this slice directly rather
 // than re-deriving it, so adding a subcommand here is the one place that
 // needs to change for that test to see it.

@@ -171,9 +171,11 @@ type jwtPayload struct {
 
 func base64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// signAppJWT builds the RS256 App JWT gh-app-token:28-32 specifies: iat
-// backdated 60s for clock skew, exp ten minutes out (540s, matching the
-// bash's own arithmetic exactly rather than rounding to "ten minutes").
+// signAppJWT builds the RS256 App JWT GitHub's App API expects: iat
+// backdated 60s for clock skew, exp 540s ahead -- so iat to exp spans
+// exactly the ten minutes GitHub allows, and no more. 540 is not a rounding
+// of 600 and must not be "corrected" into one, which would put the span over
+// the maximum and get every JWT rejected.
 func (c *Client) signAppJWT(now time.Time) (string, error) {
 	header, err := json.Marshal(jwtHeader{Alg: "RS256", Typ: "JWT"})
 	if err != nil {
@@ -206,8 +208,8 @@ type installTokenResponse struct {
 // mintInstallationToken always performs a fresh POST -- it never reads or
 // writes the cache. InstallationToken and the internal cachedToken helper
 // each call this for a different reason: one for a caller that explicitly
-// wants a current token (mirroring the gh-app-token binary), the other only
-// when the cache is empty or nearly expired.
+// asked for a current token, the other only when the cache is empty or
+// nearly expired.
 func (c *Client) mintInstallationToken(ctx context.Context) (string, time.Time, error) {
 	jwt, err := c.signAppJWT(time.Now())
 	if err != nil {
@@ -261,8 +263,8 @@ func (c *Client) mintInstallationToken(ctx context.Context) (string, time.Time, 
 }
 
 // InstallationToken mints a fresh installation token and returns it with its
-// expiry. It is what `truss token` (replacing gh-app-token) calls, and it
-// always performs a real mint -- it is the source of truth the internal
+// expiry. It is what `truss token` calls, and it always performs a real
+// mint -- it is the source of truth the internal
 // cache below refreshes from, never the other way around.
 func (c *Client) InstallationToken(ctx context.Context) (string, time.Time, error) {
 	return c.mintInstallationToken(ctx)

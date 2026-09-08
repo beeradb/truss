@@ -482,16 +482,17 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestAFailureReasonIsNotATranscript guards the security property
-// apply.sh:170-180 records under its own "Security review, 2026-09-07", and
-// that this port reintroduced: the error wrapExecError returns becomes the
-// pass's failure reason, which is written to a ledger object anyone holding
-// the bucket credential can read AND sent to a Telegram chat.
+// TestAFailureReasonIsNotATranscript guards the security property the
+// security review of 2026-09-07 established, and that was undone once
+// afterwards: the error wrapExecError returns becomes the pass's failure
+// reason, which is written to a ledger object anyone holding the bucket
+// credential can read AND sent to a Telegram chat.
 //
 // A provider makes no promise about what it prints in an error -- a request
 // body, a resource attribute, a token. OpenTofu redacts what it knows to be
-// sensitive and nothing more. Found again by internal/parity on 2026-09-08,
-// which printed it as a diff against the bash.
+// sensitive and nothing more. This test exists because the property is
+// invisible in ordinary use: a transcript in the reason looks like helpful
+// detail right up until the day it carries a credential.
 func TestAFailureReasonIsNotATranscript(t *testing.T) {
 	const marker = "SENSITIVE-PROVIDER-OUTPUT-MARKER"
 

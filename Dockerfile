@@ -5,10 +5,11 @@
 # deployment's own image name in a repository written to be public, and
 # scripts/leakscan refuses exactly that. The caller supplies it.
 #
-# ⚠️ AND FOR A PARITY SHADOW THE BASE SHOULD BE THE BASH APPLIER'S OWN IMAGE.
-# The point of running truss beside apply.sh is to change ONE variable. Build
-# truss on a different base and a divergence could be either implementation or
-# a different tofu build, which is the question the shadow exists to answer.
+# ⚠️ AND THE BASE SHOULD BE THE IMAGE THE DEPLOYMENT ALREADY RUNS. `tofu` and
+# `git` are the two things truss's behaviour is decided by, and both come from
+# the base. Build on a different base and a change in what an apply does could
+# be truss or could be a different tofu build, with nothing on hand to say
+# which.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 

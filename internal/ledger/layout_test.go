@@ -12,11 +12,12 @@ func testLayout() Layout {
 	}
 }
 
-// TestKeyLayoutMatchesTheBash: <applied>/<sha> and <failed>/<sha>, exactly
-// (apply.sh ledger_put_applied:334, ledger_put_failed:356-359); HeadKey and
-// HeartbeatKey are used verbatim, with no prefix joined on, matching
-// LEDGER_HEAD_KEY and HEARTBEAT_KEY being complete keys in apply.sh.
-func TestKeyLayoutMatchesTheBash(t *testing.T) {
+// TestKeyLayoutJoinsPrefixesButUsesSingletonKeysVerbatim: the per-commit
+// records are <applied>/<sha> and <failed>/<sha>, exactly; HeadKey and
+// HeartbeatKey are used verbatim with no prefix joined on, because they are
+// configured as COMPLETE keys rather than as prefixes -- there is only ever
+// one of each, so there is nothing to key them by.
+func TestKeyLayoutJoinsPrefixesButUsesSingletonKeysVerbatim(t *testing.T) {
 	l := testLayout()
 
 	if got, want := l.AppliedKey("headsha1"), "applier/applied/headsha1"; got != want {
@@ -33,10 +34,11 @@ func TestKeyLayoutMatchesTheBash(t *testing.T) {
 	}
 }
 
-// TestDigestKeySlugReplacesEverySlash: apply.sh:637 pipes the root through
-// `tr / -`, which replaces every "/" in the string, not just the first --
-// so a nested root like "projects/recipes" must slug to "projects-recipes"
-// and a deeper one to as many hyphens as it had slashes.
+// TestDigestKeySlugReplacesEverySlash: the slug replaces every "/" in the
+// root, not just the first -- so a nested root like "projects/recipes" must
+// slug to "projects-recipes" and a deeper one to as many hyphens as it had
+// slashes. Stopping at the first would collide two distinct roots onto one
+// digest key.
 func TestDigestKeySlugReplacesEverySlash(t *testing.T) {
 	l := testLayout()
 

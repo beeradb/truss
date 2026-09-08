@@ -41,9 +41,10 @@ type Config struct {
 
 	// Region is the string signed into the SigV4 credential scope. Left
 	// empty, it defaults to "us-east-1" -- not a real location, but
-	// botocore's own fallback: nothing in the reference bash ever set
-	// AWS_REGION, so every working production request was signed with
-	// whatever botocore defaults to, which is this. Google's S3-compatible
+	// the fallback every S3 client uses when nothing sets a region. Nothing
+	// has ever set AWS_REGION against this bucket, so every working
+	// production request was signed with that default, which is this.
+	// Google's S3-compatible
 	// API does not read the region to route the request, but the signature
 	// covers the string, so changing it is changing what byte sequence gets
 	// signed -- it would invalidate every request against the real bucket,

@@ -78,12 +78,11 @@ func toNotifyExpiring(in []secrets.Expiring) []notify.Expiring {
 	return out
 }
 
-// cmdNotify replaces send_telegram (§4.9): read a Report as JSON on stdin,
-// compose the single-line status text, send it. A send failure is
-// non-fatal in the reference bash (`|| echo "telegram send failed
-// (non-fatal)" >&2`) and stays that way here: the message goes to stderr,
-// but this subcommand still exits 0, because nothing about a failed alert
-// changes whether the run it describes succeeded.
+// cmdNotify is the alert as a command (§4.9): read a Report as JSON on
+// stdin, compose the single-line status text, send it. A send failure is
+// non-fatal: the message goes to stderr, but this subcommand still exits 0,
+// because nothing about a failed alert changes whether the run it describes
+// succeeded.
 func cmdNotify(ctx context.Context, args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "usage: truss notify < report.json")

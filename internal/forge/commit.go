@@ -35,9 +35,9 @@ func (w wireCommitDetail) toGates() gates.Commit {
 	return c
 }
 
-// Commit reads one commit's detail -- the endpoint verify_github_merge_commit
-// (apply.sh:545) reads `.commit.verification.verified` and `.committer.login`
-// from.
+// Commit reads one commit's detail -- the endpoint that carries
+// `.commit.verification.verified` and `.committer.login`, which are what the
+// merge-commit gate decides on.
 func (c *Client) Commit(ctx context.Context, sha string) (gates.Commit, error) {
 	path := c.repoPath("/commits/%s", url.PathEscape(sha))
 	var w wireCommitDetail

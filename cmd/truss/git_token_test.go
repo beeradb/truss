@@ -85,8 +85,8 @@ func TestEveryGitCallCarriesTheInstallationToken(t *testing.T) {
 	}
 
 	// The credential travels in the environment only -- never argv, never a
-	// URL, and never `git config`-ed into the clone, which would put it on
-	// disk (the leak the port removed by taking it out of remote.origin.url).
+	// URL, and never `git config`-ed into the clone, all three of which
+	// would leave it on disk or in a process listing.
 	for _, b := range blocks {
 		args := strings.SplitN(b, "\n", 2)[0]
 		if strings.Contains(args, authMarker) {
@@ -174,10 +174,10 @@ func TestNoHTTPClientIsUnbounded(t *testing.T) {
 // to git, and git's option surface is large.
 //
 // ⚠️ It refuses what is DANGEROUS, not what is unfamiliar. §4.4's literal
-// "full hex sha or origin/<branch>" was implemented first and broke
-// internal/parity, whose recorded corpus carries the bash suite's own
-// synthetic refs. A ref that is merely not a sha cannot do harm; one that
-// begins with "-" or carries whitespace can.
+// "full hex sha or origin/<branch>" was implemented first and refused the
+// synthetic refs the tests themselves are built on. A ref that is merely not
+// a sha cannot do harm; one that begins with "-" or carries whitespace
+// can.
 func TestGitRefusesARefItShouldNotPass(t *testing.T) {
 	bin, envLog := stubGit(t)
 	g := execGit{Bin: bin, Dir: t.TempDir()}
