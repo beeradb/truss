@@ -109,6 +109,14 @@ constant. The nag itself stays daily regardless of the window's width —
 a hand-made credential lapsing takes the applier down with it, and a warning
 sent once is a warning sent while somebody was asleep.
 
+⚠️ **The sweep runs on the daily pass, and the reason is a rate limit rather
+than tidiness.** An expiry date does not move between fifteen-minute ticks, so
+sweeping on every pass asks the secret store the same question 288 times a day
+— and on 2026-09-07 that was most of what exhausted the service account's
+hourly allowance. Backoff does not fix a budget that is structurally too small;
+asking less often does. Daily is also the cadence the answer is acted on: the
+alert it feeds goes out once a day.
+
 `never` skips the watch entirely, and it should be rare. The knob changes how
 much notice you get; it doesn't change the recommendation. Most hand-made
 credentials aren't the kind that should genuinely outlive every renewal
