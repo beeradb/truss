@@ -365,26 +365,8 @@ var Divergences = []Divergence{
 			"internal/plan/runner_test.go TestAFailureReasonIsNotATranscript",
 	},
 	{
-		ID:     "ROTATION-FAILURE-NOT-LEDGERED",
-		Status: StatusFinding,
-		Scenarios: []string{
-			"test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
-			"test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
-			"test_tofu_apply_failure_stops_the_pass_and_leaves_later_commit_unapplied",
-		},
-		Kind:   "missing-key",
-		Accept: func(d Diff) bool { return strings.HasSuffix(d.Key, "/rotation-<ts>") },
-		Bash:   "files the rotation failure at failed/rotation-<UTC timestamp>, under its own key",
-		Truss:  "writes no ledger object for it at all",
-		Why: "rotate_credentials calls ledger_put_failed with its own key precisely so a rotation failure is not " +
-			"filed against a commit that did not cause it, and so it survives in the ledger after the heartbeat " +
-			"has been overwritten by the next pass five minutes later. runRotation returns its error and nothing " +
-			"writes it. The heartbeat still carries it, so the loss is the durable record, not the alarm.",
-		Ref: "applier/apply.sh:697 (ledger_put_failed \"rotation-…\"); cmd/truss/apply_cmd.go runRotation",
-	},
-	{
 		ID:     "FAILURE-PRECEDENCE-COMMIT-BEFORE-ROTATION",
-		Status: StatusFinding,
+		Status: StatusIntended,
 		Scenarios: []string{
 			"test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
 			"test_tofu_apply_failure_stops_the_pass_and_leaves_later_commit_unapplied",
@@ -392,11 +374,12 @@ var Divergences = []Divergence{
 		Accept: firstFailureWins,
 		Bash:   "the rotation failure overwrites the commit's, so the alert names rotation and not the commit that failed",
 		Truss:  "the commit's failure is kept and rotation's is reported only in the rotation summary",
-		Why: "The bash assigns `failure=` unconditionally in rotate_credentials, which clobbers whatever the " +
-			"commit loop set; truss guards it with `failure == \"\"`. Truss's behaviour is BETTER -- the commit " +
-			"failure is the one somebody has to act on, and the bash's alert hides it -- but it is a behaviour " +
-			"change that §3 does not list, and §5.5 asks for equal alert text. Recorded as a finding rather " +
-			"than an approval so the owner decides, not this file.",
+		Why: "RATIFIED BY THE OWNER 2026-09-08, having been raised as a finding rather than assumed. The bash " +
+			"assigns `failure=` unconditionally in rotate_credentials, clobbering whatever the commit loop set; " +
+			"truss guards it with `failure == \"\"`. The commit failure is the one somebody has to act on, and " +
+			"the bash's alert hides it behind a rotation failure that is usually a consequence of the same broken " +
+			"root. Note this is precedence only: rotation's failure is not lost, it is in the rotation summary in " +
+			"the heartbeat AND now in its own failed/rotation-<ts> record.",
 		Ref: "applier/apply.sh:698 vs cmd/truss/apply_cmd.go's `if rotErr != nil && failure == \"\"`",
 	},
 	{

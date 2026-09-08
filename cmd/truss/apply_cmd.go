@@ -228,8 +228,36 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		summary, changes, rotErr := runRotation(ctx, d, last, credentialsAppliedAt)
 		rotationSummary = summary
 		rotatedChanges = changes
-		if rotErr != nil && failure == "" {
-			failure = fmt.Sprintf("rotation of credentials at %s: %v", last, rotErr)
+		if rotErr != nil {
+			reason := fmt.Sprintf("rotation of credentials at %s: %v", last, rotErr)
+
+			// ⚠️ FILED UNDER ITS OWN KEY, AND THIS WAS MISSING ENTIRELY.
+			// apply.sh:697 writes failed/rotation-<UTC timestamp>. The key
+			// is deliberately not a commit sha: rotation is not caused by
+			// any particular commit, so filing it against one would blame a
+			// commit that did nothing wrong. And it must be durable --
+			// the heartbeat carries the same reason but is overwritten five
+			// minutes later, so without this the only record of a failed
+			// rotation is a Telegram message and a pod log that expires.
+			// Found by internal/parity on 2026-09-08.
+			//
+			// Best-effort, like every other ledger write on the failure
+			// path: a bucket that cannot be written must not stop the alert,
+			// which is the channel that still reaches somebody when the
+			// ledger itself is what broke.
+			//
+			// The record carries rotation's OWN error, not the prefixed
+			// sentence: apply.sh:697 files "$out" and apply.sh:698 adds the
+			// "rotation of credentials at <sha>:" prefix only to the failure
+			// that becomes the alert. The key already says it was rotation.
+			rotKey := "rotation-" + d.now().UTC().Format("20060102T150405Z")
+			if err := d.Journal.PutFailed(ctx, rotKey, rotErr.Error()); err != nil {
+				fmt.Fprintf(d.Stderr, "truss: could not file %s: %v\n", rotKey, err)
+			}
+
+			if failure == "" {
+				failure = reason
+			}
 		}
 	}
 
