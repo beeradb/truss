@@ -69,20 +69,15 @@ sequenceDiagram
     CI->>GH: comment the diff, and set the plan check green
     U->>GH: read the diff, APPROVE (code owner), merge
     loop every pass
-        AP->>GH: read main HEAD, branch protection, PR, reviews
-        AP->>AP: all gates must pass, else alert and stop
-        AP->>V: read root-tier credentials
-        AP->>Cloud: per touched root: plan -out
-        AP->>ST: compare its digest with the one CI filed — refuse on any difference
-        AP->>Cloud: apply exactly the plan it just made
-        AP->>V: re-plan the credentials root at the applied commit (rotation)
-        AP->>ST: applied/<sha>, applied/HEAD, heartbeat
-        AP-->>U: alert (success AND "nothing to do")
+        AP->>GH: read branch protection, then gate every new commit on main
+        AP->>Cloud: plan each commit's roots, verify the digest, apply — see "The gates" below
+        AP->>V: re-plan the credentials root (rotation, if due) · sweep every credential's expiry
+        AP->>ST: record what happened, write the heartbeat
+        AP-->>U: alert — success, a refusal, or "nothing to do"
     end
     loop once a day
         AP->>Cloud: plan EVERY root, apply nothing (drift)
-        AP->>V: how long has every credential left
-        AP-->>U: which roots differ from the code, what expires soon
+        AP-->>U: which roots differ from the code
     end
 ```
 
@@ -130,26 +125,30 @@ it before it takes down your infrastructure.
 
 ```mermaid
 flowchart TD
-    S([tick]) --> L{applied/HEAD in the ledger?}
-    L -- no --> X0[REFUSE: bootstrap writes it,<br/>it is never guessed]
-    L -- yes --> P{branch protection on main<br/>still exactly as required?}
-    P -- no --> X1[REFUSE ALL + alert:<br/>protection weakened]
-    P -- yes --> H{commits on main<br/>past applied/HEAD?}
-    H -- none --> RT
-    H -- some --> M{each is a merge commit<br/>made by the forge,<br/>first-parent on main?}
-    M -- no --> X2[REFUSE + alert:<br/>not a forge merge]
-    M -- yes --> O{exactly one merged PR<br/>for this commit?}
-    O -- no --> X3[REFUSE + alert]
-    O -- yes --> R{APPROVED review by the approver<br/>at pr.head.sha?}
-    R -- no --> X4[REFUSE + alert:<br/>approval missing or stale]
-    R -- yes --> A[checkout head sha ·<br/>per touched root, in order:<br/>plan -out]
-    A --> D{digest matches the plan<br/>CI filed for that sha?}
-    D -- no --> X5[REFUSE + alert:<br/>not the plan anyone approved]
-    D -- yes --> AY[apply exactly that plan]
-    AY -- ok --> LG[applied/&lt;sha&gt;, applied/HEAD] --> RT
-    AY -- fails --> FL[failed/&lt;sha&gt; · queue STOPS,<br/>never skips forward; alert]
-    RT[re-plan credentials at HEAD:<br/>rotation if a boundary passed] --> LT[check every credential's<br/>lifetime] --> HB[heartbeat + alert] --> E([done])
+    T([tick]) --> H0{applied/HEAD<br/>in the ledger?}
+    H0 -- no --> BOOT[refuse to start:<br/>bootstrap writes this, it's never guessed]
+    H0 -- yes --> P{branch protection on main<br/>still exactly as required?}
+    P -- no --> TAIL
+    P -- yes --> C{a new commit<br/>on main?}
+    C -- no --> ROT
+    C -- yes --> N{touches a root?}
+    N -- no --> ADV[record noop,<br/>advance HEAD] --> C
+    N -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
+    G1 -- fails any of those --> STOP[stop the queue here:<br/>refuse this commit, alert]
+    G1 -- passes --> PL[plan every root it touched]
+    PL --> G2{each plan's digest matches<br/>what CI filed<br/>credentials root is exempt}
+    G2 -- no --> STOP
+    G2 -- yes --> AP2[apply · record applied,<br/>advance HEAD] --> C
+    STOP --> ROT
+    ROT[re-plan credentials at HEAD,<br/>rotate if a boundary passed<br/>skipped if protection failed] --> TAIL
+    TAIL[sweep every credential's expiry] --> HB[write the heartbeat,<br/>send the alert] --> E([done])
 ```
+
+Only the very first refusal is a true dead end — no ledger entry to start from
+means there's nothing yet to run a pass against. Every other outcome, whether
+a commit gets refused, fails to apply, or applies cleanly, reaches the same
+tail: the expiry sweep always runs, a heartbeat always gets written, and the
+alert always goes out. Stopping the queue is not the same as going quiet.
 
 One of those checks is whether the forge is still configured to require
 everything below. The applier reads the settings back from the API and

@@ -33,3 +33,9 @@
   reads more from the vault than the account is allowed per hour, retrying
   with backoff only spreads the failure out. Budget the reads, then set the
   cadence from the budget.
+- **There's no manual override for a stuck gate.** Flaky branch protection, a
+  legitimate emergency change that can't wait for review, a check refusing for
+  a reason that turns out to be wrong — today the only way through any of them
+  is fixing the actual condition the gate is checking. No escape hatch exists,
+  forced or otherwise. This is a known gap, not a design that's been thought
+  through yet.
