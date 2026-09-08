@@ -77,15 +77,23 @@ schedule, but a replaced token is dead the moment the apply runs, while CI and
 every pod still holding its predecessor keep using it for hours. The
 overlapping pair is what removes that window.
 
-Nothing decides "it is time": the applier **re-plans the credentials root at
-the end of every run, at the last applied commit**, and the plan is empty
-until the date crosses a generation boundary. On that day it mints the next
-generation, retires the one two back, repoints the items and rewrites CI's
-secrets — and applying it *is* the rotation. It runs whenever the
-branch-protection gate passed, even if a commit failed earlier in the pass,
-because a failed apply last Tuesday is not a reason for a 45-day window to
-close. It never runs at a commit the loop has not applied. A rotation failure
-is a failure: recorded in the ledger, non-zero exit, alert.
+Nothing decides "it is time": **the daily pass re-plans the credentials root at
+the last applied commit**, and the plan is empty until the date crosses a
+generation boundary. On that day it mints the next generation, retires the one
+two back, repoints the items and rewrites CI's secrets — and applying it *is*
+the rotation. It runs whenever the branch-protection gate passed, even if a
+commit failed earlier in the pass, because a failed apply last Tuesday is not a
+reason for a 45-day window to close. It never runs at a commit the loop has not
+applied. A rotation failure is a failure: recorded in the ledger, non-zero exit,
+alert.
+
+⚠️ **Daily, not on the frequent pass, and the difference is cost.** A 45-day
+boundary does not move between one fifteen-minute tick and the next, so
+re-planning `credentials/` on every pass spends a full plan run — and, before
+credentials arrived as files, three secret reads — to re-derive a date that has
+not changed. The frequent pass reports `{"skipped":"rotation runs on the daily
+pass"}` rather than staying silent about it, so a reader of one heartbeat can
+tell "not due yet" from "not checked here".
 
 The credential that applies everything is the one that most needs to rotate,
 so it is minted like the rest, and only the token that mints it is made by
@@ -147,8 +155,8 @@ state *is* the tokens. So what a human reviews here is the code diff itself,
 not a plan, and for a credential that costs nothing: a token resource's
 permissions sit right there in the HCL, the same thing a plan would have
 shown anyway. It's exempt from the digest gate for the same reason. And it's
-the one root the applier re-plans at the end of every run, so a rotation is
-never a change nobody signed off on.
+the one root the applier re-plans on every daily pass, so a rotation is never a
+change nobody signed off on.
 
 More generally: **what a root's state contains decides who may read it.** The
 other roots are forbidden, by a CI-enforced rule, from declaring any credential

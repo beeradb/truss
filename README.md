@@ -90,10 +90,13 @@ its predecessor dies, so nothing has to be restarted at the moment of a swap.
 At a 45-day period every token is at most 90 days old, and every consumer has
 45 days to pick up the new value on its own refresh.
 
-Nothing decides that it is time. The applier re-plans the credentials
-configuration at the end of every pass, and that plan is empty until the date
-crosses a generation boundary. On the day it does, applying it *is* the
-rotation.
+Nothing decides that it is time. Once a day the applier re-plans the
+credentials configuration, and that plan is empty until the date crosses a
+generation boundary. On the day it does, applying it *is* the rotation.
+
+Once a day rather than every pass, because re-planning a configuration is not
+free and a 45-day boundary does not need checking every fifteen minutes: that
+is a full plan run spent to re-derive a date that has not moved.
 
 What no API can mint, the applier **watches** instead. Every item carries a real
 expiry date, every pass reads all of them, and anything inside the warning
@@ -186,5 +189,7 @@ different bucket or a different repository is configuration, not a fork.
   what is explicitly out of scope.
 - [docs/credentials.md](docs/credentials.md) — how credentials are minted,
   rotated, and revoked.
+- [docs/operations.md](docs/operations.md) — what to actually do: the branch
+  protection toggle, an expiring credential, a leak, a drifted configuration.
 - [docs/development.md](docs/development.md) — repo layout, how to build it,
   and how to run the tests.
