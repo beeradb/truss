@@ -33,9 +33,16 @@
   reads more from the vault than the account is allowed per hour, retrying
   with backoff only spreads the failure out. Budget the reads, then set the
   cadence from the budget.
-- **There's no manual override for a stuck gate.** Flaky branch protection, a
-  legitimate emergency change that can't wait for review, a check refusing for
-  a reason that turns out to be wrong — today the only way through any of them
-  is fixing the actual condition the gate is checking. No escape hatch exists,
-  forced or otherwise. This is a known gap, not a design that's been thought
-  through yet.
+- **There's no override for a single stuck gate — only an all-or-nothing one.**
+  No gate can be waived, skipped or forced individually: a check refusing for a
+  reason that turns out to be wrong cannot be argued with. What exists instead
+  is turning protection off entirely, fixing the condition, and turning it back
+  on — `scripts/protection off` / `on`, described in
+  [docs/operations.md](operations.md).
+
+  That is a real escape hatch and it is deliberately a blunt one. It cannot be
+  aimed at one commit or one rule, it takes the whole repository out of
+  enforcement while it is open, and the applier refuses every commit and says
+  so in every alert for as long as it lasts. An operator with repository admin
+  can therefore always get unstuck, which is the point — and can never do it
+  quietly, which is the other point.
