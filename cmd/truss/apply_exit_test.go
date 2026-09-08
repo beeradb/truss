@@ -35,7 +35,7 @@ func TestApplyExitsNonZeroIfAndOnlyIfThereIsAFailure(t *testing.T) {
 		write(itemCFTokenMint, fieldCFCredential, "fake-mint-token")
 		fl.objects["head"] = []byte("headsha1")
 
-		vaultSrv := newFakeVault(t, "platform")
+		vaultSrv := productionShapedVault(t, "platform")
 		forgeSrv := newFakeForge(t, "irrelevant-sha", fakeForgeScenario{
 			Approver:   "alice",
 			Protection: map[string]any{}, // every key absent -- CheckProtection refuses all of them

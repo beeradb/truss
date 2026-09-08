@@ -40,6 +40,18 @@ type Report struct {
 	RotatedChanges int
 
 	Expiring []Expiring
+
+	// ExpiryUnavailable is why the expiry sweep could not report, when it
+	// could not. It is deliberately NOT a Failure: the sweep refuses to
+	// claim a clean bill it did not earn, and at cutover it cannot earn one
+	// because nothing seeds `expires` into Vault yet. Promoting that into
+	// Failure made every clean pass exit 1 and send FAILED, ~288 times a
+	// day -- an alert channel nobody reads is where a real digest-gate
+	// refusal goes to die, which is why both 2026-09-08 reviewers called
+	// this a security cost rather than noise. The reference bash never set
+	// failure for it either (check_credential_lifetimes is `|| true`
+	// throughout).
+	ExpiryUnavailable string
 }
 
 // Compose builds the exact text send_telegram (apply.sh:408-448) sends.
@@ -74,6 +86,9 @@ func Compose(r Report) string {
 	}
 	if len(r.Errored) > 0 {
 		text += "; drift UNKNOWN for: " + strings.Join(r.Errored, ", ")
+	}
+	if r.ExpiryUnavailable != "" {
+		text += "; EXPIRY NOT CHECKED: " + r.ExpiryUnavailable
 	}
 	if len(r.Expiring) > 0 {
 		names := make([]string, len(r.Expiring))

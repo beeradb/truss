@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -391,11 +392,18 @@ func compliantProtection() map[string]any {
 
 // --- fake Vault (KV v2) server --------------------------------------------
 
-// newFakeVault answers a Kubernetes-auth login and an empty LIST (Vault's
-// own way of saying "zero items" is a 404 on the metadata prefix, which
-// secrets.KV.List treats as (nil, nil) rather than an error) -- enough for
-// a hermetic, network-free expiry sweep in tests.
-func newFakeVault(t *testing.T, mount string) *httptest.Server {
+// newFakeVault answers a Kubernetes-auth login and a metadata LIST holding
+// `items`, each with the custom_metadata given (nil for "no expires
+// recorded", which is what production looks like today).
+//
+// ⚠️ THIS USED TO ANSWER THE LIST WITH A BARE 404 -- "zero items" -- AND
+// THAT IS WHY THE WHOLE SUITE WAS GREEN OVER A DEFECT THAT WOULD HAVE FIRED
+// ON EVERY PRODUCTION RUN. With zero items the sweep's `eligible > 0` alarm
+// is unreachable, so "clean pass exits 0" was only ever true of a vault
+// shaped unlike the real one. Found 2026-09-08 by the code audit, and it is
+// the repo's own rule: a fixture more forgiving than production invents
+// failures, one stricter hides them -- here, on a security alert path.
+func newFakeVault(t *testing.T, mount string, items map[string]map[string]string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/auth/kubernetes/login", func(w http.ResponseWriter, r *http.Request) {
@@ -405,11 +413,52 @@ func newFakeVault(t *testing.T, mount string) *httptest.Server {
 		})
 	})
 	mux.HandleFunc("/v1/"+mount+"/metadata", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound) // zero items
+		if len(items) == 0 {
+			// Vault's own way of saying "zero items".
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		keys := make([]string, 0, len(items))
+		for k := range items {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"keys": keys},
+		})
+	})
+	mux.HandleFunc("/v1/"+mount+"/metadata/", func(w http.ResponseWriter, r *http.Request) {
+		item := strings.TrimPrefix(r.URL.Path, "/v1/"+mount+"/metadata/")
+		cm, ok := items[item]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		custom := map[string]any{}
+		for k, v := range cm {
+			custom[k] = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"custom_metadata": custom},
+		})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// productionShapedVault is what the platform mount looks like TODAY: real
+// items, none of them carrying an `expires`. Tests that drive a whole pass
+// use this, so the sweep's alarm is reachable rather than designed away.
+func productionShapedVault(t *testing.T, mount string) *httptest.Server {
+	t.Helper()
+	return newFakeVault(t, mount, map[string]map[string]string{
+		"gcs-ledger":    nil,
+		"github-app":    nil,
+		"cf-token-mint": nil,
+	})
 }
 
 // testJWTFile writes a throwaway JWT-shaped file for secrets.KVConfig's

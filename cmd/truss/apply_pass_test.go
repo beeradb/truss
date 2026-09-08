@@ -30,7 +30,7 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 	write(itemTofuEncryption, fieldTofuPassphrase, "fake-passphrase")
 	write(itemCFInfraAdmin, fieldCFPassword, "fake-infra-tok")
 
-	vaultSrv := newFakeVault(t, "platform")
+	vaultSrv := productionShapedVault(t, "platform")
 
 	store, err := ledger.New(ledger.Config{
 		Endpoint:        fl.endpoint(),

@@ -234,17 +234,31 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// not -- check_credential_lifetimes is unconditional in the reference
 	// (apply.sh:834-847), because a hand-held credential lapsing takes the
 	// whole applier down regardless of what else happened this run.
-	var expiring []secrets.Expiring
-	findings, sweepErr := runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.now)
+	// §4.7, §2 item 16: the sweep never reports a clean bill it did not
+	// earn. Its problem is REPORTED, never swallowed as "nothing is
+	// expiring" -- but it does not set failure.
+	//
+	// ⚠️ IT USED TO SET failure, AND THAT WOULD HAVE MADE EVERY PRODUCTION
+	// PASS RED. Nothing seeds `expires` into Vault yet, so the sweep's
+	// "lists N items but not one records an expiry" fires on every run:
+	// exit 1 and a Telegram FAILED every five minutes, ~288 a day. Both
+	// 2026-09-08 reviewers called that a security cost rather than noise --
+	// an alert channel nobody reads is where a real digest-gate refusal goes
+	// to die -- and it also undid §2 item 7, because a contended pass
+	// correctly leaves failure empty and this then filled it in. The
+	// reference bash never set failure for it either.
+	//
+	// ⚠️ AND THE FINDINGS ARE TAKEN EVEN WHEN THE SWEEP ERRORED. Sweep.Run's
+	// contract (and TestAPartialSweepReturnsBothItsFindingsAndItsError) is
+	// that a caller gets BOTH; the Cloudflare probe runs first precisely so
+	// the hand-made mint token's expiry survives an unreadable mount, and
+	// the previous code then discarded it. That threw away the one
+	// credential whose lapse takes the applier down, exactly when the vault
+	// was misbehaving.
+	var expiryUnavailable string
+	expiring, sweepErr := runExpirySweep(ctx, d.Cfg, d.Dir, d.VaultConfig, d.now)
 	if sweepErr != nil {
-		// §4.7, §2 item 16: the sweep never reports a clean bill it did
-		// not earn, and its own failure is never swallowed as "nothing is
-		// expiring" -- it sets failure like any other refusal.
-		if failure == "" {
-			failure = fmt.Sprintf("credential expiry sweep: %v", sweepErr)
-		}
-	} else {
-		expiring = findings
+		expiryUnavailable = sweepErr.Error()
 	}
 
 	rotationJSON, _ := json.Marshal(rotationSummary)
@@ -272,17 +286,18 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	}
 
 	report := notify.Report{
-		Subject:        "platform applier",
-		LastSHA:        last,
-		Applied:        appliedCount,
-		Noop:           noopCount,
-		Failure:        failure,
-		DriftRun:       driftRun,
-		DriftSkipped:   driftSkipped,
-		Drifted:        drifted,
-		Errored:        errored,
-		RotatedChanges: rotatedChanges,
-		Expiring:       toNotifyExpiring(expiring),
+		Subject:           "platform applier",
+		LastSHA:           last,
+		Applied:           appliedCount,
+		Noop:              noopCount,
+		Failure:           failure,
+		DriftRun:          driftRun,
+		DriftSkipped:      driftSkipped,
+		Drifted:           drifted,
+		Errored:           errored,
+		RotatedChanges:    rotatedChanges,
+		Expiring:          toNotifyExpiring(expiring),
+		ExpiryUnavailable: expiryUnavailable,
 	}
 	text := notify.Compose(report)
 	_ = d.Telegram.Send(ctx, text) // non-fatal, matching send_telegram (apply.sh:445-448)
