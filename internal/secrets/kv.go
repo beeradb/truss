@@ -66,6 +66,14 @@ type KVConfig struct {
 	// HTTP is the client used for every request. Defaults to
 	// http.DefaultClient when nil; tests point it at an httptest.Server.
 	HTTP *http.Client
+
+	// WritableItem is the single item PutValue may write a value to. Empty
+	// means PutValue refuses every item -- a KV built only to read (every
+	// existing Store caller) leaves this unset and gets no write ability at
+	// all. Publisher.PutValue is "refuses any item other than the one the
+	// Publisher was constructed for" (design §6): this is that
+	// construction-time choice.
+	WritableItem string
 }
 
 // KV is a Store backed by one Vault KV v2 mount. It logs in at most once
@@ -167,9 +175,14 @@ func (k *KV) login(ctx context.Context) error {
 	return nil
 }
 
-// redact strips this KV's own token and JWT out of a string before it can
-// reach a caller in an error.
-func (k *KV) redact(s string) string { return redact(s, k.token, k.jwt) }
+// redact strips this KV's own token and JWT -- and, when the caller is
+// scrubbing an error built around a value it just sent Vault (a publish),
+// any extra values named -- out of a string before it can reach a caller.
+// Reads never pass extra values; only publish.go does, for the credential
+// value it writes.
+func (k *KV) redact(s string, extra ...string) string {
+	return redact(s, append([]string{k.token, k.jwt}, extra...)...)
+}
 
 // List returns every item title in the mount, reading
 // <mount>/metadata/ -- never <mount>/data/ (§4.7's load-bearing
@@ -219,37 +232,76 @@ func (k *KV) List(ctx context.Context) ([]string, error) {
 // status, a body that will not parse -- returns an error; it never
 // degrades to ("", false, nil), which this package reserves for a read
 // that genuinely succeeded and found no `expires` key.
-func (k *KV) Expiry(ctx context.Context, item string) (raw string, recorded bool, err error) {
+// itemMetadata is the KV v2 metadata this package reads. Both the expiry the
+// sweep wants and the version PutValue needs for its CAS guard come from the
+// SAME response, so they are fetched once, here.
+//
+// ⚠️ ONE PLACE, DELIBERATELY. cmd/truss briefly carried its own copy of the
+// login and this GET, purely to read current_version -- which meant the Vault
+// login and, worse, the REDACTION rules lived in two places. A second place
+// for a redaction rule to be wrong is the class of drift this repo has named
+// repeatedly, and it is not worth one struct field.
+type itemMetadata struct {
+	CurrentVersion int               `json:"current_version"`
+	CustomMetadata map[string]string `json:"custom_metadata"`
+}
+
+// metadata fetches one item's KV v2 metadata. exists is false, with no error,
+// when Vault answers 404 -- which is how it says "no such item", and is a
+// legitimate state for a credential credentials/ has not minted yet.
+func (k *KV) metadata(ctx context.Context, item string) (md itemMetadata, exists bool, err error) {
 	if err := k.login(ctx); err != nil {
-		return "", false, err
+		return itemMetadata{}, false, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.cfg.Addr+"/v1/"+k.cfg.Mount+"/metadata/"+item, nil)
 	if err != nil {
-		return "", false, fmt.Errorf("secrets: building the metadata request for %q in %s: %w", item, k.cfg.Mount, err)
+		return itemMetadata{}, false, fmt.Errorf("secrets: building the metadata request for %q in %s: %w", item, k.cfg.Mount, err)
 	}
 	req.Header.Set("X-Vault-Token", k.token)
 
 	resp, err := k.http.Do(req)
 	if err != nil {
-		return "", false, fmt.Errorf("secrets: reading metadata for %q in %s: %s", item, k.cfg.Mount, k.redact(err.Error()))
+		return itemMetadata{}, false, fmt.Errorf("secrets: reading metadata for %q in %s: %s", item, k.cfg.Mount, k.redact(err.Error()))
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusNotFound {
+		return itemMetadata{}, false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("secrets: reading metadata for %q in %s: vault returned %d: %s", item, k.cfg.Mount, resp.StatusCode, k.redact(string(body)))
+		return itemMetadata{}, false, fmt.Errorf("secrets: reading metadata for %q in %s: vault returned %d: %s", item, k.cfg.Mount, resp.StatusCode, k.redact(string(body)))
 	}
 
 	var parsed struct {
-		Data struct {
-			CustomMetadata map[string]string `json:"custom_metadata"`
-		} `json:"data"`
+		Data itemMetadata `json:"data"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", false, fmt.Errorf("secrets: parsing metadata for %q in %s: %w", item, k.cfg.Mount, err)
+		return itemMetadata{}, false, fmt.Errorf("secrets: parsing metadata for %q in %s: %w", item, k.cfg.Mount, err)
 	}
+	return parsed.Data, true, nil
+}
 
-	value, ok := parsed.Data.CustomMetadata["expires"]
+func (k *KV) Expiry(ctx context.Context, item string) (raw string, recorded bool, err error) {
+	md, exists, err := k.metadata(ctx, item)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+	value, ok := md.CustomMetadata["expires"]
 	return value, ok, nil
+}
+
+// CurrentVersion is the item's latest KV v2 version, which PutValue needs for
+// its CAS guard. exists is false with no error when the item is absent, in
+// which case the correct CAS for a first write is 0.
+func (k *KV) CurrentVersion(ctx context.Context, item string) (version int, exists bool, err error) {
+	md, exists, err := k.metadata(ctx, item)
+	if err != nil {
+		return 0, false, err
+	}
+	return md.CurrentVersion, exists, nil
 }

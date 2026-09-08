@@ -21,8 +21,56 @@ import (
 	"time"
 
 	"github.com/beeradb/truss/internal/gates"
+	"github.com/beeradb/truss/internal/handoff"
 	"github.com/beeradb/truss/internal/secrets"
 )
+
+// --- fake publisher handoff -------------------------------------------------
+
+// fakeHandoff stands in for internal/handoff.Send, letting apply-pass
+// tests control the publisher's verdict (or its absence, via Err) without a
+// real Unix socket or a real publisher process. It records every request it
+// was given, in order -- the evidence
+// TestEveryPassPathContactsThePublisherExactlyOnce needs to prove the send
+// actually happened, rather than merely compiling.
+type fakeHandoff struct {
+	mu    sync.Mutex
+	calls []handoff.Request
+
+	// Resp and Err are returned verbatim from every call; Err simulates no
+	// publisher answering (a dial failure), which internal/handoff.Send
+	// itself returns rather than a zero Response.
+	Resp handoff.Response
+	Err  error
+}
+
+func (f *fakeHandoff) send(ctx context.Context, path string, timeout time.Duration, r handoff.Request) (handoff.Response, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, r)
+	f.mu.Unlock()
+	if f.Err != nil {
+		return handoff.Response{}, f.Err
+	}
+	return f.Resp, nil
+}
+
+// callCount is how many times send was called.
+func (f *fakeHandoff) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+// lastRequest is the most recent request send was given, the zero Request
+// if it was never called.
+func (f *fakeHandoff) lastRequest() handoff.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return handoff.Request{}
+	}
+	return f.calls[len(f.calls)-1]
+}
 
 // --- in-process fake forgeGateway ------------------------------------------
 
@@ -543,6 +591,18 @@ func writeTelegramSecret(t *testing.T, write func(item, field, value string), to
 // config.Load and loadVaultConfig require, all pointed at harmless
 // defaults, with overrides applied last. secretsDir should be a
 // testSecretsDir's Root.
+//
+// ⚠️ HANDOFF_SOCKET IS DELIBERATELY ABSENT. loadHandoffConfig requires it on
+// the DRIFT pass and REFUSES it on a frequent one, because rotation -- and so
+// anything to publish -- happens only under DRIFT_CHECK=1. This fixture sets
+// no DRIFT_CHECK, so it is a frequent pass, so setting the socket here would
+// make every test built on it refuse to start.
+//
+// An earlier version set it and explained at length why that was required,
+// which was true of the inverted wiring it was written against. A fixture that
+// disagrees with production is a bug this project has already paid a day for,
+// so the comment goes with the value. A drift test that needs the socket sets
+// DRIFT_CHECK and HANDOFF_SOCKET together through the overrides argument.
 func testFullEnv(secretsDir, workdir string, overrides map[string]string) func(string) string {
 	base := map[string]string{
 		"REPO":                  "acme/platform",

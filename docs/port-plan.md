@@ -825,6 +825,7 @@ one job at a time, which requires subcommands. One binary also keeps the image a
 | `expiry` | `check_credential_lifetimes` (929-990) | 4 |
 | `notify` (report JSON on stdin) | `send_telegram` (408-448) | 4 |
 | `apply` | all of `apply.sh` | 5 |
+| `publish` | new, no bash equivalent -- the Vault write-back half of the separate publisher identity (`.recovered/plans/publisher-identity-design.md` §3, §6) | 5 |
 
 **Exit-code contract.** `ledger get`: 0 found, **2 absent**, 1 any other error — this is what
 lets `apply.sh` keep `|| die` for HEAD and refuse-with-a-true-reason for a digest (§3.2).
@@ -842,6 +843,7 @@ lets `apply.sh` keep `|| die` for HEAD and refuse-with-a-true-reason for a diges
 - `TestApplyExitsNonZeroIfAndOnlyIfThereIsAFailure`
 - `TestLockContentionFilesNothingAndAdvancesNothing`
 - `TestTheBinaryIsStatic`
+- `TestPublishRefusesWhenItsJWTIsNotMounted`
 
 ## 5. Parity strategy
 

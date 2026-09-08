@@ -1,8 +1,10 @@
 package secrets
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +22,18 @@ type fakeItemMeta struct {
 	extra    map[string]string // other custom_metadata keys, to prove they never leak out
 }
 
+// recordedRequest is one request the fake server saw, for tests that need
+// to assert on the shape of the traffic -- method, path, content-type and
+// body -- rather than just on the response. Added for the publish half:
+// TestPatchExpirySendsAMergePatchAndTouchesNoDataPath and its neighbours
+// need to see that a PATCH, not a POST, reached the metadata path.
+type recordedRequest struct {
+	Method      string
+	Path        string
+	ContentType string
+	Body        string
+}
+
 // fakeVault is a minimal Vault KV v2 + Kubernetes-auth server, just enough
 // of the wire shape for KV and Sweep to be tested against without ever
 // touching a real Vault. It records every request path so
@@ -29,6 +43,7 @@ type fakeVault struct {
 
 	loginCalls int
 	paths      []string
+	requests   []recordedRequest
 
 	// loginStatus, when non-zero, is returned instead of 200 on login.
 	loginStatus int
@@ -43,13 +58,31 @@ type fakeVault struct {
 	// metaStatus, when set for an item, is returned instead of 200 for its
 	// metadata GET.
 	metaStatus map[string]int
+	// patchStatus, when set for an item, is returned instead of 200 for a
+	// PATCH of its metadata -- how a server with no `patch` capability or
+	// too old a KV plugin is simulated.
+	patchStatus map[string]int
+
+	// dataCAS is each item's current KV v2 version, the way Vault tracks
+	// it for check-and-set. Zero means the item has never been written.
+	dataCAS map[string]int
+	// dataWrites records the last fields successfully written to each
+	// item's data, so a test can assert what actually landed.
+	dataWrites map[string]map[string]string
+	// putStatus, when set for an item, is returned instead of the normal
+	// cas-checked response for a POST to its data path.
+	putStatus map[string]int
 }
 
 func newFakeVault() *fakeVault {
 	return &fakeVault{
-		loginReply: authReplyToken(),
-		meta:       map[string]fakeItemMeta{},
-		metaStatus: map[string]int{},
+		loginReply:  authReplyToken(),
+		meta:        map[string]fakeItemMeta{},
+		metaStatus:  map[string]int{},
+		patchStatus: map[string]int{},
+		dataCAS:     map[string]int{},
+		dataWrites:  map[string]map[string]string{},
+		putStatus:   map[string]int{},
 	}
 }
 
@@ -65,8 +98,17 @@ func (f *fakeVault) server() *httptest.Server {
 }
 
 func (f *fakeVault) handle(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
 	f.mu.Lock()
 	f.paths = append(f.paths, r.URL.Path)
+	f.requests = append(f.requests, recordedRequest{
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		ContentType: r.Header.Get("Content-Type"),
+		Body:        string(bodyBytes),
+	})
 	f.mu.Unlock()
 
 	switch {
@@ -74,8 +116,12 @@ func (f *fakeVault) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleLogin(w, r)
 	case r.Method == "LIST" && strings.HasSuffix(strings.TrimRight(r.URL.Path, "/"), "/metadata"):
 		f.handleList(w, r)
+	case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/metadata/"):
+		f.handlePatchMetadata(w, r, bodyBytes)
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/metadata/"):
 		f.handleMetadata(w, r)
+	case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/data/"):
+		f.handlePutData(w, r, bodyBytes)
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/data/"):
 		// Served, not refused, and that is the whole point. A fake that
 		// 404s here makes TestTheSweepReadsNoSecretData pass for the wrong
@@ -89,6 +135,102 @@ func (f *fakeVault) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// handlePatchMetadata simulates KV v2's merge-patch semantics: only the
+// custom_metadata keys named in the body change, and a POST never reaches
+// here because POST is a different case above (routed to handlePutData when
+// it hits /data/ -- a POST to /metadata/ falls through to the 404 default,
+// the same as real Vault answering an undefined method).
+func (f *fakeVault) handlePatchMetadata(w http.ResponseWriter, r *http.Request, body []byte) {
+	item := path.Base(r.URL.Path)
+
+	f.mu.Lock()
+	status := f.patchStatus[item]
+	f.mu.Unlock()
+
+	if status != 0 {
+		w.WriteHeader(status)
+		fmt.Fprint(w, `{"errors":["patch denied"]}`)
+		return
+	}
+
+	var parsed struct {
+		CustomMetadata map[string]string `json:"custom_metadata"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"errors":["bad request"]}`)
+		return
+	}
+
+	f.mu.Lock()
+	m := f.meta[item]
+	if m.extra == nil {
+		m.extra = map[string]string{}
+	}
+	for k, v := range parsed.CustomMetadata {
+		if k == "expires" {
+			m.recorded = true
+			m.expires = v
+		} else {
+			m.extra[k] = v
+		}
+	}
+	f.meta[item] = m
+	f.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{}`)
+}
+
+// handlePutData simulates KV v2's check-and-set write: a request whose
+// options.cas does not match the item's current version is refused with a
+// 400, the same shape a real Vault's cas mismatch takes, and the version is
+// not advanced.
+func (f *fakeVault) handlePutData(w http.ResponseWriter, r *http.Request, body []byte) {
+	item := path.Base(r.URL.Path)
+
+	var parsed struct {
+		Options struct {
+			CAS int `json:"cas"`
+		} `json:"options"`
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"errors":["bad request"]}`)
+		return
+	}
+
+	f.mu.Lock()
+	status := f.putStatus[item]
+	current := f.dataCAS[item]
+	f.mu.Unlock()
+
+	if status != 0 {
+		w.WriteHeader(status)
+		// Echoes the request body back into the error, deliberately: this
+		// is what lets a test prove PutValue's caller redacts the value it
+		// sent rather than merely never being handed it back by a fake
+		// that happens not to echo. A fake that answered with a fixed
+		// string here would make the redaction test pass whether or not
+		// redaction actually ran.
+		fmt.Fprintf(w, "put denied, echoing what vault received: %s", body)
+		return
+	}
+	if parsed.Options.CAS != current {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"errors":["check-and-set parameter did not match the current version"]}`)
+		return
+	}
+
+	f.mu.Lock()
+	f.dataCAS[item] = current + 1
+	f.dataWrites[item] = parsed.Data
+	f.mu.Unlock()
+
+	fmt.Fprintf(w, `{"data":{"version":%d}}`, current+1)
 }
 
 func (f *fakeVault) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +320,34 @@ func (f *fakeVault) requestPaths() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.paths...)
+}
+
+// recordedRequests returns every request the fake server has seen in full
+// -- method, path, content-type and body -- for tests that need to tell a
+// PATCH from a POST rather than just knowing a path was hit.
+func (f *fakeVault) recordedRequests() []recordedRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedRequest(nil), f.requests...)
+}
+
+// dataWriteFor returns the fields last successfully written to item's data,
+// and whether anything has been written at all.
+func (f *fakeVault) dataWriteFor(item string) (map[string]string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w, ok := f.dataWrites[item]
+	return w, ok
+}
+
+// setDataCAS seeds item's current KV v2 version, the way a live Vault's
+// version would already be non-zero for anything credentials/ has ever
+// written -- so a test can construct a "concurrent writer" scenario by
+// calling PutValue with a cas that no longer matches.
+func (f *fakeVault) setDataCAS(item string, version int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dataCAS[item] = version
 }
 
 func (f *fakeVault) loginCount() int {
