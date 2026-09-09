@@ -36,7 +36,27 @@ import (
 
 // theFilter is the reference bash's own jq program, reproduced verbatim so
 // a diff against applier/plan-digest is a diff against this constant.
-const theFilter = `[ (.resource_changes // [])[] | { address, actions: .change.actions, before: .change.before, after: .change.after } ] | sort_by(.address)`
+//
+// ⚠️ THE no-op SELECT IS LOAD-BEARING AND WAS ADDED AFTER IT BROKE
+// PRODUCTION. OpenTofu emits a resource_changes entry for every resource in
+// the plan, including ones it is NOT changing, with actions ["no-op"] and the
+// resource's full attribute values in before/after. Those values depend on
+// WHO PLANNED: a read-only CI identity that cannot read an attribute gets
+// null where the applier's admin identity reads a value.
+//
+// So two empty plans -- both saying "No changes" -- produced different
+// digests, and the applier refused every commit touching that root with "the
+// world moved between review and apply". Measured on beeradb/platform
+// 2026-09-08: four github_repository commit-message fields the read-only plan
+// App cannot see, which wedged the applier for hours and which `ignore_changes`
+// could not fix, because it removes the DIFF and not the VALUES.
+//
+// Excluding no-ops is also more correct than including them, not a loosening.
+// The digest exists to prove the apply does what the reviewer approved; a
+// no-op does nothing, so it cannot change that answer. A resource that is a
+// no-op for CI and a create for the applier still differs in `actions` and is
+// still caught.
+const theFilter = `[ (.resource_changes // [])[] | select(.change.actions != ["no-op"]) | { address, actions: .change.actions, before: .change.before, after: .change.after } ] | sort_by(.address)`
 
 // Canonical returns the exact bytes that
 //
@@ -57,6 +77,11 @@ const theFilter = `[ (.resource_changes // [])[] | { address, actions: .change.a
 // resource_changes element or its change object other than the four named
 // above. Those are exactly the things that move between two runs of one
 // plan for reasons that are not a change to infrastructure.
+//
+// Entries whose actions are exactly ["no-op"] are dropped for the same
+// reason -- see theFilter above. They carry the resource's whole attribute
+// set, and an attribute one identity can read and another cannot makes two
+// identical plans hash differently.
 func Canonical(planJSON []byte) ([]byte, error) {
 	root, err := decodeOne(planJSON)
 	if err != nil {
@@ -72,13 +97,19 @@ func Canonical(planJSON []byte) ([]byte, error) {
 		addr  interface{}
 		entry interface{}
 	}
-	items := make([]item, len(changes))
+	items := make([]item, 0, len(changes))
 	for i, rc := range changes {
 		entry, addr, err := buildEntry(rc)
 		if err != nil {
 			return nil, fmt.Errorf("plan: resource_changes[%d] %s", i, err)
 		}
-		items[i] = item{addr: addr, entry: entry}
+		// jq's `select` drops the element entirely; so does this. The index
+		// in any later error message therefore refers to the INPUT position,
+		// which is what a reader comparing against the plan file wants.
+		if isNoOp(entry) {
+			continue
+		}
+		items = append(items, item{addr: addr, entry: entry})
 	}
 
 	// A stable sort, deliberately: two resource_changes elements sharing an
@@ -286,6 +317,27 @@ func buildEntry(rc interface{}) (entry interface{}, addr interface{}, err error)
 		"after":   after,
 	}
 	return entry, addr, nil
+}
+
+// isNoOp reports whether an entry's actions are exactly ["no-op"], matching
+// jq's `.change.actions != ["no-op"]` on the equality jq uses: an array of
+// exactly one string equal to "no-op".
+//
+// ⚠️ EXACTLY ONE ELEMENT, NOT "contains no-op". OpenTofu writes
+// ["create","delete"] for a replacement and ["no-op"] alone for an unchanged
+// resource; a `contains` test would drop a multi-action entry that is a real
+// change if "no-op" ever appeared beside another action.
+func isNoOp(entry interface{}) bool {
+	obj, ok := entry.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	actions, ok := obj["actions"].([]interface{})
+	if !ok || len(actions) != 1 {
+		return false
+	}
+	s, ok := actions[0].(string)
+	return ok && s == "no-op"
 }
 
 // isFalsy2 reports whether ch is exactly JSON null. Unlike resourceChanges'

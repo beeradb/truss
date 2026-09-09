@@ -673,3 +673,64 @@ func FuzzCanonicalAgreesWithJQ(f *testing.F) {
 		assertAgreesWithJQ(t, jqPath, data)
 	})
 }
+
+// TestTwoIdentitiesSeeingOneNoOpDifferentlyStillAgree encodes the production
+// failure that put the no-op filter in Canonical, rather than trusting the
+// comment beside it.
+//
+// On beeradb/platform 2026-09-08 the applier refused every commit touching a
+// managed repo with "the world moved between review and apply". Both plans
+// said "No changes". They disagreed because OpenTofu writes a resource_changes
+// entry for UNCHANGED resources too, carrying the resource's whole attribute
+// set -- and the read-only CI identity could not read four github_repository
+// fields that the applier's admin identity could. Same plan, same commit, two
+// digests, and `ignore_changes` could not help because it removes the diff and
+// not the values.
+//
+// ⚠️ The two inputs below differ ONLY inside a no-op's before/after. If this
+// test ever fails, the digest has started depending on values that vary with
+// who ran the plan, and every commit touching such a root will be refused
+// forever.
+func TestTwoIdentitiesSeeingOneNoOpDifferentlyStillAgree(t *testing.T) {
+	const asAdmin = `{"resource_changes":[
+	  {"address":"github_repository.this","change":{"actions":["no-op"],
+	     "before":{"id":"platform","merge_commit_title":"MERGE_MESSAGE"},
+	     "after":{"id":"platform","merge_commit_title":"MERGE_MESSAGE"}}},
+	  {"address":"cloudflare_r2_bucket.b","change":{"actions":["create"],
+	     "before":null,"after":{"name":"b"}}}
+	]}`
+	const asReadOnlyCI = `{"resource_changes":[
+	  {"address":"github_repository.this","change":{"actions":["no-op"],
+	     "before":{"id":"platform","merge_commit_title":null},
+	     "after":{"id":"platform","merge_commit_title":null}}},
+	  {"address":"cloudflare_r2_bucket.b","change":{"actions":["create"],
+	     "before":null,"after":{"name":"b"}}}
+	]}`
+
+	a, err := Digest([]byte(asAdmin))
+	if err != nil {
+		t.Fatalf("Digest(admin view): %v", err)
+	}
+	b, err := Digest([]byte(asReadOnlyCI))
+	if err != nil {
+		t.Fatalf("Digest(read-only view): %v", err)
+	}
+	if a != b {
+		t.Fatalf("two identities planning the same change disagree:\n admin = %s\n ci    = %s", a, b)
+	}
+
+	// ⚠️ AND THE REAL CHANGE MUST STILL COUNT. Dropping no-ops would be a
+	// hole if it also dropped anything else -- a digest that ignores the
+	// create above would approve an apply nobody reviewed.
+	const withoutTheCreate = `{"resource_changes":[
+	  {"address":"github_repository.this","change":{"actions":["no-op"],
+	     "before":{"id":"platform"},"after":{"id":"platform"}}}
+	]}`
+	c, err := Digest([]byte(withoutTheCreate))
+	if err != nil {
+		t.Fatalf("Digest(no create): %v", err)
+	}
+	if c == a {
+		t.Fatal("a plan that creates a bucket digests the same as one that does not")
+	}
+}

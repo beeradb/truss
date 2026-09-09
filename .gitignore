@@ -20,3 +20,5 @@ go.work.sum
 # The capture plugin is run by pytest from the platform checkout.
 __pycache__/
 *.pyc
+# release.yml builds the per-arch binaries here before the image copies them.
+dist/
