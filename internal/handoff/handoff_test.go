@@ -116,8 +116,21 @@ func TestSendFailsDistinguishablyWhenNoPublisherIsListening(t *testing.T) {
 	if !strings.Contains(msg, "no publisher listening") {
 		t.Errorf("error %q does not say no publisher was listening", msg)
 	}
+
+	// ⚠️ THE SOCKET PATH IS TAKEN OUT BEFORE SCANNING, AND WITHOUT THIS THE
+	// TEST FAILED ABOUT 1% OF RUNS FOR A REASON THAT HAD NOTHING TO DO WITH
+	// THE MESSAGE. t.TempDir() embeds a random number, and one of them was
+	// .../TestSendFailsDistinguishably...240379810/... -- which contains
+	// "403". A plain dial failure was then reported as reading "like a Vault
+	// error". Measured: 5 failures in 400 runs before this line, 0 after.
+	//
+	// The substrings below are about words this package CHOOSES to put in a
+	// message. The path is chosen by the test framework, so it is not part of
+	// what is being asserted, and leaving it in only lets the assertion fire
+	// on a coincidence.
+	scanned := strings.ReplaceAll(msg, path, "<socket>")
 	for _, mustNotContain := range []string{"vault", "Vault", "403", "cas"} {
-		if strings.Contains(msg, mustNotContain) {
+		if strings.Contains(scanned, mustNotContain) {
 			t.Errorf("error %q reads like a Vault error (contains %q), want a plain dial failure", msg, mustNotContain)
 		}
 	}

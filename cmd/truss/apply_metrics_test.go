@@ -474,3 +474,104 @@ func TestAPassWithNothingRecordedStillRenders(t *testing.T) {
 		t.Errorf("truss_pass_success = %s, want 1", got)
 	}
 }
+
+// TestAFailedPassAlwaysNamesAClass is the invariant behind the whole class
+// label, and it is one no individual test above would have caught.
+//
+// ⚠️ A PASS THAT REPORTS truss_pass_success 0 WITH EVERY CLASS AT 0 IS THE
+// FAIL-OPEN SHAPE IN MINIATURE. The dashboard shows red, the timeline shows
+// nothing fired, and there is no query that says why -- "something went wrong
+// and we cannot tell you what" reads on a panel exactly like a rendering
+// quirk. Every site that sets a failure records its class at the point the
+// cause is still known; this asserts that none was ever missed, and keeps
+// asserting it when somebody adds the next one.
+func TestAFailedPassAlwaysNamesAClass(t *testing.T) {
+	// ⚠️ READ THE PUSHED BODY, NOT deps.Obs. runApplyPass takes applyDeps BY
+	// VALUE and installs the recorder on its own copy, so the caller's
+	// deps.Obs stays nil -- which is the type's contract ("nothing reads it
+	// back") working as intended, and a trap for a test that tries to peek.
+	// What the pass actually reported is what the gateway received.
+	classesIn := func(t *testing.T, body string) []string {
+		t.Helper()
+		var named []string
+		for _, c := range failureClasses {
+			if sampleValue(t, body, `truss_pass_failure{class="`+c+`"}`) == "1" {
+				named = append(named, c)
+			}
+		}
+		return named
+	}
+
+	t.Run("a branch-protection refusal", func(t *testing.T) {
+		g := newGateway(t)
+		deps, _ := failingPassDeps(t)
+		deps.Cfg.MetricsPushURL = g.srv.URL
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result := runApplyPass(ctx, deps, "classsha1")
+
+		if result.failure == "" {
+			t.Fatal("this fixture is supposed to fail")
+		}
+		body := g.only(t).body
+		if got := sampleValue(t, body, "truss_pass_success"); got != "0" {
+			t.Fatalf("truss_pass_success = %s on a failed pass", got)
+		}
+		if named := classesIn(t, body); len(named) == 0 {
+			t.Errorf("the pass failed with %q and named no class", result.failure)
+		}
+	})
+
+	// ⚠️ THE ONE THAT MATTERS MOST: a plan that did not hash to the approved
+	// one. If any refusal has to be attributable, it is this one.
+	t.Run("a digest refusal", func(t *testing.T) {
+		const sha = "classdigestsha"
+		g := newGateway(t)
+		deps, fl, _, _ := gateDeps(t, sha, sha)
+		if ff, ok := deps.Forge.(*fakeForge); ok {
+			ff.ProtectionResult = protectionCompliantForNow()
+		}
+		fl.put("digests/"+sha+"/"+gateSlug+".digest", []byte(notOurDigest(t)))
+		deps.Cfg.MetricsPushURL = g.srv.URL
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result := runApplyPass(ctx, deps, sha)
+
+		if result.failure == "" {
+			t.Fatal("a mismatched digest was applied")
+		}
+		body := g.only(t).body
+		if got := sampleValue(t, body, "truss_digest_refusals"); got != "1" {
+			t.Errorf("truss_digest_refusals = %s, want 1", got)
+		}
+		named := classesIn(t, body)
+		if len(named) == 0 {
+			t.Fatalf("the pass refused %q and named no class", result.failure)
+		}
+		found := false
+		for _, c := range named {
+			if c == classDigest {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("a digest refusal was classed as %v, not %q", named, classDigest)
+		}
+	})
+
+	// The other direction: a pass that succeeded must not be naming one.
+	t.Run("a pass that succeeded names nothing", func(t *testing.T) {
+		g := newGateway(t)
+		deps, _ := successPassDeps(t, "classoksha")
+		deps.Cfg.MetricsPushURL = g.srv.URL
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if result := runApplyPass(ctx, deps, "classoksha"); result.failure != "" {
+			t.Fatalf("result.failure = %q, want empty", result.failure)
+		}
+		if named := classesIn(t, g.only(t).body); len(named) != 0 {
+			t.Errorf("a clean pass named %v", named)
+		}
+	})
+}
