@@ -102,12 +102,23 @@ jobs:
 
       # `gh` rather than a third-party release action: it ships on the runner,
       # and publishing a file should not add a supply-chain dependency.
+      # ⚠️ THE RELEASE MAY ALREADY EXIST, AND THAT IS NOT A FAILURE. Creating a
+      # release in the web UI is what CREATES the tag, so the ordinary way a
+      # human cuts a release makes `gh release create` fail with "a release
+      # with the same tag name already exists" -- after the image has already
+      # been built and pushed. Measured on v0.1.0: everything succeeded and the
+      # run went red on the last step, which reads as "the release failed" and
+      # is the opposite of what happened.
+      #
+      # Upload with --clobber so re-running a release is idempotent too: the
+      # assets are rebuilt from the same tag and reproduce byte-for-byte, so
+      # replacing them cannot change what anyone already downloaded.
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" --clobber \
             dist/truss-linux-amd64 dist/truss-linux-arm64 dist/SHA256SUMS dist/IMAGE_DIGESTS
