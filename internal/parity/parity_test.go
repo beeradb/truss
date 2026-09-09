@@ -151,6 +151,7 @@ func inList(list []string, want string) bool {
 // story -- a divergence list that accepts everything says nothing.
 func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 	accepted := []Diff{
+		{Kind: "extra-key", Key: "applied/sha1"},
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure",
 			Bash: "projects/recipes: does not match the one approved at headsha1", Truss: ""},
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "0", Truss: "1"},
@@ -174,8 +175,11 @@ func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 		// A failure that does not name the digest gate.
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
 		// The watermark appearing only on truss's side is not this story
-		// either: both sides always write applied/HEAD.
+		// either: both sides always write applied/HEAD. Nor is the applied
+		// record filed under a commit that is not the one this story is
+		// about.
 		{Kind: "extra-key", Key: "applied/HEAD"},
+		{Kind: "extra-key", Key: "applied/someothersha"},
 		// The watermark moved to a sha that is not the commit this story is
 		// about is the regression this key exists to catch.
 		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "someothersha"},

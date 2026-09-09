@@ -617,11 +617,14 @@ func emptyPlanIsNotGated(d Diff) bool {
 	case "extra-key":
 		// applied/<sha>, which the bash never reaches.
 		//
-		// ⚠️ NOT applied/HEAD, WHICH BOTH SIDES ALWAYS WRITE. The loose
-		// prefix accepted it too, with any value at all -- reopening on this
-		// branch the hole the value branch below was tightened to close, for
-		// the key that decides where the next pass resumes.
-		return strings.HasPrefix(d.Key, "applied/") && d.Key != "applied/HEAD"
+		// ⚠️ THE COMMIT, NOT THE PREFIX. `applied/` alone accepted the
+		// record filed under ANY sha -- and applied/HEAD as well, with any
+		// value, reopening on this branch the hole the value branch below
+		// was tightened to close. A record written under the wrong commit
+		// arrives here as a lone extra-key, because the bash writes nothing
+		// under applied/ to counterbalance it. Pinned to the corpus's own
+		// commit, measured the same way as the values below.
+		return d.Key == "applied/sha1"
 	case "value":
 		// The ledger watermark itself: the bash leaves it, truss advances
 		// it. Pinned to the corpus's own two values, measured the same way
