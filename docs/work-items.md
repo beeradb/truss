@@ -247,20 +247,60 @@ Already paid for: three fields, three files, and
 `TestProtectionScriptSatisfiesTheGate` already exists to keep the payload and
 the gate from disagreeing. Absent must be its own case, as everywhere else.
 
-## Rulesets: not a hole, but a way to become unusable
+## Rulesets: a hole after all, demonstrated 2026-09-09
 
-Checked, because it looked like one. GitHub's rulesets are additive — repo
-and org rulesets layer with classic protection and the most restrictive rule
-wins — so a ruleset bypass actor cannot weaken what classic protection
-already forbids. There is no gate missing here.
+⚠️ **AN EARLIER VERSION OF THIS SECTION SAID THIS WAS NOT A HOLE. IT IS, AND
+THE EVIDENCE IS A PUSH TO THIS REPOSITORY'S OWN main.** The reasoning that
+retired it was that rulesets are additive -- repo and org rulesets layer with
+classic protection and the most restrictive rule wins -- so a bypass actor
+cannot weaken what classic protection already forbids. That is true and it is
+not the whole question. What it misses is the case where the requirement is
+enforced by a **ruleset in the first place**, because then there is nothing in
+classic protection for it to be more restrictive than.
 
-⚠️ **What is real is the migration.** GitHub shipped automatic
+Measured: a fast-forward push of four commits straight to `main` here, which
+GitHub accepted and answered with
+
+    remote: Bypassed rule violations for refs/heads/main:
+    remote: - Changes must be made through a pull request.
+    remote: - Required status check "check" is expected.
+
+"Bypassed rule violations" is ruleset language, not classic-protection
+language -- classic protection declines with a protected-branch hook error and
+no push happens. So on this repository the pull-request requirement and the
+required check live in a **ruleset**, and the pushing identity is a **bypass
+actor** on it. Both rules were skipped and the push succeeded.
+
+⚠️ **`forge.Protection` reads exactly one endpoint:**
+`/repos/{o}/{r}/branches/{branch}/protection`. It has never read
+`/rulesets` or `/rules/branches/{branch}`, and `gates.Protection` has no field
+for a ruleset, an enforcement level, or a bypass actor. So the dangerous
+arrangement is not exotic, it is the one in front of us: classic protection
+configured and compliant, a ruleset carrying the real requirement, and named
+actors permitted to skip it. `CheckProtection` returns no problems and the
+applier runs, having satisfied itself about a control that is not the one
+actually governing the branch.
+
+⚠️ **The failure is quiet, which is the part that matters.** Turning classic
+protection off makes the applier refuse everything and say so in every alert.
+Adding a bypass actor to a ruleset changes nothing it can see.
+
+**What closing it takes.** `GET /repos/{o}/{r}/rules/branches/{branch}` returns
+the effective rules for a branch across org and repo rulesets already
+flattened, which is the right first read -- but it does **not** carry
+`bypass_actors`. That needs `GET /repos/{o}/{r}/rulesets?includes_parents=true`
+and then each ruleset that targets the branch. A new `forge.Rulesets` reader
+and a `gates.CheckRulesets`, mirroring the existing `Protection`/
+`CheckProtection` pair, refusing on `enforcement != "active"` and on any
+non-empty (or unreadable) `bypass_actors` -- absent must be its own case, as
+everywhere else in that package. Never a relaxation of the existing gate: the
+two are read together and both must pass.
+
+⚠️ **Also still true, and now more pressing:** GitHub shipped automatic
 classic-to-ruleset conversion in August 2026. On a converted repository
-`GET /branches/main/protection` 404s, `forge.Protection` errors, and the pass
-refuses — correct, and it fails closed, but it means truss cannot run against
-a repository whose owner accepted that migration. Deferred until a consumer
-hits it; the fix is a `forge.Rulesets` reader and a `gates.CheckRulesets`
-mirroring the existing pair, never a relaxation of the existing gate.
+`GET /branches/main/protection` 404s, `forge.Protection` errors and the pass
+refuses -- fails closed, correctly, but it means truss cannot run at all
+against a repository whose owner accepted that migration.
 
 ## `data "external"` executes during the applier's own plan
 
