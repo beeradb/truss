@@ -22,15 +22,24 @@ trap 'rm -rf "$tmp"' EXIT
 
 # Runs check-writes against a fake gcloud answering with the given versioning
 # setting and object listing. want=refuse|clean
-check() { # name want versioning listing
-  local name="$1" want="$2" versioning="$3" listing="$4"
+# ⚠️ THE LISTING'S EXIT CODE IS A PARAMETER, BECAUSE THE REAL ONE HAS ONE.
+# `gcloud storage ls` exits non-zero when the wildcard matches nothing, so a
+# fake that always exits 0 asserts an outcome production cannot produce -- and
+# when a fixture and production disagree, the fixture is the bug.
+# ⚠️ AND A REFUSAL MUST NAME ITS OWN CAUSE, so `want_msg` is not optional
+# decoration. Under `set -e` a command substitution that fails aborts the
+# script and exits 1, which is indistinguishable from a refusal if the exit
+# code is all anyone reads -- so a guard deleted outright still looked green
+# here. Matching the message is what makes these cases bite.
+check() { # name want versioning listing ls_exit want_msg
+  local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6"
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin"
   {
     echo '#!/bin/sh'
     echo 'case "$*" in'
     printf "  *describe*) printf '%%s\\\\n' '%s' ;;\n" "$versioning"
-    printf "  *ls*) printf '%s' ;;\n" "$listing"
+    printf "  *ls*) printf '%s'; exit %s ;;\n" "$listing" "$ls_exit"
     echo 'esac'
   } > "$dir/bin/gcloud"
   chmod +x "$dir/bin/gcloud"
@@ -40,12 +49,17 @@ check() { # name want versioning listing
   set -e
   local got=clean
   [ "$rc" -eq 0 ] || got=refuse
-  if [ "$got" = "$want" ]; then
-    pass=$((pass + 1)); echo "ok    $name ($got)"
-  else
+  if [ "$got" != "$want" ]; then
     fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
     echo "$out" | sed 's/^/      /' >&2
+    return
   fi
+  case "$out" in
+    *"$want_msg"*) pass=$((pass + 1)); echo "ok    $name ($got)" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  $name: $got, but for the wrong reason -- wanted it to say \"$want_msg\"" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
 }
 
 # ⚠️ THE LOAD-BEARING CASE. Two generations of one key is precisely what
@@ -53,21 +67,29 @@ check() { # name want versioning listing
 # bucket whose objects are rewritten cannot record the failures you most
 # need recorded once it is locked.
 check "an object with two generations refuses" refuse True \
-  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha1#2\ngs://<bucket>/HEAD#5\n'
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha1#2\ngs://<bucket>/HEAD#5\n' 0 "DO NOT LOCK"
 
 check "one generation each is clean" clean True \
-  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\ngs://<bucket>/HEAD#5\n'
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\ngs://<bucket>/HEAD#5\n' 0 "none: every object"
 
 # A rewritten HEAD is the same defect on the key that matters most.
 check "a rewritten HEAD refuses" refuse True \
-  'gs://<bucket>/HEAD#1\ngs://<bucket>/HEAD#2\n'
+  'gs://<bucket>/HEAD#1\ngs://<bucket>/HEAD#2\n' 0 "DO NOT LOCK"
 
 # Versioning off means overwritten generations were discarded, so the count
 # cannot answer the question -- and saying nothing would read as a pass.
 check "versioning off refuses rather than printing nothing" refuse False \
-  'gs://<bucket>/applied/sha1#1\n'
+  'gs://<bucket>/applied/sha1#1\n' 0 "versioning is not enabled"
 
-check "an empty bucket is clean" clean True ''
+# ⚠️ AN EMPTY BUCKET IS NOT A PASS, AND IT IS NOT "REWRITTEN" EITHER. The real
+# gcloud exits non-zero when the wildcard matches nothing, which is the same
+# silence a wrong project or an expired credential gives. Zero objects is no
+# evidence that objects are written once, so it refuses -- and says which of
+# the three answers it is giving.
+check "an empty bucket cannot answer, and refuses" refuse True '' 1 "cannot answer"
+
+check "a failed listing refuses rather than reading as rewritten" refuse True \
+  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n' 1 "cannot answer"
 
 echo
 echo "ledger-retention-test: $pass passed, $fail failed"

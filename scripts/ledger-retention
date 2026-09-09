@@ -138,7 +138,26 @@ case "$1" in
     # objects that forbid it, and only the lesser "versioning is off" case
     # ever refused. A check whose failure looks exactly like its pass is the
     # shape this repository calls worse than no check.
-    rewritten=$(gcloud storage ls -a "gs://$BUCKET/**" |
+    #
+    # ⚠️ AND THE LISTING'S OWN FAILURE IS ITS OWN ANSWER. `gcloud storage ls`
+    # exits non-zero when the wildcard matches nothing, so under `pipefail`
+    # an empty bucket, an expired credential and a wrong project all aborted
+    # this command mid-pipeline and surfaced as a bare exit 1 -- which reads
+    # as "objects were rewritten" and is not. "I could not ask" is a third
+    # answer and it says so. It still refuses: zero objects is not evidence
+    # that objects are written once, which is the only thing that makes a
+    # lock safe.
+    set +e
+    listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>&1); listed=$?
+    set -e
+    if [ "$listed" -ne 0 ] || [ -z "$listing" ]; then
+      echo "  cannot answer: listing gs://$BUCKET produced nothing (gcloud exit $listed)." >&2
+      echo "  An empty bucket and a failed listing are the same silence here, and" >&2
+      echo "  neither is evidence that objects are written once. gcloud said:" >&2
+      printf '%s\n' "$listing" | sed 's/^/    /' >&2
+      exit 1
+    fi
+    rewritten=$(printf '%s\n' "$listing" |
       sed 's/#[0-9]*$//' |
       sort | uniq -d)
     if [ -n "$rewritten" ]; then

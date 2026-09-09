@@ -458,8 +458,8 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// The expiry sweep runs on the DAILY pass only, which is what the
 	// deployed applier does -- see the ⚠️ below for why, and for what
 	// running it every pass cost. §4.7, §2 item 16: the sweep never reports
-	// a clean bill it did not earn. Its problem is REPORTED, never swallowed as "nothing is
-	// expiring" -- but it does not set failure.
+	// a clean bill it did not earn. Its problem is REPORTED, never
+	// swallowed as "nothing is expiring" -- but it does not set failure.
 	//
 	// ⚠️ IT USED TO SET failure, AND THAT WOULD HAVE MADE EVERY PRODUCTION
 	// PASS RED. Nothing seeds `expires` into Vault yet, so the sweep's
