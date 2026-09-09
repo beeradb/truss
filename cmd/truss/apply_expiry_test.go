@@ -263,3 +263,60 @@ func TestAnEmptyOnePasswordTokenIsRefused(t *testing.T) {
 		t.Fatal("buildBaseEnv accepted an empty 1Password token")
 	}
 }
+
+// TestTheRepoAdminTokenIsOptionalAndReachesTofuAsAVariable covers the
+// credential a consumer needs only if its roots CREATE repositories.
+//
+// ⚠️ ABSENT MUST NOT BE FATAL. A GitHub App cannot create a repository under
+// a user account -- `POST /user/repos` is server-to-server: false -- so a
+// consumer that creates them mounts a classic PAT, and one that only adopts
+// existing repositories with import blocks never does. Making it required
+// would stop every such deployment on an upgrade, for a credential it has no
+// use for.
+//
+// ⚠️ AND IT MUST NOT BE GITHUB_TOKEN. The github provider reads that name
+// from the environment, so exporting it would silently re-authenticate every
+// github provider in the root -- including the default one that
+// authenticates as the App, whose whole point is that it is not a person.
+// TF_VAR_ is passed to one aliased provider explicitly.
+func TestTheRepoAdminTokenIsOptionalAndReachesTofuAsAVariable(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("an unmounted repo-admin token was fatal: %v", err)
+		}
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "TF_VAR_github_repo_admin_token=") {
+				t.Fatal("a token nobody mounted reached tofu")
+			}
+		}
+	})
+
+	t.Run("present", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+		write("github-repo-admin", "password", "ghp_fixture_value")
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("buildBaseEnv: %v", err)
+		}
+		var got string
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, "TF_VAR_github_repo_admin_token="); ok {
+				got = v
+			}
+			if strings.HasPrefix(kv, "GITHUB_TOKEN=") {
+				t.Error("the PAT was exported as GITHUB_TOKEN, which every github provider reads")
+			}
+		}
+		if got != "ghp_fixture_value" {
+			t.Fatalf("TF_VAR_github_repo_admin_token = %q, want the mounted value", got)
+		}
+	})
+}

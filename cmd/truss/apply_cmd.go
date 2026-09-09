@@ -787,11 +787,32 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(env,
+	env = append(env,
 		"GITHUB_APP_ID="+appID,
 		"GITHUB_APP_INSTALLATION_ID="+installationID,
 		"GITHUB_APP_PEM_FILE="+pem,
-	), nil
+	)
+
+	// ⚠️ OPTIONAL, AND ABSENT MUST NOT BE FATAL. Only a consumer whose roots
+	// create repositories mounts this; one that adopts existing repositories
+	// with import blocks never needs it, and making it required would stop
+	// every such deployment on an upgrade for a credential it has no use for.
+	//
+	// ⚠️ IT REACHES TOFU AS TF_VAR_, NOT AS GITHUB_TOKEN. The github provider
+	// reads GITHUB_TOKEN from the environment, so exporting it would silently
+	// re-authenticate EVERY github provider in the root -- including the
+	// default one that authenticates as the App, whose whole point is that it
+	// is not a person. A variable is passed to one aliased provider
+	// explicitly, so the PAT's reach is what the config says it is rather
+	// than whatever happens to read the environment first.
+	token, ok, err := d.Dir.FieldIfPresent(itemGitHubRepoAdmin, fieldGitHubRepoToken)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		env = append(env, "TF_VAR_github_repo_admin_token="+token)
+	}
+	return env, nil
 }
 
 // applyOneRoot runs init, plan, (for non-credentials roots) the digest

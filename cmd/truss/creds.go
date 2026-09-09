@@ -51,6 +51,16 @@ const (
 
 	itemTofuEncryption  = "tofu-encryption"
 	fieldTofuPassphrase = "passphrase"
+
+	// ⚠️ A CLASSIC PAT, AND IT EXISTS BECAUSE AN APP CANNOT CREATE A
+	// REPOSITORY UNDER A USER ACCOUNT. `POST /user/repos` is
+	// server-to-server: false in GitHub's permissions table and accepts only
+	// OAuth tokens and classic PATs -- not fine-grained ones, and not an App
+	// installation token. So a consumer whose roots CREATE repositories
+	// needs this; one that only adopts existing repositories does not, which
+	// is why it is read optionally.
+	itemGitHubRepoAdmin  = "github-repo-admin"
+	fieldGitHubRepoToken = "password"
 )
 
 // loadLedgerConfig builds a ledger.Config from the gcs-ledger item and the
