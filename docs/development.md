@@ -30,10 +30,11 @@ nothing.
 That is the whole chain, in the order it must run: build, vet,
 `go test -count=1`, govulncheck for reachable standard-library
 vulnerabilities, `scripts/ledger-retention-test` — which drives
-`ledger-retention`'s `check-writes` and `lock`, the measurement before an
-irreversible retention lock and the door itself — `scripts/leakscan-test` — which proves the leak
-scanner still fails when it should — and then `scripts/leakscan` itself, which
-refuses anything identifying a real deployment.
+`ledger-retention`'s `check-writes` and `lock`: the measurement before an
+irreversible retention lock, and the door itself — `scripts/leakscan-test`,
+which proves the leak scanner still fails when it should — and then
+`scripts/leakscan` itself, which refuses anything identifying a real
+deployment.
 
 The two `-test` scripts are there for the same reason: a guard nobody has
 watched fail is a claim. The leak scanner has been vacuous in green CI, twice.

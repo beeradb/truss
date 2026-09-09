@@ -20,6 +20,46 @@ pass=0 fail=0
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# assert_out checks that an outcome says what it should and not what it should
+# not. Shared by both drivers: one definition, because two copies of a rule
+# drifting apart is the defect these scripts exist to catch.
+#
+#   want_msg    wording unique to the branch that should have fired. "cannot
+#               answer" opens two of them and the header carries the words DO
+#               NOT LOCK unconditionally, so a substring common to several
+#               branches stays green under mutations that skip the logic.
+#   want_relay  what gcloud itself said. Two inputs the script cannot tell
+#               apart -- an empty bucket and a 403 -- are told apart here or
+#               nowhere.
+#   want_absent wording the output must NOT carry. A dangling "gcloud said:"
+#               with nothing under it is a refusal quoting a witness that said
+#               nothing.
+assert_out() { # name got out want_msg [want_relay] [want_absent]
+  local name="$1" got="$2" out="$3" want_msg="$4" want_relay="${5:-}" want_absent="${6:-}"
+  local why=""
+  case "$out" in
+    *"$want_msg"*) ;;
+    *) why="$got, but for the wrong reason -- wanted it to say \"$want_msg\"" ;;
+  esac
+  if [ -z "$why" ] && [ -n "$want_relay" ]; then
+    case "$out" in
+      *"$want_relay"*) ;;
+      *) why="$got for the right reason, but did not relay \"$want_relay\"" ;;
+    esac
+  fi
+  if [ -z "$why" ] && [ -n "$want_absent" ]; then
+    case "$out" in
+      *"$want_absent"*) why="$got for the right reason, but said \"$want_absent\" when it should not" ;;
+    esac
+  fi
+  [ -n "$why" ] || return 0
+  fail=$((fail + 1))
+  echo "FAIL  $name: $why" >&2
+  echo "$out" | sed 's/^/      /' >&2
+  return 1
+}
+
+
 # Runs check-writes against a fake gcloud answering with the given versioning
 # setting and object listing. want=refuse|clean
 # ⚠️ THE LISTING'S EXIT CODE IS A PARAMETER, BECAUSE THE REAL ONE HAS ONE.
@@ -64,37 +104,7 @@ check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
     echo "$out" | sed 's/^/      /' >&2
     return
   fi
-  case "$out" in
-    *"$want_msg"*) ;;
-    *) fail=$((fail + 1))
-       echo "FAIL  $name: $got, but for the wrong reason -- wanted it to say \"$want_msg\"" >&2
-       echo "$out" | sed 's/^/      /' >&2
-       return ;;
-  esac
-  # want_relay is what gcloud itself said, which the refusal must hand to the
-  # human: two inputs the script cannot tell apart (an empty bucket and a
-  # 403) are told apart HERE or nowhere.
-  if [ -n "$want_relay" ]; then
-    case "$out" in
-      *"$want_relay"*) ;;
-      *) fail=$((fail + 1))
-         echo "FAIL  $name: $got for the right reason, but did not relay \"$want_relay\"" >&2
-         echo "$out" | sed 's/^/      /' >&2
-         return ;;
-    esac
-  fi
-  # want_absent is for wording the refusal must NOT carry -- a dangling
-  # "gcloud said:" with nothing under it is a refusal quoting a witness that
-  # said nothing.
-  if [ -n "$want_absent" ]; then
-    case "$out" in
-      *"$want_absent"*)
-        fail=$((fail + 1))
-        echo "FAIL  $name: $got for the right reason, but said \"$want_absent\" when it should not" >&2
-        echo "$out" | sed 's/^/      /' >&2
-        return ;;
-    esac
-  fi
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return
   pass=$((pass + 1)); echo "ok    $name ($got)"
 }
 
@@ -104,25 +114,28 @@ check_lock() { # name want period describe_exit describe_stderr confirm want_msg
              #       [want_relay] [want_absent]
   local name="$1" want="$2" period="$3" describe_exit="$4" describe_said="$5" confirm="$6" want_msg="$7"
   local want_relay="${8:-}" want_absent="${9:-}"
+  local bucket=scratch
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin"
-  # ⚠️ THE FAKE RECORDS THE LOCK, because "it said LOCKED" is not "it locked".
-  # Without this marker, deleting the `buckets update --lock-retention-period`
-  # line left every case green: the script announced a one-way door it had
-  # never opened.
+  # ⚠️ THE FAKE RECORDS THE LOCK, AND WHICH BUCKET IT LOCKED. "It said
+  # LOCKED" is not "it locked" -- without this marker, deleting the
+  # `buckets update --lock-retention-period` line left every case green, and
+  # the script announced a one-way door it had never opened. Recording the
+  # arguments rather than a bare touch catches the other half: a lock aimed
+  # at a bucket that is not the one named.
   {
     echo '#!/bin/sh'
     echo 'case "$*" in'
     printf "  *describe*) printf '%%s\\n' '%s'; printf '%s' >&2; exit %s ;;\n" \
       "$period" "$describe_said" "$describe_exit"
-    printf "  *lock-retention-period*) : > '%s/locked'; exit 0 ;;\n" "$dir"
+    printf "  *lock-retention-period*) printf '%%s' \"\$*\" > '%s/locked'; exit 0 ;;\n" "$dir"
     echo "  *) exit 0 ;;"
     echo 'esac'
   } > "$dir/bin/gcloud"
   chmod +x "$dir/bin/gcloud"
 
   set +e
-  out=$(PATH="$dir/bin:$PATH" TRUSS_RECORDS_BUCKET=scratch \
+  out=$(PATH="$dir/bin:$PATH" TRUSS_RECORDS_BUCKET="$bucket" \
     TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT="$confirm" "$SCRIPT" lock 2>&1); rc=$?
   set -e
   local got=clean
@@ -132,35 +145,19 @@ check_lock() { # name want period describe_exit describe_stderr confirm want_msg
     echo "$out" | sed 's/^/      /' >&2
     return
   fi
-  case "$out" in
-    *"$want_msg"*) ;;
-    *) fail=$((fail + 1))
-       echo "FAIL  $name: $got, but for the wrong reason -- wanted it to say \"$want_msg\"" >&2
-       echo "$out" | sed 's/^/      /' >&2
-       return ;;
-  esac
-  if [ -n "$want_relay" ]; then
-    case "$out" in
-      *"$want_relay"*) ;;
-      *) fail=$((fail + 1))
-         echo "FAIL  $name: $got for the right reason, but did not relay \"$want_relay\"" >&2
-         echo "$out" | sed 's/^/      /' >&2
-         return ;;
-    esac
-  fi
-  if [ -n "$want_absent" ]; then
-    case "$out" in
-      *"$want_absent"*)
-        fail=$((fail + 1))
-        echo "FAIL  $name: $got for the right reason, but said \"$want_absent\" when it should not" >&2
-        echo "$out" | sed 's/^/      /' >&2
-        return ;;
-    esac
-  fi
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return
   # ⚠️ THE DOOR ITSELF, ON EVERY CASE. A refusal that locked anyway is the
   # worst outcome this script has, and it is invisible in the exit code.
-  if [ "$want" = clean ] && [ ! -f "$dir/locked" ]; then
-    fail=$((fail + 1)); echo "FAIL  $name: said so, but never locked" >&2; return
+  if [ "$want" = clean ]; then
+    if [ ! -f "$dir/locked" ]; then
+      fail=$((fail + 1)); echo "FAIL  $name: said so, but never locked" >&2; return
+    fi
+    case "$(cat "$dir/locked")" in
+      *"gs://$bucket"*) ;;
+      *) fail=$((fail + 1))
+         echo "FAIL  $name: locked, but not the bucket it was given -- gcloud got: $(cat "$dir/locked")" >&2
+         return ;;
+    esac
   fi
   if [ "$want" = refuse ] && [ -f "$dir/locked" ]; then
     fail=$((fail + 1)); echo "FAIL  $name: refused, and locked the bucket anyway" >&2; return
