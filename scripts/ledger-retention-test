@@ -258,6 +258,13 @@ check_lock "no policy is refused, and says to set one" refuse '' 0 '' scratch \
 check_lock "an unconfirmed lock is refused" refuse 7776000 0 '' '' \
   "TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT"
 
+# ⚠️ THE CONFIRMATION IS THE BUCKET'S NAME, NOT A NON-EMPTY STRING. With only
+# the empty and correct values covered, weakening the guard to `[ -n ... ]`
+# left the suite green -- and a confirmation you can satisfy without having
+# read which bucket is about to become permanent is not a confirmation.
+check_lock "confirming the wrong bucket is refused" refuse 7776000 0 '' some-other-bucket \
+  "TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT"
+
 check_lock "a policy plus the bucket named locks" clean 7776000 0 '' scratch \
   "this cannot be undone"
 
