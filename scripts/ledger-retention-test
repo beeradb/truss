@@ -104,7 +104,12 @@ check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
     echo "$out" | sed 's/^/      /' >&2
     return
   fi
-  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return
+  # ⚠️ `|| return 0`, NOT `|| return`. assert_out's non-zero status would
+  # propagate out of this function, and under `set -e` that aborts the whole
+  # suite at the first wrong-reason failure -- every later case skipped and
+  # no summary printed, while the sibling wanted/got path carries on. A test
+  # runner that stops at the first finding hides the rest of them.
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return 0
   pass=$((pass + 1)); echo "ok    $name ($got)"
 }
 
@@ -145,7 +150,12 @@ check_lock() { # name want period describe_exit describe_stderr confirm want_msg
     echo "$out" | sed 's/^/      /' >&2
     return
   fi
-  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return
+  # ⚠️ `|| return 0`, NOT `|| return`. assert_out's non-zero status would
+  # propagate out of this function, and under `set -e` that aborts the whole
+  # suite at the first wrong-reason failure -- every later case skipped and
+  # no summary printed, while the sibling wanted/got path carries on. A test
+  # runner that stops at the first finding hides the rest of them.
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return 0
   # ⚠️ THE DOOR ITSELF, ON EVERY CASE. A refusal that locked anyway is the
   # worst outcome this script has, and it is invisible in the exit code.
   if [ "$want" = clean ]; then
