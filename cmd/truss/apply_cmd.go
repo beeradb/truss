@@ -46,6 +46,7 @@ type tofuFactory func(env []string) tofuRunner
 // the whole client.
 type forgeGateway interface {
 	Protection(ctx context.Context, branch string) (gates.Protection, error)
+	Rulesets(ctx context.Context, branch string) (gates.Rulesets, error)
 	InstallationToken(ctx context.Context) (string, time.Time, error)
 	PullNumbersForCommit(ctx context.Context, sha string) ([]int, error)
 	PullRequest(ctx context.Context, number int) (gates.PullRequest, error)
@@ -284,10 +285,31 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	)
 
 	gateOK := false
+	var problems []string
 	prot, err := d.Forge.Protection(ctx, "main")
 	if err != nil {
-		failure = fmt.Sprintf("could not read branch protection for main: %v", err)
-	} else if problems := gates.CheckProtection(prot, d.Cfg.RequiredCheck); len(problems) > 0 {
+		problems = append(problems, fmt.Sprintf("could not read branch protection for main: %v", err))
+	} else {
+		problems = append(problems, gates.CheckProtection(prot, d.Cfg.RequiredCheck)...)
+	}
+	// ⚠️ RULESETS ARE READ AND CHECKED ALONGSIDE PROTECTION, NEVER INSTEAD OF
+	// IT -- the two are independent controls and either can be the one
+	// actually governing the branch. A push straight to this repository's
+	// own main on 2026-09-09 was ACCEPTED by a ruleset bypass actor while
+	// classic protection read compliant; CheckProtection alone would still
+	// say so today. See gates.Ruleset's doc comment for the evidence and
+	// docs/work-items.md's ruleset section for the reasoning. So a failure
+	// reading rulesets, or a problem CheckRulesets finds, refuses the same
+	// way a protection problem does -- same tail, same "refuses everything
+	// and alerts" behaviour -- joined into the one sentence below rather
+	// than a second, easier-to-miss failure path.
+	rulesets, rsErr := d.Forge.Rulesets(ctx, "main")
+	if rsErr != nil {
+		problems = append(problems, fmt.Sprintf("could not read rulesets for main: %v", rsErr))
+	} else {
+		problems = append(problems, gates.CheckRulesets(rulesets)...)
+	}
+	if len(problems) > 0 {
 		failure = "branch protection on main does not meet the bar: " + strings.Join(problems, "; ")
 	} else {
 		gateOK = true

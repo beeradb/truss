@@ -84,6 +84,15 @@ type fakeForge struct {
 	ProtectionResult gates.Protection
 	ProtectionErr    error
 
+	// RulesetsResult, left at its zero value (an empty Applicable), answers
+	// "no rulesets apply to this branch" -- itself compliant, since
+	// CheckRulesets has nothing to refuse on an empty list. That is what
+	// lets every existing fixture in this file that only sets
+	// ProtectionResult keep passing: it was never making a claim about
+	// rulesets, and a real repository with none is not a hole.
+	RulesetsResult gates.Rulesets
+	RulesetsErr    error
+
 	Token    string
 	TokenErr error
 
@@ -104,6 +113,10 @@ type fakeForge struct {
 
 func (f *fakeForge) Protection(ctx context.Context, branch string) (gates.Protection, error) {
 	return f.ProtectionResult, f.ProtectionErr
+}
+
+func (f *fakeForge) Rulesets(ctx context.Context, branch string) (gates.Rulesets, error) {
+	return f.RulesetsResult, f.RulesetsErr
 }
 
 func (f *fakeForge) InstallationToken(ctx context.Context) (string, time.Time, error) {
@@ -395,6 +408,12 @@ func newFakeForge(t *testing.T, sha string, s fakeForgeScenario) *httptest.Serve
 		switch {
 		case strings.HasSuffix(p, "/branches/main/protection"):
 			json.NewEncoder(w).Encode(s.Protection)
+		case strings.HasSuffix(p, "/rules/branches/main"):
+			// No scenario here sets up a ruleset, so this always answers "no
+			// rulesets apply" -- CheckRulesets has nothing to refuse on that,
+			// matching the zero-value RulesetsResult the in-process fakeForge
+			// above defaults to.
+			_, _ = w.Write([]byte(`[]`))
 		case strings.Contains(p, "/commits/") && strings.HasSuffix(p, "/pulls"):
 			items := make([]map[string]any, len(s.PRNumbers))
 			for i, n := range s.PRNumbers {

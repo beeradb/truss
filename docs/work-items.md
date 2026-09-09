@@ -302,6 +302,37 @@ classic-to-ruleset conversion in August 2026. On a converted repository
 refuses -- fails closed, correctly, but it means truss cannot run at all
 against a repository whose owner accepted that migration.
 
+**CLOSED 2026-09-09.** `internal/forge/rulesets.go` and
+`internal/gates.CheckRulesets` exist now, wired into `runApplyPass` in
+`cmd/truss/apply_cmd.go` beside the `Protection` read, joined into the same
+refusal sentence. Verified against GitHub's REST API description (not
+guessed): `rules/branches/{branch}` never carries `bypass_actors`, only
+`ruleset_id` per entry, confirming the two-read shape above; `enforcement` is
+`active` | `evaluate` | `disabled`; a bypass actor's `actor_type` also
+includes `User` (not listed above) and `bypass_mode` also includes `exempt`
+(likewise not listed above). `rules/branches/{branch}` itself documents that
+it omits rules from an `evaluate` or `disabled` ruleset entirely, so a
+ruleset reaching `gates.Rulesets.Applicable` at all is proof it was active
+moments earlier; `CheckRulesets` refuses one whose *second* read (the
+per-ruleset call, which is the only one carrying `bypass_actors`) disagrees
+and no longer says `active`, treating that disagreement as a race or an
+attempt to dodge the bypass-actor read rather than as "additive and inert".
+A ruleset that was never active in the first place is not refused for
+existing, matching the ruling above that a non-enforcing ruleset is not
+automatically a hole.
+
+⚠️ **OPERATIONAL NOTE: this can stop a live applier, and that is the point.**
+If the managed repository has any bypass actor on any ruleset that applies to
+`main`, truss now refuses every apply -- correctly, fail-closed, the same
+class of stop `CheckProtection` already causes when classic protection is
+misconfigured. `CheckRulesets`'s refusal names the ruleset, its id, and the
+actor types (and bypass mode) so an operator goes straight to the GitHub UI
+for that ruleset rather than re-deriving which one from a generic message.
+Before turning this on against a repository nobody has audited for bypass
+actors, check `GET /repos/{o}/{r}/rules/branches/main` and each ruleset it
+names for a non-empty `bypass_actors` -- the gate will otherwise announce it
+the hard way, by refusing the next pass.
+
 ## `data "external"` executes during the applier's own plan
 
 `docs/threat-model.md` credits a grep for `provisioner` blocks and `external`
@@ -453,13 +484,15 @@ digest covers, which touches the gate's evidentiary basis rather than just
 tidiness. The same limit applies to Telegram for a drift report naming many
 roots.
 
-**Artifact attestation on the release.** Pinning by digest inside the
+**Artifact attestation on the release.** DONE. Pinning by digest inside the
 reviewed diff proves the diff NAMES a digest; it does not prove that digest
 came from this CI rather than being typed in. `actions/attest-build-provenance`
 plus `gh attestation verify` closes it using infrastructure GitHub already
 hosts and this project already trusts for merge-commit verification. ⚠️ It
 does NOT belong on the plan digest, where independent re-execution is already
 the stronger proof and a signature would be a second way to prove one fact.
+
+To verify an artifact, run: `gh attestation verify <artifact> --repo <owner>/<repo>`
 
 **`govulncheck ./...`** next to `go vet` in the pre-commit chain and in
 `ci.yml`. It reports only reachable vulnerabilities, so it does not bring the
