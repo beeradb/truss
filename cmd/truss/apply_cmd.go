@@ -776,6 +776,11 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), false
 	}
 
+	// Recorded before anything is applied, so it is the depth the pass FOUND
+	// rather than what it left behind. A pass that applies three of five
+	// commits and then fails reports 5, which is the number somebody wants.
+	d.Obs.queued(len(commits))
+
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
 		d.Obs.failed(classCredentials)

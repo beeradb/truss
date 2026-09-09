@@ -66,11 +66,17 @@ type rootPhase struct{ root, phase string }
 // passMetrics -- so an absent recorder cannot change what truss does, only
 // what it reports about a step no pass ran.
 type passObs struct {
-	failures      map[string]bool
-	gateOK        map[string]bool
-	rootSeconds   map[rootPhase]float64
-	rootChanges   map[string]int
-	rootFailures  map[string]int
+	failures     map[string]bool
+	gateOK       map[string]bool
+	rootSeconds  map[rootPhase]float64
+	rootChanges  map[string]int
+	rootFailures map[string]int
+	// queueDepth is how many commits the pass found waiting, and queueKnown
+	// is whether it ever got to look. They are separate because "nothing is
+	// waiting" and "we never reached the queue" are different facts and the
+	// second one is what a failed gate produces.
+	queueDepth    int
+	queueKnown    bool
 	digestChecks  int
 	digestRefused int
 	lockContended bool
@@ -134,6 +140,16 @@ func (o *passObs) rootFailed(root string) {
 		return
 	}
 	o.rootFailures[root]++
+}
+
+// queued records how many commits are waiting to be applied, at the moment
+// the pass looked. Called once, by runCommitLoop, which is the only thing
+// that knows.
+func (o *passObs) queued(n int) {
+	if o == nil {
+		return
+	}
+	o.queueDepth, o.queueKnown = n, true
 }
 
 func (o *passObs) digestChecked(refused bool) {
@@ -276,6 +292,27 @@ func passMetrics(finished time.Time, duration time.Duration, driftRun bool, rep 
 			Help:    "Ledger objects this pass could not write. Every one of them is a durable record that no longer exists.",
 			Samples: []metrics.Sample{{Value: float64(o.ledgerErrors)}},
 		},
+	}
+
+	// ⚠️ EMITTED ONLY WHEN THE PASS ACTUALLY REACHED THE QUEUE, and the
+	// absence is the point rather than a gap. A pass refused at the branch
+	// protection gate never ran the commit loop and knows nothing about how
+	// much work is waiting; reporting 0 for it would be a claim it did not
+	// earn, and would be indistinguishable from a queue that is genuinely
+	// empty. On a drift pass it is absent for the same reason -- that pass
+	// never walks the queue at all.
+	//
+	// ⚠️ THIS IS THE COUNTER docs/work-items.md ASKED FOR. Nothing surfaced
+	// that the applier was N commits behind an unresolved failure until
+	// somebody went looking, and a refusal that wedges the queue looks
+	// identical to a quiet week from every other series here: HEAD does not
+	// move, the same refusal repeats, and the pile behind it is invisible.
+	if o.queueKnown {
+		set = append(set, metrics.Family{
+			Name:    "truss_queue_depth",
+			Help:    "Commits waiting to be applied when this pass looked. Absent when the pass never reached the queue -- a refused gate knows nothing about it, and reporting zero would be a claim it did not earn.",
+			Samples: []metrics.Sample{{Value: float64(o.queueDepth)}},
+		})
 	}
 
 	set = append(set, metrics.Family{

@@ -137,6 +137,7 @@ editing; pick your Prometheus from the dropdown on first open.
 | `truss-failures` | an apply, plan or credential failure; a ledger object that could not be written; an error-level log line; a pass slower than its own cadence |
 | `truss-credentials` | a credential expired, expiring within 14 days, or recording no expiry; a sweep that could not run |
 | `truss-rotation` | rotation failed; rotation is not running at all; the publisher did not confirm the write |
+| `truss-queue` | the queue is deep and not draining |
 | `truss-drift` | a root drifted; a root whose drift could not be checked |
 
 `alerts/vault.rules.yml` covers the store itself, because truss can be
@@ -183,6 +184,7 @@ grouping key, on top of the labels below.
 | `truss_pass_failure` | `class` | 1 per class of thing that went wrong; a pass can set several |
 | `truss_pass_commits_applied` | | commits this pass applied |
 | `truss_pass_commits_noop` | | commits recorded as touching no root |
+| `truss_queue_depth` | | commits waiting when the pass looked — **absent** when it never reached the queue |
 | `truss_pass_lock_contended` | | 1 when another holder had the state lock |
 | `truss_pass_ledger_errors` | | ledger objects that could not be written |
 | `truss_pass_log_events` | `level` | lines logged at `warn` and `error` |
@@ -207,7 +209,18 @@ grouping key, on top of the labels below.
 | `truss_credential_expiry_unrecorded` | `credential` | 1 per credential recording no expiry at all |
 | `truss_build_info` | `go_version`, `revision` | always 1; the labels are the payload |
 
-### The three that are easy to misread
+### The four that are easy to misread
+
+**`truss_queue_depth` absent is not `truss_queue_depth` zero.** A pass refused
+at the branch-protection gate never runs the commit loop, so it knows nothing
+about how much work is waiting and reports nothing rather than claiming a
+number it did not measure. Empty beside a red *Last pass* means "we are not
+looking"; zero means "nothing to do". `TrussQueueIsNotDraining` fires on the
+wedge — a commit at the head of the queue that can never succeed, which every
+pass re-attempts and re-refuses while the pile behind it grows. Every other
+series looks like a steady state while that happens.
+
+
 
 **`truss_expiry_sweep_ok` has to be read before any finding.** The sweep
 refuses to claim a clean bill it did not earn — but a sweep that *could not
@@ -400,8 +413,8 @@ than reasoned about.
 the series arrive as `{job="truss", pass="drift"}`. This is the setting whose
 absence breaks every selector here while looking like nothing.
 
-**The alerting rules.** All 25 — 19 truss and 6 vault — load into Prometheus
-across all 8 groups and evaluate against real data with no `lastError`. With
+**The alerting rules.** All 26 — 20 truss and 6 vault — load into Prometheus
+across all 9 groups and evaluate against real data with no `lastError`. With
 no Vault in the lab, `VaultIsNotReporting` is the one that goes pending and
 the other five stay inactive, which is exactly what that rule is for. Better: they were
 watched going **red and then green**. The test fixture's clock runs behind

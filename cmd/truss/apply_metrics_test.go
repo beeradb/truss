@@ -575,3 +575,45 @@ func TestAFailedPassAlwaysNamesAClass(t *testing.T) {
 		}
 	})
 }
+
+// TestTheQueueDepthIsWhatThePassFoundNotWhatItLeft. A pass that applies some
+// of the queue and then fails should report what was waiting when it looked --
+// that is the number somebody asks for after an alert.
+func TestTheQueueDepthIsWhatThePassFoundNotWhatItLeft(t *testing.T) {
+	g := newGateway(t)
+	deps, _ := successPassDeps(t, "queuesha")
+	deps.Cfg.MetricsPushURL = g.srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, "queuesha"); result.failure != "" {
+		t.Fatalf("result.failure = %q, want empty", result.failure)
+	}
+
+	body := g.only(t).body
+	if got := sampleValue(t, body, "truss_queue_depth"); got != "1" {
+		t.Errorf("truss_queue_depth = %s, want 1 -- one commit was waiting", got)
+	}
+}
+
+// TestAPassThatNeverReachedTheQueueReportsNoDepth. ⚠️ THE ABSENCE IS THE
+// POINT. A pass refused at the branch-protection gate never ran the commit
+// loop and knows nothing about how much work is waiting. Reporting 0 would be
+// a claim it did not earn, and would read identically to a queue that is
+// genuinely empty -- which is the difference between "nothing to do" and
+// "we are not looking".
+func TestAPassThatNeverReachedTheQueueReportsNoDepth(t *testing.T) {
+	g := newGateway(t)
+	deps, _ := failingPassDeps(t)
+	deps.Cfg.MetricsPushURL = g.srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, "queuerefusedsha"); result.failure == "" {
+		t.Fatal("this fixture is supposed to be refused")
+	}
+
+	if hasSeries(g.only(t).body, "truss_queue_depth") {
+		t.Error("a pass refused before the commit loop reported a queue depth it never measured")
+	}
+}

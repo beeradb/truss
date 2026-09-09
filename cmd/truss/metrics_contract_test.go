@@ -41,6 +41,7 @@ func fullMetricSet(t *testing.T) metrics.Set {
 	o.rootTook("platform", "apply", 1)
 	o.rootChanged("platform", 2)
 	o.rootFailed("platform")
+	o.queued(3)
 	o.digestChecked(true)
 	o.contended()
 	o.drifting()
@@ -103,6 +104,47 @@ func emittedNames(t *testing.T) map[string]bool {
 		names[f.Name] = true
 	}
 	return names
+}
+
+// TestTheFixtureEmitsEveryFamilyTheCodeCanEmit is the guard on the guard, and
+// it exists because the fixture silently stopped being complete.
+//
+// ⚠️ THE TWO CHECKS BELOW ARE ONLY AS GOOD AS fullMetricSet. A family truss
+// emits only under some condition -- a drifted root, a credential with no
+// recorded expiry, a queue it actually reached -- is invisible to them unless
+// the fixture triggers it. truss_queue_depth arrived, was emitted by the code,
+// was watched by nothing, and neither check noticed, because the fixture never
+// called queued(). That is the same shape as a dashboard naming a metric that
+// no longer exists: a guard reporting success over the case it was written
+// for.
+//
+// So this reads the family names out of the source and asserts the fixture
+// produces every one. A new metrics.Family that the fixture cannot reach
+// fails here, at the moment it is added.
+func TestTheFixtureEmitsEveryFamilyTheCodeCanEmit(t *testing.T) {
+	src, err := os.ReadFile("metrics.go")
+	if err != nil {
+		t.Fatalf("reading metrics.go: %v", err)
+	}
+	declared := regexp.MustCompile(`Name:\s*"(truss_[a-z0-9_]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(declared) == 0 {
+		t.Fatal("no metric families found in metrics.go -- did they move?")
+	}
+
+	emitted := emittedNames(t)
+	var missing []string
+	for _, m := range declared {
+		if !emitted[m[1]] {
+			missing = append(missing, m[1])
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Errorf("metrics.go can emit these and fullMetricSet does not produce them: %s\n"+
+			"Populate the passObs or notify.Report field that triggers each, or the "+
+			"contract checks below silently stop covering them.",
+			strings.Join(missing, ", "))
+	}
 }
 
 func TestEveryMetricADashboardOrRuleNamesIsOneTrussEmits(t *testing.T) {

@@ -485,12 +485,19 @@ commits behind an unresolved failure until somebody goes looking. "Report the
 counter that moves" argues for it directly, and until the local CLI exists
 the heartbeat is the only place it could show up.
 
-⚠️ **Metrics did NOT solve this, and the shape of the gap is now clearer.**
-`truss_pass_commits_applied` says how many commits a pass got through, which
-is the numerator; nothing anywhere counts how many are waiting. A refused
-commit is visible as a refusal repeating pass after pass, and a queue growing
-behind it is still invisible. `runCommitLoop` knows `len(commits)` before it
-starts and would only have to say so.
+DONE, as `truss_queue_depth`, and it went exactly where this entry said it
+would: `runCommitLoop` knew `len(commits)` before it started and now says so.
+`TrussQueueIsNotDraining` alerts on the wedge -- deep and not moving -- rather
+than on depth alone, because a deep queue that is draining is a busy afternoon.
+
+⚠️ **It is emitted only when the pass actually reached the queue, and the
+absence is load-bearing.** A pass refused at the branch-protection gate knows
+nothing about how much work is waiting; reporting 0 would be a claim it did
+not earn and would read identically to a genuinely empty queue.
+
+⚠️ **It is still not in the heartbeat**, which is what this entry asked for
+literally. The heartbeat is read by a human opening an object in a bucket; the
+metric is read by a rule. Both are worth having and only one exists.
 
 **Plan-comment length.** Atlantis chunks its PR comment fence-aware because
 GitHub truncates. A `platform` plan touching hundreds of resources is the

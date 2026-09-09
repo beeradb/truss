@@ -287,6 +287,31 @@ groups:
             and every minted credential is on a 45-day clock that is still
             running.
 
+  - name: truss-queue
+    rules:
+      # ⚠️ THE WEDGE. HEAD does not advance past a commit that failed, so every
+      # later commit queues behind it and each pass repeats the same refusal.
+      # Every other series on the dashboard looks like a steady state: the same
+      # failure, the same class, nothing changing. What moves is the pile, and
+      # until truss_queue_depth existed nothing reported it.
+      #
+      # ⚠️ IT IS `and` ON applied == 0 DELIBERATELY. A deep queue that is
+      # DRAINING is a busy afternoon, not an incident -- somebody merged twenty
+      # commits. A queue that is deep and not moving is the wedge.
+      - alert: TrussQueueIsNotDraining
+        expr: truss_queue_depth{pass="frequent"} > 1 and truss_pass_commits_applied{pass="frequent"} == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} commits are queued and none are being applied'
+          description: >-
+            The queue is not moving. The usual cause is a commit at the head of
+            it that can never succeed, which every pass then re-attempts and
+            re-refuses. Read the failure class and the most recent
+            failed/<sha> ledger object; the commits behind it are blameless
+            and will apply as soon as it is resolved.
+
   - name: truss-drift
     rules:
       # ⚠️ DRIFT IS REPORTED, NEVER RECONCILED. Undoing a change somebody made
