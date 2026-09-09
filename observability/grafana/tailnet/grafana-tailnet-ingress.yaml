@@ -1,0 +1,54 @@
+# Expose an existing in-cluster Grafana on the tailnet, so a tailnet node can
+# reach it without going through the public IP-allowlist that fronts
+# console.fplarmband.com. This is the k3s-native way to "open it to the
+# tailnet" -- the same mechanism the vault cluster uses for Vault's transit
+# seal (platform/vault/41-tailnet-ingress.yaml).
+#
+# ⚠️ IT NEEDS THE TAILSCALE OPERATOR INSTALLED ON THIS CLUSTER FIRST. The
+# operator is what turns `ingressClassName: tailscale` into a real tailnet
+# endpoint with a Let's-Encrypt MagicDNS certificate. Install it the way the
+# vault cluster does -- RENDERED, not as a HelmChart object, because the
+# render is where you catch the unrestricted-impersonation ClusterRole the
+# chart installs when apiServerProxyConfig.mode is "true"
+# (platform/vault/tailscale/kustomization.yaml's header is emphatic on this):
+#
+#   helm repo add tailscale https://pkgs.tailscale.com/helmcharts
+#   helm template tailscale-operator tailscale/tailscale-operator \
+#     --version 1.102.3 --namespace tailscale --create-namespace \
+#     --set-string apiServerProxyConfig.mode=false \
+#     --set-string operatorConfig.hostname=armband-k8s-operator \
+#     | less        # read it, THEN apply -f -
+#
+# The operator reads its OAuth client from a Secret named `operator-oauth` in
+# the tailscale namespace that must already exist (no oauth block in values,
+# so the chart renders no Secret -- same as the vault cluster, keeping the
+# credential out of any manifest).
+#
+# ⚠️ CONFIRM THE BACKEND SERVICE. This assumes Grafana is a Service named
+# `grafana` on port 80 in namespace `monitoring`. If yours differs -- a
+# different namespace, or port 3000 -- fix the three fields below. The whole
+# point of exposing it here is to reach Grafana directly, bypassing the
+# Traefik allowlist, so point at the Grafana Service, not at Traefik.
+#
+# ⚠️ ITS OWN TAG, so a tailnet ACL grants exactly this and not every service
+# the operator ever exposes. Requires a tagOwners entry
+# ("tag:grafana": ["tag:k8s-operator"]) or the operator cannot claim it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-tailnet
+  namespace: monitoring          # ⚠️ the namespace Grafana runs in
+  annotations:
+    tailscale.com/tags: "tag:grafana"
+spec:
+  ingressClassName: tailscale
+  # tls.hosts is how the operator is told the MagicDNS name; the served URL
+  # becomes https://grafana.<tailnet>.ts.net (tail4eb13f.ts.net here).
+  tls:
+    - hosts:
+        - grafana
+  defaultBackend:
+    service:
+      name: grafana              # ⚠️ the Grafana Service name
+      port:
+        number: 80               # ⚠️ 80, or 3000 if that is what it listens on
