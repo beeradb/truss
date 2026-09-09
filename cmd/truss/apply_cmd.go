@@ -1058,9 +1058,11 @@ func rootDeclaresCloudflare(workdir, root string) (bool, error) {
 // right" rule forbids. Fail loud by counting it, not by swallowing it.
 //
 // Returns an error, never a zero count, for a document it cannot read as a
-// plan -- one that does not parse, one carrying neither `errored` nor a
-// usable `resource_changes`, or one whose `resource_changes` is not a list.
-// The caller refuses on it; RootSummary.ResourceChanges is left nil.
+// plan: one that does not parse, one carrying no usable `errored` and no
+// usable `resource_changes` -- usable meaning the field carries a value of
+// the type OpenTofu writes, not merely that the name is present -- or one
+// whose `resource_changes` is not a list. The caller refuses on it;
+// RootSummary.ResourceChanges is left nil.
 func countResourceChanges(planJSON []byte) (int, error) {
 	// ⚠️ MEASURED FROM OPENTOFU'S OWN STRUCT TAGS, 2026-09-09
 	// (internal/command/jsonplan, the plan representation this consumes):
