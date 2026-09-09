@@ -70,6 +70,18 @@ gateway that is down or wrong cannot fail a pass: the push is the last thing a
 pass does, its failure is a non-fatal `level=warn` line, and the alert and the
 heartbeat have already been written by then.
 
+⚠️ **On a truss build that predates this feature, the variable does nothing —
+silently.** `config.Load` reads only the variables truss was built knowing by
+name; one it has never heard of is ignored, with no error and no log line. The
+pass runs exactly as before and pushes nothing, so every dashboard reads "No
+data" — which is indistinguishable from an applier that has gone quiet, and is
+the one thing this whole directory exists to refuse. **Deploy the variable and
+the image together.**
+
+`truss_build_info` is how to tell the two apart afterwards: it exists only if a
+build that emits metrics actually ran. No truss series at all means the image,
+not the gateway.
+
 ⚠️ **It is a bearer secret in the same sense the dead-man's-switch ping URL
 is.** A gateway behind basic auth carries its credentials in the URL's
 userinfo. Truss never logs it, never echoes it into an error, and never renders

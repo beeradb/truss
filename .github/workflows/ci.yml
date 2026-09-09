@@ -92,50 +92,10 @@ jobs:
       # expression passes while being unparseable. A bad panel query renders
       # "No data", which is what a quiet week looks like; a bad rule makes
       # Prometheus reject the WHOLE file, silently disarming every other rule
-      # beside it. scripts/check-observability parses all of them with
-      # Prometheus's own parser.
-      #
-      # ⚠️ VERIFIED AGAINST THE RELEASE'S OWN SHA256SUMS, which is the exact
-      # shape Dockerfile uses for the OpenTofu binary -- one archive, one
-      # checksum, no extra thing to trust. Pinned to a version rather than
-      # `latest` for the same reason every action here is pinned to a SHA.
-      - name: promtool
-        run: |
-          set -eux
-          v=3.5.0
-          f="prometheus-${v}.linux-amd64"
-          curl -fsSL -o /tmp/prom.tar.gz \
-            "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}.tar.gz"
-          curl -fsSL -o /tmp/prom.sums \
-            "https://github.com/prometheus/prometheus/releases/download/v${v}/sha256sums.txt"
-          grep " ${f}.tar.gz\$" /tmp/prom.sums \
-            | sed "s|${f}.tar.gz|/tmp/prom.tar.gz|" \
-            | sha256sum -c -
-          tar xzf /tmp/prom.tar.gz -C /tmp "${f}/promtool"
-          sudo mv "/tmp/${f}/promtool" /usr/local/bin/promtool
-
-      # ⚠️ AND logcli, BECAUSE THE DASHBOARDS SPEAK TWO QUERY LANGUAGES NOW.
-      # dashboards/truss-logs.json queries Loki, and LogQL handed to promtool
-      # would be reported as a syntax error on every panel -- so
-      # check-observability routes by each panel's datasource and the Loki half
-      # goes here. `logcli query --stdin` parses a query without a server.
-      #
-      # Same verification as promtool above: the release's own SHA256SUMS.
-      # Unzipped with python because the runner has unzip but this is one less
-      # thing to depend on being present.
-      - name: logcli
-        run: |
-          set -eux
-          v=3.4.2
-          curl -fsSL -o /tmp/logcli.zip \
-            "https://github.com/grafana/loki/releases/download/v${v}/logcli-linux-amd64.zip"
-          curl -fsSL -o /tmp/loki.sums \
-            "https://github.com/grafana/loki/releases/download/v${v}/SHA256SUMS"
-          grep " logcli-linux-amd64.zip\$" /tmp/loki.sums \
-            | sed "s|logcli-linux-amd64.zip|/tmp/logcli.zip|" \
-            | sha256sum -c -
-          python3 -c "import zipfile; zipfile.ZipFile('/tmp/logcli.zip').extractall('/tmp')"
-          sudo install -m 0755 /tmp/logcli-linux-amd64 /usr/local/bin/logcli
+      # beside it. And the dashboards speak two query languages, so
+      # scripts/check-observability routes each query by its panel's
+      # datasource: PromQL to promtool, LogQL to logcli.
+      - uses: ./.github/actions/query-tools
 
       # TRUSS_REQUIRE_PROMTOOL=1 turns the script's local skip into a failure,
       # the same way TRUSS_REQUIRE_JQ=1 does for the digest differential test
