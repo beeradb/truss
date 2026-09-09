@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Parses every PromQL expression this repository ships -- the alerting rules
+# AND every query behind a dashboard panel -- with Prometheus's own parser.
+#
+# ⚠️ A DASHBOARD PANEL WITH A SYNTAX ERROR RENDERS "No data", WHICH IS WHAT A
+# QUIET WEEK LOOKS LIKE. Nothing else in this repository would notice:
+# cmd/truss/metrics_contract_test.go checks that the METRIC NAMES a panel
+# mentions are ones truss emits, which a malformed expression can pass while
+# being unparseable. An alerting rule Prometheus cannot load is worse -- the
+# whole file is rejected, so one bad expression silently disarms every other
+# rule beside it.
+#
+# ⚠️ IT CHECKS THE DASHBOARDS BY TURNING THEM INTO RULES. promtool has no
+# "check this dashboard" mode, so every panel's expr is wrapped in a
+# throwaway recording rule and handed to the same parser Prometheus uses at
+# load time. The wrapper is what makes the check real; without it the
+# dashboards are the half of this directory nothing validates.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if ! command -v promtool >/dev/null 2>&1; then
+  # ⚠️ THE SAME SHAPE internal/plan's jq DIFFERENTIAL TEST USES, AND FOR THE
+  # SAME REASON. Skipping locally is a convenience; skipping in CI would be a
+  # check that reports success without running, so CI sets the variable and
+  # this becomes a failure there.
+  if [ "${TRUSS_REQUIRE_PROMTOOL:-}" = "1" ]; then
+    echo "check-observability: promtool is not installed and TRUSS_REQUIRE_PROMTOOL=1" >&2
+    exit 1
+  fi
+  echo "check-observability: SKIPPED -- promtool is not installed." >&2
+  echo "check-observability: install it from a prometheus release, or set" >&2
+  echo "check-observability: TRUSS_REQUIRE_PROMTOOL=1 to make this a failure." >&2
+  exit 0
+fi
+
+command -v jq >/dev/null 2>&1 || {
+  echo "check-observability: jq is not installed; it reads the dashboards" >&2
+  exit 1
+}
+
+rules=observability/alerts/truss.rules.yml
+[ -f "$rules" ] || { echo "check-observability: no $rules" >&2; exit 1; }
+
+echo "check-observability: $rules"
+promtool check rules "$rules"
+
+# Every panel target, wrapped as a recording rule so promtool will parse it.
+# A block scalar carries the expression verbatim: panel queries contain double
+# quotes on every label matcher, and quoting them any other way is a source of
+# bugs in the checker rather than in the thing being checked.
+synth=$(mktemp -t truss-dashboard-rules.XXXXXX.yml)
+trap 'rm -f "$synth"' EXIT
+
+{
+  echo "groups:"
+  echo "  - name: dashboard-panels"
+  echo "    rules:"
+} > "$synth"
+
+n=0
+for dash in observability/dashboards/*.json; do
+  while IFS= read -r expr; do
+    [ -n "$expr" ] || continue
+    n=$((n + 1))
+    {
+      printf '      - record: dashboard_panel_%d\n' "$n"
+      printf '        expr: |\n'
+      # One level deeper than `expr:`, and every line of a multi-line query.
+      printf '%s\n' "$expr" | sed 's/^/          /'
+    } >> "$synth"
+    # ⚠️ THE WHOLE DOCUMENT, NOT .panels[].targets[]. A row panel that
+    # somebody collapses in Grafana and re-exports nests its children inside
+    # itself, so the obvious path silently stops seeing half the dashboard --
+    # and this check would go on passing over queries it no longer reads.
+    # Walking every object that has an `expr` cannot be outrun by a layout
+    # change.
+  done < <(jq -r '.. | objects | select(has("expr")) | .expr | select(. != "" and . != null)' "$dash")
+done
+
+[ "$n" -gt 0 ] || { echo "check-observability: no dashboard panel queries found -- did the JSON shape change?" >&2; exit 1; }
+
+echo "check-observability: $n dashboard panel queries"
+promtool check rules "$synth"

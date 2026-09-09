@@ -95,6 +95,16 @@ scan() { # pattern description
   # `opentofu/opentofu/releases/download/`, so a URL into any other repository
   # is still refused, including ours.
   hits=$(echo "$hits" | grep -vE 'https://github\.com/opentofu/opentofu/releases/download/' || true)
+  # Prometheus's release archive and its checksum file, under the identical
+  # rule and with the identical limit. ci.yml fetches promtool to parse the
+  # alerting rules and dashboard queries in observability/ -- the URL is the
+  # same string for every user of Prometheus and names the vendor's public
+  # release, never this deployment.
+  #
+  # ⚠️ PINNED TO `prometheus/prometheus/releases/download/` FOR THE REASON THE
+  # NOTE ABOVE GIVES: `github.com/<owner>/<repo>` is exactly the shape that
+  # names ours, so a URL into any other repository is still refused.
+  hits=$(echo "$hits" | grep -vE 'https://github\.com/prometheus/prometheus/releases/download/' || true)
   # The 1Password CLI's apt repository and signing key, under the same rule and
   # with the same limit: `downloads.1password.com/linux/` is a public package
   # source identical for every user, and the path after it carries a

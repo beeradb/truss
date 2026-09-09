@@ -46,6 +46,15 @@ nothing.
     go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # reachable stdlib vulnerabilities
     scripts/leakscan          # refuses anything identifying a real deployment
     scripts/leakscan-test     # proves leakscan still fails when it should
+    scripts/check-observability   # parses every alerting rule and panel query
+
+`check-observability` needs `promtool` from a Prometheus release and skips
+loudly without it; CI sets `TRUSS_REQUIRE_PROMTOOL=1`, which turns that skip
+into a failure — the same shape the jq differential test already uses. It
+exists because `go test` cannot tell a valid query from an invalid one that
+happens to name real metrics: a broken panel renders "No data", which is what
+a quiet week looks like, and a broken rule makes Prometheus reject the whole
+file and silently disarm every rule beside it.
 
 This repository is public and the platform it manages is not — that's the whole
 risk. A live deployment has real account ids, bucket names, hostnames and vault

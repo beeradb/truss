@@ -170,6 +170,12 @@ check 'other x/ still bites'   refuse d.go 'import "golang.org/x/mod/sumdb/note"
 # path instead, and this is what proves it.
 check 'opentofu release'     clean  d.txt 'curl -o t.zip https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip'
 check 'another repo on gh'   refuse d.txt 'see https://github.com/someone/private-infra/blob/main/apply.sh'
+check 'prometheus release'   clean  d.txt 'curl -o p.tgz https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz'
+# ⚠️ THE NEIGHBOUR THAT MUST STILL REFUSE. `prometheus/` alone would have been
+# the easy exemption and would have let every OTHER repository in that
+# organisation through -- and, far worse, taught the next person that an
+# org-wide match is acceptable here. The pin is to one project path.
+check 'prometheus, other repo' refuse d.txt 'https://github.com/prometheus/pushgateway/releases/download/v1.11.1/pushgateway.tar.gz'
 check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
 check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
 

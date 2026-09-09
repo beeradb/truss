@@ -271,6 +271,15 @@ role can list an item and read one metadata field — when it expires — and
 nothing else. It cannot read a secret's value and it cannot write one, so that
 row is the whole of what it can honestly say.
 
+### `push_time_seconds` is the gateway's clock, not truss's
+
+A Pushgateway adds `push_time_seconds` and `push_failure_time_seconds` to
+every group it holds, and they look like they answer the same question
+`truss_pass_timestamp_seconds` does. They do not, quite: the gateway's is when
+the push ARRIVED, truss's is when the pass FINISHED by its own clock. Alert on
+truss's — it is the one that keeps meaning the same thing if the transport
+ever changes, and it is what every rule here selects.
+
 ## Keeping this directory honest
 
 A dashboard that names a metric the code no longer emits renders "No data",
@@ -285,3 +294,36 @@ fails the build when that happens, in both directions:
 So renaming a metric fails `go test` until the artifacts here move with it.
 This is the same hazard `internal/plan/digest.go` carries against the
 consumer's `plan-digest` jq, answered the same way.
+
+A metric name being real is not the same as a query being valid, though, and
+`go test` cannot tell the difference — a syntactically broken expression names
+perfectly good metrics. `scripts/check-observability` parses every alerting
+rule AND every panel query with Prometheus's own parser:
+
+    scripts/check-observability          # skips loudly without promtool
+
+It runs in CI with `TRUSS_REQUIRE_PROMTOOL=1`, which turns that skip into a
+failure. Worth knowing what each half stops: a bad panel query renders "No
+data", which is what a quiet week looks like; a bad rule makes Prometheus
+reject the **whole file**, silently disarming every other rule beside it.
+
+### What has actually been run against real components
+
+Not asserted — measured, on 2026-09-09:
+
+- The exposition parses with `prometheus/common/expfmt`, the parser
+  Prometheus itself uses. 29 families, 43 series, escaping round-trips.
+- Two passes pushed to a **real Pushgateway** (v1.11.1), which accepted both
+  and re-exposed 78 series under `job="truss"` with `pass="frequent"` and
+  `pass="drift"` intact and NOT overwriting each other — which is the whole
+  reason the grouping key carries the pass.
+- `PUT` was watched replacing a group: a family the second push stopped
+  emitting was gone from the gateway afterwards. That is the claim
+  `internal/metrics/push.go` makes about POST-versus-PUT, and it is now one
+  somebody has seen happen.
+- All 19 rules and all 58 panel queries parse with `promtool`, and both
+  halves were watched failing on a deliberately broken expression.
+
+What has NOT been run: nothing here has been rendered in a Grafana, and the
+Vault half of `dashboards/vault.json` has never met a Vault. Those want
+somebody with access to the deployment.

@@ -65,6 +65,7 @@ the layout and the build.
 Before committing:
 
     go build ./... && go vet ./... && go test -count=1 ./... && scripts/leakscan
+    scripts/check-observability   # when observability/ changed; needs promtool
 
 ⚠️ `-count=1` is not optional — cached results have twice passed over code
 that did not compile. Never chain a test run and a commit: it commits either

@@ -85,6 +85,42 @@ jobs:
       # go.mod or go.sum, which is asserted by leakscan's own narrow exemption.
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+      # ⚠️ THE DASHBOARDS AND THE ALERTING RULES ARE THE HALF OF
+      # observability/ THAT `go test` CANNOT REACH.
+      # cmd/truss/metrics_contract_test.go checks that the metric NAMES a
+      # panel mentions are ones truss emits -- which a syntactically broken
+      # expression passes while being unparseable. A bad panel query renders
+      # "No data", which is what a quiet week looks like; a bad rule makes
+      # Prometheus reject the WHOLE file, silently disarming every other rule
+      # beside it. scripts/check-observability parses all of them with
+      # Prometheus's own parser.
+      #
+      # ⚠️ VERIFIED AGAINST THE RELEASE'S OWN SHA256SUMS, which is the exact
+      # shape Dockerfile uses for the OpenTofu binary -- one archive, one
+      # checksum, no extra thing to trust. Pinned to a version rather than
+      # `latest` for the same reason every action here is pinned to a SHA.
+      - name: promtool
+        run: |
+          set -eux
+          v=3.5.0
+          f="prometheus-${v}.linux-amd64"
+          curl -fsSL -o /tmp/prom.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}.tar.gz"
+          curl -fsSL -o /tmp/prom.sums \
+            "https://github.com/prometheus/prometheus/releases/download/v${v}/sha256sums.txt"
+          grep " ${f}.tar.gz\$" /tmp/prom.sums \
+            | sed "s|${f}.tar.gz|/tmp/prom.tar.gz|" \
+            | sha256sum -c -
+          tar xzf /tmp/prom.tar.gz -C /tmp "${f}/promtool"
+          sudo mv "/tmp/${f}/promtool" /usr/local/bin/promtool
+
+      # TRUSS_REQUIRE_PROMTOOL=1 turns the script's local skip into a failure,
+      # the same way TRUSS_REQUIRE_JQ=1 does for the digest differential test
+      # above. A check that passes when its own tool is absent is not a check.
+      - run: scripts/check-observability
+        env:
+          TRUSS_REQUIRE_PROMTOOL: "1"
+
       # ⚠️ THE SCANNER'S OWN TEST RUNS FIRST, AND THAT ORDER IS THE POINT.
       # A leak scan that has quietly stopped matching reports success, so the
       # question "does the guard still work" has to be answered before its

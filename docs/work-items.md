@@ -527,12 +527,13 @@ answer elsewhere -- `truss_root_duration_seconds{root,phase}` times every step
 of every root -- which weakens the case for `duration=` on a log line but not
 for the other two.
 
-## `ci.yml` runs `go test ./...` without `-count=1`
+## `ci.yml` runs `go test ./...` without `-count=1` — DONE
 
-`release.yml` has it, `ci.yml` does not, and AGENTS.md says it is not
-optional. `actions/setup-go` caches by default and that cache includes
-`GOCACHE`, which is where test results live — so a PR that does not touch
-`go.mod` can restore cached results. One flag.
+Both `ci.yml` and `release.yml` carry it now, on every test step including
+the fuzz one. `actions/setup-go` caches by default and that cache includes
+`GOCACHE`, which is where test results live — so without the flag a PR that
+does not touch `go.mod` can restore cached results and pass tests it never
+ran.
 
 ## Checked and deliberately not wanted
 
