@@ -30,17 +30,18 @@ nothing.
 That is the whole chain, in the order it must run: build, vet,
 `go test -count=1`, govulncheck for reachable standard-library
 vulnerabilities, `scripts/ledger-retention-test` — which drives
-`ledger-retention check-writes`, the measurement that has to pass before an
-irreversible retention lock — `scripts/leakscan-test` — which proves the leak
+`ledger-retention`'s `check-writes` and `lock`, the measurement before an
+irreversible retention lock and the door itself — `scripts/leakscan-test` — which proves the leak
 scanner still fails when it should — and then `scripts/leakscan` itself, which
 refuses anything identifying a real deployment.
 
 The two `-test` scripts are there for the same reason: a guard nobody has
 watched fail is a claim. The leak scanner has been vacuous in green CI, twice.
 `check-writes` shipped exiting zero while printing the objects that forbid
-locking, and `lock`'s refusals — no policy, and the confirmation that has to
-name the bucket — are watched here too, because the door it opens does not
-close.
+locking, and `lock`'s refusals — a bucket it could not describe, no policy,
+and the confirmation that has to name the bucket — are watched here too,
+along with the fact that a refusal did not lock anyway, because the door it
+opens does not close.
 
 CI runs the same script. A chain stated in two places drifts, and the reason
 for each step is written beside the command rather than here.

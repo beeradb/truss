@@ -38,7 +38,8 @@ trap 'rm -rf "$tmp"' EXIT
 # ⚠️ want_msg MUST BE UNIQUE TO ITS BRANCH. "cannot answer" appears in two of
 # them and the unconditional header carries the words DO NOT LOCK, so those
 # substrings passed under mutations that skipped the logic entirely.
-check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay] [describe_exit] [describe_stderr]
+check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
+       #       [describe_exit] [describe_stderr] [want_absent]
   local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6" said="${7:-}" want_relay="${8:-}"
   local describe_exit="${9:-0}" describe_said="${10:-}" want_absent="${11:-}"
   local dir="$tmp/$RANDOM$RANDOM" out rc
@@ -100,14 +101,21 @@ check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay] 
 # Drives `lock`, whose describe probe had the same defect and sits in front of
 # the one-way door. want=refuse|clean
 check_lock() { # name want period describe_exit describe_stderr confirm want_msg
+             #       [want_relay] [want_absent]
   local name="$1" want="$2" period="$3" describe_exit="$4" describe_said="$5" confirm="$6" want_msg="$7"
+  local want_relay="${8:-}" want_absent="${9:-}"
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin"
+  # ⚠️ THE FAKE RECORDS THE LOCK, because "it said LOCKED" is not "it locked".
+  # Without this marker, deleting the `buckets update --lock-retention-period`
+  # line left every case green: the script announced a one-way door it had
+  # never opened.
   {
     echo '#!/bin/sh'
     echo 'case "$*" in'
     printf "  *describe*) printf '%%s\\n' '%s'; printf '%s' >&2; exit %s ;;\n" \
       "$period" "$describe_said" "$describe_exit"
+    printf "  *lock-retention-period*) : > '%s/locked'; exit 0 ;;\n" "$dir"
     echo "  *) exit 0 ;;"
     echo 'esac'
   } > "$dir/bin/gcloud"
@@ -125,11 +133,39 @@ check_lock() { # name want period describe_exit describe_stderr confirm want_msg
     return
   fi
   case "$out" in
-    *"$want_msg"*) pass=$((pass + 1)); echo "ok    $name ($got)" ;;
+    *"$want_msg"*) ;;
     *) fail=$((fail + 1))
        echo "FAIL  $name: $got, but for the wrong reason -- wanted it to say \"$want_msg\"" >&2
-       echo "$out" | sed 's/^/      /' >&2 ;;
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
   esac
+  if [ -n "$want_relay" ]; then
+    case "$out" in
+      *"$want_relay"*) ;;
+      *) fail=$((fail + 1))
+         echo "FAIL  $name: $got for the right reason, but did not relay \"$want_relay\"" >&2
+         echo "$out" | sed 's/^/      /' >&2
+         return ;;
+    esac
+  fi
+  if [ -n "$want_absent" ]; then
+    case "$out" in
+      *"$want_absent"*)
+        fail=$((fail + 1))
+        echo "FAIL  $name: $got for the right reason, but said \"$want_absent\" when it should not" >&2
+        echo "$out" | sed 's/^/      /' >&2
+        return ;;
+    esac
+  fi
+  # ⚠️ THE DOOR ITSELF, ON EVERY CASE. A refusal that locked anyway is the
+  # worst outcome this script has, and it is invisible in the exit code.
+  if [ "$want" = clean ] && [ ! -f "$dir/locked" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: said so, but never locked" >&2; return
+  fi
+  if [ "$want" = refuse ] && [ -f "$dir/locked" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: refused, and locked the bucket anyway" >&2; return
+  fi
+  pass=$((pass + 1)); echo "ok    $name ($got)"
 }
 
 # ⚠️ THE LOAD-BEARING CASE. Two generations of one key is precisely what
@@ -204,7 +240,11 @@ check "a silent describe failure does not quote an empty witness" refuse '' '' 0
 # for a 403 or a misspelled bucket, which is advice that would then create a
 # policy on whatever bucket the name really points at.
 check_lock "a describe that fails is not an absent policy" refuse '' 1 \
-  'ERROR: (gcloud.storage.buckets.describe) HTTPError 403\n' scratch "could not be described"
+  'ERROR: (gcloud.storage.buckets.describe) HTTPError 403\n' scratch "could not be described" \
+  "HTTPError 403"
+
+check_lock "a silent describe failure before the door quotes nobody" refuse '' 1 '' scratch \
+  "could not be described" '' "gcloud said:"
 
 check_lock "no policy is refused, and says to set one" refuse '' 0 '' scratch \
   "no retention policy to lock"
