@@ -38,7 +38,9 @@ refuses anything identifying a real deployment.
 The two `-test` scripts are there for the same reason: a guard nobody has
 watched fail is a claim. The leak scanner has been vacuous in green CI, twice.
 `check-writes` shipped exiting zero while printing the objects that forbid
-locking; `lock`'s own two refusals are still unwatched.
+locking, and `lock`'s refusals — no policy, and the confirmation that has to
+name the bucket — are watched here too, because the door it opens does not
+close.
 
 CI runs the same script. A chain stated in two places drifts, and the reason
 for each step is written beside the command rather than here.

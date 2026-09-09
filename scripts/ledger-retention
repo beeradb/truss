@@ -78,8 +78,28 @@ case "$1" in
     # Refuse to lock a bucket with no policy: `lock` on an unset policy is
     # either a no-op or a surprise, and neither is what somebody typing this
     # word wants.
+    #
+    # ⚠️ AND "I COULD NOT ASK" IS NOT "THERE IS NO POLICY". `2>/dev/null ||
+    # true` reported a 403 or a misspelled bucket as "has no retention policy
+    # to lock. Run `set` first" -- advice that would then create a policy on
+    # whatever bucket the name really points at. It fails safe either way, but
+    # the sentence in front of somebody about to open a one-way door has to be
+    # the true one.
+    said=$(mktemp)
+    trap 'rm -f "$said"' EXIT
+    set +e
     period=$(gcloud storage buckets describe "gs://$BUCKET" \
-      --format='value(retention_policy.retention_period)' 2>/dev/null || true)
+      --format='value(retention_policy.retention_period)' 2>"$said"); asked=$?
+    set -e
+    if [ "$asked" -ne 0 ]; then
+      echo "refusing: gs://$BUCKET could not be described (gcloud exit $asked), so whether it" >&2
+      echo "          carries a retention policy is unknown." >&2
+      if [ -s "$said" ]; then
+        echo "          gcloud said:" >&2
+        sed 's/^/            /' "$said" >&2
+      fi
+      exit 1
+    fi
     [ -n "$period" ] || {
       echo "refusing: gs://$BUCKET has no retention policy to lock. Run \`$0 set\` first," >&2
       echo "          then leave it unlocked until check-writes has passed for long enough" >&2
@@ -137,8 +157,11 @@ case "$1" in
     set -e
     if [ "$asked" -ne 0 ]; then
       echo "  cannot answer: gs://$BUCKET could not be described (gcloud exit $asked)," >&2
-      echo "  so nothing here has been measured. gcloud said:" >&2
-      sed 's/^/    /' "$said" >&2
+      echo "  so nothing here has been measured." >&2
+      if [ -s "$said" ]; then
+        echo "  gcloud said:" >&2
+        sed 's/^/    /' "$said" >&2
+      fi
       exit 1
     fi
     if [ "$versioning" != "True" ]; then
