@@ -119,7 +119,7 @@ case "$1" in
   # answer means DO NOT LOCK.
   check-writes)
     need_bucket
-    echo "objects with more than one generation in gs://$BUCKET (any output means DO NOT LOCK):"
+    echo "objects with more than one generation in gs://$BUCKET (a non-zero exit means DO NOT LOCK):"
     # Versioning must be on for this to be able to see anything; if it is
     # off, say so rather than printing nothing and reading as a pass. A
     # check that cannot fail is a claim, not a check.

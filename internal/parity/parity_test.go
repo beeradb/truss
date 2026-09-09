@@ -172,6 +172,9 @@ func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "1", Truss: "0"},
 		// A failure that does not name the digest gate.
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
+		// truss recording no last_sha at all is not "the queue advanced".
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "<absent>"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: ""},
 	}
 	for _, d := range refused {
 		if emptyPlanIsNotGated(d) {

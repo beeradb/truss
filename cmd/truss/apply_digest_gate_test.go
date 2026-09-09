@@ -292,3 +292,28 @@ func TestAPlanThatChangesNothingIsNotGated(t *testing.T) {
 		}
 	})
 }
+
+// TestAPlanThatIsNotAPlanIsRefusedByName is the absent half of the
+// no-changes exemption. A `{}` from ShowJSON unmarshals without error, and
+// while countResourceChanges read that as "nothing to change" the exemption
+// skipped the digest gate on exactly the input nobody understands -- absent
+// reading as compliant, in the one package this codebase has that rule for.
+// It is refused, and the refusal names the plan rather than blaming the
+// world for moving.
+func TestAPlanThatIsNotAPlanIsRefusedByName(t *testing.T) {
+	const sha = "notaplansha"
+	deps, fl, _, tofu := gateDeps(t, sha, sha)
+	fl.put("digests/"+sha+"/"+gateSlug+".digest", []byte(ourDigest(t)))
+	tofu.ShowJSONBytes = []byte(`{}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, sha)
+
+	if result.failure == "" {
+		t.Fatalf("a plan document with no resource_changes was applied, not refused")
+	}
+	if !strings.Contains(result.failure, "could not read our own plan") {
+		t.Fatalf("refusal = %q, want it to name the unreadable plan", result.failure)
+	}
+}

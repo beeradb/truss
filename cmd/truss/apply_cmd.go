@@ -955,7 +955,17 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		// compliant bug that internal/gates exists to keep out of this
 		// codebase. Unreadable is gated, like everything else.
 		changes, parsed := countResourceChanges(planJSON)
-		if parsed && changes == 0 {
+		if !parsed {
+			// ⚠️ ITS OWN REFUSAL, NAMING ITS OWN CAUSE. Falling through to
+			// the digest comparison here would refuse too -- correct -- but
+			// under "does not match the one approved at", which blames the
+			// world for moving when what actually happened is that this
+			// plan could not be read. A refusal naming the wrong cause is
+			// the difference the threat model is written around.
+			return ledger.RootSummary{}, false, fmt.Sprintf(
+				"could not read our own plan for %s: it is not a plan document with resource_changes in it", root)
+		}
+		if changes == 0 {
 			d.logf("plan for %s changes nothing; no digest to check, because there is nothing to apply", root)
 		} else {
 			mine, err := plan.Digest(planJSON)
@@ -1071,7 +1081,19 @@ func countResourceChanges(planJSON []byte) (int, bool) {
 				// STATE. OpenTofu reports an import block whose resource
 				// already matches configuration with actions ["no-op"] and
 				// `importing` set, and applying it writes the resource into
-				// state. Counting it as a change is what keeps it gated.
+				// state, so a plan holding one does not "change nothing"
+				// and must not take the skip.
+				//
+				// ⚠️ WHAT THIS BUYS IS THE GATE RUNNING, NOT THE IMPORT
+				// BEING COMPARED. plan.theFilter drops every entry whose
+				// actions are exactly ["no-op"] regardless of `importing`,
+				// so both sides hash the import away and a matching digest
+				// says nothing about it. Running the gate still catches the
+				// case that matters most -- no approved digest recorded at
+				// all -- and the count it reports stops being a lie. The
+				// filter itself cannot be widened here: it is byte-identical
+				// to the consumer's jq and every digest already in the
+				// ledger. Recorded in docs/work-items.md.
 				//
 				// Not verified against a real `tofu show -json` here -- this
 				// environment has no tofu binary -- which is acceptable only

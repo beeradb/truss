@@ -636,7 +636,17 @@ func emptyPlanIsNotGated(d Diff) bool {
 		case "/last_sha":
 			// The bash leaves HEAD where it was; truss advances it to the
 			// commit it applied.
-			return d.Bash != d.Truss
+			//
+			// ⚠️ `d.Bash != d.Truss` WOULD BE TAUTOLOGICAL: compareObject
+			// emits a value diff only when the two sides already differ, so
+			// that spelling accepts everything, exactly like the
+			// `default: return true` this replaced. What can be pinned
+			// without the scenario's own shas is that both sides WROTE one:
+			// an absent or empty last_sha on either side is truss failing to
+			// record where it got to, which is not this story. The direction
+			// is carried by /applied above, which is pinned.
+			return d.Bash != "<absent>" && d.Bash != "" &&
+				d.Truss != "<absent>" && d.Truss != ""
 		default:
 			return false
 		}

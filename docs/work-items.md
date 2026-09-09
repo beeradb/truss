@@ -218,6 +218,50 @@ before building `skip`; the reason for it may be gone.
 apply still rewrites `failed/<sha>` every pass, so the retention blocker below
 stands.
 
+## Two things about the plan JSON nobody here can measure
+
+Both came out of the 2026-09-09 review of the no-changes digest exemption.
+Neither can be settled in this repository, because there is no `tofu` binary
+in the development environment and this codebase's standard is to verify a
+shape against a real `tofu show -json` before depending on it.
+
+**Does a plan with nothing in it omit `resource_changes` entirely?** The
+exemption skips the digest gate when the plan holds no changes, and
+`countResourceChanges` now answers "unreadable" for a document with no
+`resource_changes` key at all — so `{}` from a `ShowJSON` that returned
+something JSON-shaped is refused rather than applied ungated, which is the
+direction this repository refuses to get wrong.
+
+⚠️ **The price, if the key really can be absent from a legitimate plan.** A
+root that destroys its last resource, in a multi-root commit whose later root
+failed, would re-plan to a document with no key, be refused by name, and stay
+refused every pass — the wedge `apply_partial_multiroot_test.go` exists to
+prevent, in a narrower shape. Two facts disagree and only a measurement
+settles them: the reference jq filter is written `(.resource_changes // [])[]`,
+which only makes sense if the key can be absent; and `plan.theFilter`'s own
+recorded evidence is that OpenTofu emits an entry for *every* resource in the
+plan, no-ops included, which means the key is present and full whenever the
+root still manages anything.
+
+Fail-closed was chosen deliberately while that is unknown: a wedged queue is
+loud and has an escape hatch, and an ungated apply reports success. **The
+measurement: `tofu show -json` a plan for a root that manages no resources,
+and one for a root whose resources are all no-ops.** If the first omits the
+key, the fix is to tell "no resources" apart from "not a plan" by a key that
+is always present, not to widen the skip back.
+
+**The digest is blind to an import.** `countResourceChanges` now counts an
+entry carrying `importing` as a change, so a plan holding one no longer takes
+the skip. That makes the gate *run*; it does not make the import *compared*.
+`plan.theFilter` drops every entry whose actions are exactly `["no-op"]`
+regardless of `importing`, so both CI and the applier hash it away and a
+matching digest says nothing about the import target. Widening the filter is
+not available: it is byte-identical to the consumer's jq and to every digest
+already in the ledger, and `internal/plan/digest.go` says what a single byte
+of divergence costs. What is left is what running the gate catches — a root
+with no approved digest recorded at all — and an honest change count in the
+alert.
+
 ## Gates the docs claim and the code does not check
 
 `gates.Protection`'s own comment says adding a field without checking it is
