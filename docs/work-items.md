@@ -542,6 +542,52 @@ the fuzz one. `actions/setup-go` caches by default and that cache includes
 does not touch `go.mod` can restore cached results and pass tests it never
 ran.
 
+## Nothing can complete a change from outside the cluster
+
+**Raised 2026-09-09 by the question "can't truss itself generate this? why
+would I do it".** It is the right question and the answer is a gap.
+
+truss mints GitHub App installation tokens — that is what `truss token` and
+`forge.Client.InstallationToken` are — so the system does hold a real GitHub
+credential and does refresh it on a clock. But it exists **only inside the
+cluster**: the App private key arrives through the mounted credential mirror,
+which is populated from the applier's vault using a 1Password service-account
+token. A checkout on any other machine has none of that.
+
+So an agent or a maintainer working on this repository from outside can push a
+branch — the deploy keys allow it — and can do nothing else. Opening a pull
+request, reading a check's status, or merging one all need the API, and the
+only identity with API access is a pod that runs for ninety seconds every five
+minutes and has no reason to be doing any of it.
+
+⚠️ **The applier is emphatically the wrong thing to reach for here.** Its App
+is the identity that reads branch protection and applies approved changes; a
+token minted from it merging a pull request would be the applier approving its
+own work, which is the inversion this whole project exists to refuse. Whatever
+closes this gap has to be a *different* identity with a *smaller* grant.
+
+The shape of an answer, none of it started:
+
+- **A scoped token for the working machine**, minted by `credentials/` like
+  everything else and rotated on the same 45-day clock — `pull_requests:
+  write` and `checks: read`, nothing more. It is a credential, so it wants
+  seeding, sweeping and an entry in the expiry table; that is the whole cost
+  and it is the ordinary cost of every other credential here.
+- **Or accept it**, and say so where somebody hits it rather than leaving them
+  to rediscover it. A branch that is ready and a human who clicks merge is a
+  legitimate design; what is not legitimate is it being an accident.
+
+⚠️ **It is worth measuring before building.** This repository requires
+`required_approving_review_count: 0` (scripts/repo-protection, and its comment
+explains why: one maintainer cannot approve their own pull request). So a merge
+here needs green CI and nothing else, and the gap costs one click. In
+`../platform`, where code-owner review IS required, the same gap costs nothing
+at all — a human has to look regardless. That asymmetry is the argument for
+recording this rather than building it today.
+
+Related in kind: `../platform`'s `docs/decisions/tailnet-as-code.md`, which is
+the same shape — a control this platform depends on and does not manage.
+
 ## Checked and deliberately not wanted
 
 Recorded so the next survey does not re-derive them.
