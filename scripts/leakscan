@@ -80,6 +80,28 @@ scan() { # pattern description
   # a fixture that differs from production is a bug this repo has already paid
   # for once.
   hits=$(echo "$hits" | grep -vE 'registry\.opentofu\.org/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+' || true)
+  # ⚠️ UPSTREAM RELEASE DOWNLOADS, PINNED TO THE EXACT PROJECT PATH. The image
+  # has to fetch the two binaries it runs, and their download URLs are the
+  # identical string for every user on earth -- they name the vendor's public
+  # release, never this deployment. Added 2026-09-08 when the Dockerfile
+  # started building a complete image instead of layering onto somebody's
+  # private base; the old one carried no URLs because it named a BASE_IMAGE
+  # the caller supplied, which is the thing that made it unbuildable anywhere
+  # but the one box that ran it.
+  #
+  # ⚠️ NOT `github.com/` GENERALLY, WHICH WOULD BE THE EASY AND WRONG FIX.
+  # `github.com/<owner>/<repo>` is exactly the shape that names OUR
+  # infrastructure -- the platform repository is one. The match is pinned to
+  # `opentofu/opentofu/releases/download/`, so a URL into any other repository
+  # is still refused, including ours.
+  hits=$(echo "$hits" | grep -vE 'https://github\.com/opentofu/opentofu/releases/download/' || true)
+  # The 1Password CLI's apt repository and signing key, under the same rule and
+  # with the same limit: `downloads.1password.com/linux/` is a public package
+  # source identical for every user, and the path after it carries a
+  # distribution and an architecture rather than anything of ours. The vendor's
+  # NAME is already permitted (see the note above `op://`); this is its
+  # published package host, not a reference into a store.
+  hits=$(echo "$hits" | grep -vE 'https://downloads\.1password\.com/linux/' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }

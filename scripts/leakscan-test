@@ -140,6 +140,17 @@ check 'telegram api root'    clean  n.go 'const ep = "https://api.telegram.org/b
 check 'github api root'      clean  n.go 'const ep = "https://api.github.com/repos/%s/pulls"'
 check 'our bucket in a url'  refuse n.go 'const u = "https://storage.googleapis.com/some-real-tfstate/key"'
 
+# ⚠️ THE UPSTREAM DOWNLOAD EXEMPTIONS, AND THE PAIR THAT KEEPS THEM HONEST.
+# The image fetches the two binaries it runs, so their release URLs must pass.
+# The refusing cases are the point: `github.com/<owner>/<repo>` is exactly the
+# shape that names OUR infrastructure, so exempting github.com generally would
+# have let the platform repository's own URL through. Pinned to the project
+# path instead, and this is what proves it.
+check 'opentofu release'     clean  d.txt 'curl -o t.zip https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip'
+check 'another repo on gh'   refuse d.txt 'see https://github.com/someone/private-infra/blob/main/apply.sh'
+check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
+check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
+
 # ⚠️ The trailer guard reads history, not the tree, so these are the only cases
 # here that need a real commit. The clean case matters as much as the refusing
 # one: a guard that refuses every message is as useless as one that refuses
