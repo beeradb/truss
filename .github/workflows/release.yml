@@ -1,0 +1,90 @@
+# Publish a truss release: the static binary and its checksum, and nothing
+# else.
+#
+# ⚠️ THIS DELIBERATELY DOES NOT BUILD AN IMAGE, AND THE Dockerfile EXPLAINS
+# WHY. Its BASE_IMAGE has no default because "naming a base here would put a
+# deployment's own image name in a repository written to be public", and the
+# binary is built outside it because truss has zero dependencies and any
+# machine produces the identical artefact. An image needs a base, `tofu` at a
+# specific version, and a provider mirror -- three facts about somebody's
+# INFRASTRUCTURE, none of which belong in this repository. The consumer builds
+# the image; this publishes the piece only truss can make.
+#
+# That split is also what stops a truss release from breaking a consumer's
+# plan gate: plan digests are OpenTofu-version-sensitive, so shipping a `tofu`
+# binary from here would let a dependency bump in this repo invalidate every
+# approved plan in somebody else's.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # leakscan reads `git log` for Co-Authored-By trailers, which a
+          # depth-1 checkout cannot see past the tip commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # ⚠️ THE TAG IS TESTED AGAIN, NOT TRUSTED BECAUSE main WAS GREEN. A tag
+      # can point at any commit, including one that never sat on main and
+      # never passed ci.yml. A release is the artefact people run.
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: scripts/leakscan
+
+      # ⚠️ -trimpath AND NO BUILD STAMP, SO THE CHECKSUM MEANS SOMETHING.
+      # A binary carrying a build path or a timestamp differs on every
+      # machine, which makes a published sha256 an assertion nobody can check.
+      # With the toolchain pinned by go.mod and CGO off, `go build` at this
+      # tag reproduces these bytes anywhere.
+      - name: Build
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -o "truss-linux-$arch" ./cmd/truss
+          done
+
+      # ⚠️ A CHECK THAT CAN FAIL, rather than a claim in a comment. Building
+      # twice and comparing is the only thing that actually establishes the
+      # reproducibility the paragraph above depends on -- if a future change
+      # embeds a timestamp or a path, this goes red at release time instead of
+      # silently making every published checksum unverifiable.
+      - name: Prove the build is reproducible
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -o "recheck-$arch" ./cmd/truss
+            cmp "truss-linux-$arch" "recheck-$arch" \
+              || { echo "build is not reproducible for $arch -- a published checksum would be unverifiable" >&2; exit 1; }
+            rm -f "recheck-$arch"
+          done
+
+      - name: Checksums
+        run: sha256sum truss-linux-amd64 truss-linux-arm64 > SHA256SUMS
+
+      # `gh` rather than a third-party release action: it ships on the runner,
+      # and this repository does not add a supply-chain dependency to publish
+      # a file.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            truss-linux-amd64 truss-linux-arm64 SHA256SUMS
