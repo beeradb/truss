@@ -96,7 +96,20 @@ jobs:
       # go red here -- the same shape as the branch-protection-costs-money note
       # in docs/threat-model.md, and worth knowing before the release rather
       # than during it.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # ⚠️ SKIPPED WHILE THIS REPOSITORY IS PRIVATE, BECAUSE GITHUB REFUSES IT.
+      # Build attestations are "not available for user-owned private
+      # repositories" -- the API answers with that message and the step fails.
+      # It sat BEFORE the image build, so v0.1.1 published NOTHING: attest
+      # failed at step 10 and steps 11-13 were skipped. The provenance step
+      # blocked the artifact it exists to describe.
+      #
+      # Conditional rather than deleted: truss is written to be published
+      # (scripts/leakscan exists for that), and on the day it is this starts
+      # working with no change here. Conditional rather than
+      # continue-on-error, because a step that fails and is ignored teaches
+      # people to ignore it.
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/truss-linux-amd64, dist/truss-linux-arm64
 
@@ -139,7 +152,20 @@ jobs:
       # a checksums file where each line is "sha256:... image:tag". A consumer
       # verifies each image with: gh attestation verify --repo <owner>/<repo>
       # <image>@sha256:...
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # ⚠️ SKIPPED WHILE THIS REPOSITORY IS PRIVATE, BECAUSE GITHUB REFUSES IT.
+      # Build attestations are "not available for user-owned private
+      # repositories" -- the API answers with that message and the step fails.
+      # It sat BEFORE the image build, so v0.1.1 published NOTHING: attest
+      # failed at step 10 and steps 11-13 were skipped. The provenance step
+      # blocked the artifact it exists to describe.
+      #
+      # Conditional rather than deleted: truss is written to be published
+      # (scripts/leakscan exists for that), and on the day it is this starts
+      # working with no change here. Conditional rather than
+      # continue-on-error, because a step that fails and is ignored teaches
+      # people to ignore it.
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/IMAGE_DIGESTS.txt
 
