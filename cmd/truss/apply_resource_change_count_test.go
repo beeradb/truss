@@ -117,6 +117,26 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 			wantErr:   "not a plan document",
 		},
 		{
+			// errored is a plain bool in OpenTofu's own struct, so a
+			// document carrying the name and not the fact is not one.
+			name:      "a null errored is not a plan either",
+			planJSON:  `{"errored":null}`,
+			wantCount: 0,
+			wantErr:   "not a plan document",
+		},
+		{
+			name:      "an errored that is not a boolean is not a plan",
+			planJSON:  `{"errored":"nope"}`,
+			wantCount: 0,
+			wantErr:   "not a plan document",
+		},
+		{
+			name:      "an errored true plan with the changes key omitted counts zero",
+			planJSON:  `{"errored":true}`,
+			wantCount: 0,
+			wantErr:   "",
+		},
+		{
 			name:      "a null resource_changes on a real plan counts zero",
 			planJSON:  `{"errored":false,"resource_changes":null}`,
 			wantCount: 0,

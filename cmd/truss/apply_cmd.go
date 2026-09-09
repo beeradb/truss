@@ -1006,30 +1006,6 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	return ledger.RootSummary{ResourceChanges: n}, false, ""
 }
 
-// countResourceChanges is a DELIBERATE DIVERGENCE from summary_from_plan
-// (apply.sh:598), which counts every entry in resource_changes, no-ops
-// included -- so a plan that touches nothing still reports "N changes"
-// every single night. See parity.Divergences["COUNT-EXCLUDES-NOOP"].
-//
-// OpenTofu/Terraform mark a resource the plan will not touch with
-// `"change":{"actions":["no-op"]}` (verified against a real `tofu show
-// -json`, not assumed: a genuine no-op, an in-place update and a
-// forced replace were produced from a scratch root and inspected -- the
-// replace comes back as the two-element `["delete","create"]`, one
-// resource, not two). Only an entry whose actions are exactly that single
-// element is excluded; everything else, including replace, counts as one
-// changed resource.
-//
-// An entry with a missing or empty actions array is counted as a change
-// rather than skipped: that shape is not one OpenTofu is known to emit, and
-// silently treating an unanticipated shape as "no change" is exactly the
-// kind of guess the "if we put a number somewhere, we must be sure it is
-// right" rule forbids. Fail loud by counting it, not by swallowing it.
-//
-// Returns an error, never a zero count, for a document it cannot read as a
-// plan -- one that does not parse, one carrying neither `errored` nor a
-// usable `resource_changes`, or one whose `resource_changes` is not a list.
-// The caller refuses on it; RootSummary.ResourceChanges is left nil.
 // rootDeclaresCloudflare reports whether a root's COMMITTED lockfile declares
 // the Cloudflare provider.
 //
@@ -1061,6 +1037,30 @@ func rootDeclaresCloudflare(workdir, root string) (bool, error) {
 	return bytes.Contains(b, []byte(`provider "registry.opentofu.org/cloudflare/cloudflare"`)), nil
 }
 
+// countResourceChanges is a DELIBERATE DIVERGENCE from summary_from_plan
+// (apply.sh:598), which counts every entry in resource_changes, no-ops
+// included -- so a plan that touches nothing still reports "N changes"
+// every single night. See parity.Divergences["COUNT-EXCLUDES-NOOP"].
+//
+// OpenTofu/Terraform mark a resource the plan will not touch with
+// `"change":{"actions":["no-op"]}` (verified against a real `tofu show
+// -json`, not assumed: a genuine no-op, an in-place update and a
+// forced replace were produced from a scratch root and inspected -- the
+// replace comes back as the two-element `["delete","create"]`, one
+// resource, not two). Only an entry whose actions are exactly that single
+// element is excluded; everything else, including replace, counts as one
+// changed resource.
+//
+// An entry with a missing or empty actions array is counted as a change
+// rather than skipped: that shape is not one OpenTofu is known to emit, and
+// silently treating an unanticipated shape as "no change" is exactly the
+// kind of guess the "if we put a number somewhere, we must be sure it is
+// right" rule forbids. Fail loud by counting it, not by swallowing it.
+//
+// Returns an error, never a zero count, for a document it cannot read as a
+// plan -- one that does not parse, one carrying neither `errored` nor a
+// usable `resource_changes`, or one whose `resource_changes` is not a list.
+// The caller refuses on it; RootSummary.ResourceChanges is left nil.
 func countResourceChanges(planJSON []byte) (int, error) {
 	// ⚠️ MEASURED FROM OPENTOFU'S OWN STRUCT TAGS, 2026-09-09
 	// (internal/command/jsonplan, the plan representation this consumes):
@@ -1091,7 +1091,16 @@ func countResourceChanges(planJSON []byte) (int, error) {
 	if string(raw) == "null" {
 		hasChanges = false
 	}
-	if _, hasErrored := doc["errored"]; !hasErrored && !hasChanges {
+	// ⚠️ AND THE SAME RULE FOR errored: PRESENT IS NOT ENOUGH. OpenTofu
+	// declares it a plain bool, so a real plan document carries exactly
+	// `true` or `false`. `{"errored":null}` -- or a string, or an object --
+	// carries the name and not the fact, and accepting it as evidence is the
+	// hole this rule closes twice over.
+	errored, hasErrored := doc["errored"]
+	if hasErrored && string(errored) != "true" && string(errored) != "false" {
+		hasErrored = false
+	}
+	if !hasErrored && !hasChanges {
 		return 0, errors.New("it carries neither errored nor resource_changes, so it is not a plan document")
 	}
 	if !hasChanges {
