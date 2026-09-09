@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // countResourceChanges is a DELIBERATE DIVERGENCE from the bash's
 // summary_from_plan (apply.sh:598), which counts every entry in
@@ -15,7 +18,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 		name      string
 		planJSON  string
 		wantCount int
-		wantOK    bool
+		wantErr   string // a substring of the refusal, empty when readable
 	}{
 		{
 			// The load-bearing case: this is the production shape tonight.
@@ -28,7 +31,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"c","change":{"actions":["no-op"]}}
 			]}`,
 			wantCount: 0,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			name: "a mix of no-op and update counts only the update",
@@ -38,7 +41,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"c","change":{"actions":["no-op"]}}
 			]}`,
 			wantCount: 1,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			// Verified against a real `tofu show -json`: a forced replace
@@ -50,19 +53,19 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"a","change":{"actions":["delete","create"]}}
 			]}`,
 			wantCount: 1,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			name:      "an empty resource_changes array counts zero",
 			planJSON:  `{"resource_changes":[]}`,
 			wantCount: 0,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
-			name:      "malformed plan JSON returns the existing could-not-parse false, unchanged",
+			name:      "malformed plan JSON is unreadable, and says so",
 			planJSON:  `{"resource_changes": not valid json`,
 			wantCount: 0,
-			wantOK:    false,
+			wantErr:   "does not parse",
 		},
 		{
 			// Fail loud rather than silently swallowing a shape OpenTofu
@@ -74,7 +77,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"a"}
 			]}`,
 			wantCount: 1,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			name: "an entry with an empty actions array is counted, not skipped",
@@ -82,7 +85,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"a","change":{"actions":[]}}
 			]}`,
 			wantCount: 1,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			// ⚠️ THE CALLER SKIPS THE DIGEST GATE ON (0, true), so a
@@ -90,16 +93,32 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 			// it. `{}` unmarshals happily, and reading that as "nothing to
 			// change" turned every fail-closed refusal into a silent apply
 			// for any ShowJSON that came back JSON-shaped but not a plan.
-			name:      "a document with no resource_changes key is unreadable, not empty",
+			// ⚠️ MEASURED, NOT ASSUMED. OpenTofu marshals resource_changes
+			// omitempty and errored NOT, so a plan that changes nothing
+			// omits the first and always carries the second. `{}` carries
+			// neither and is not a plan at all.
+			name:      "a document carrying neither key is not a plan",
 			planJSON:  `{}`,
 			wantCount: 0,
-			wantOK:    false,
+			wantErr:   "not a plan document",
 		},
 		{
-			name:      "a null resource_changes is unreadable, not empty",
-			planJSON:  `{"resource_changes":null}`,
+			name:      "a plan whose resource_changes was omitted counts zero, and is not refused",
+			planJSON:  `{"format_version":"1.2","errored":false}`,
 			wantCount: 0,
-			wantOK:    false,
+			wantErr:   "",
+		},
+		{
+			name:      "a null resource_changes on a real plan counts zero",
+			planJSON:  `{"errored":false,"resource_changes":null}`,
+			wantCount: 0,
+			wantErr:   "",
+		},
+		{
+			name:      "a resource_changes that is not a list is refused by name",
+			planJSON:  `{"errored":false,"resource_changes":"nope"}`,
+			wantCount: 0,
+			wantErr:   "does not read as a list",
 		},
 		{
 			// An import block whose resource already matches configuration
@@ -111,7 +130,7 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"a","change":{"actions":["no-op"],"importing":{"id":"abc"}}}
 			]}`,
 			wantCount: 1,
-			wantOK:    true,
+			wantErr:   "",
 		},
 		{
 			name: "a no-op with a null importing is still a no-op",
@@ -119,18 +138,27 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 				{"address":"a","change":{"actions":["no-op"],"importing":null}}
 			]}`,
 			wantCount: 0,
-			wantOK:    true,
+			wantErr:   "",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			count, ok := countResourceChanges([]byte(tc.planJSON))
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			count, err := countResourceChanges([]byte(tc.planJSON))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("err = %v, want it readable", err)
+				}
+				if count != tc.wantCount {
+					t.Fatalf("count = %d, want %d", count, tc.wantCount)
+				}
+				return
 			}
-			if ok && count != tc.wantCount {
-				t.Fatalf("count = %d, want %d", count, tc.wantCount)
+			if err == nil {
+				t.Fatalf("read as %d changes, want a refusal naming %q", count, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %q, want it to name %q", err, tc.wantErr)
 			}
 		})
 	}

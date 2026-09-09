@@ -317,3 +317,29 @@ func TestAPlanThatIsNotAPlanIsRefusedByName(t *testing.T) {
 		t.Fatalf("refusal = %q, want it to name the unreadable plan", result.failure)
 	}
 }
+
+// TestAPlanWithTheChangesKeyOmittedIsNotRefused is the wedge the branch
+// nearly shipped. OpenTofu marshals resource_changes omitempty, so a root
+// that manages nothing -- one whose last resource this very commit destroyed,
+// in a multi-root commit whose later root then failed -- re-plans to a
+// document with no such key. Reading that as "unreadable" refuses it by name
+// on every pass forever, and only a human moving the watermark clears it.
+// `errored`, which OpenTofu always writes, is what tells the two apart.
+func TestAPlanWithTheChangesKeyOmittedIsNotRefused(t *testing.T) {
+	const sha = "emptyplansha"
+	deps, _, _, tofu := gateDeps(t, sha, sha)
+	// No approved digest is filed on purpose: a plan that changes nothing
+	// has nothing to gate, so it must not need one.
+	tofu.ShowJSONBytes = []byte(`{"format_version":"1.2","errored":false}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, sha)
+
+	if result.failure != "" {
+		t.Fatalf("a plan that changes nothing was refused: %q", result.failure)
+	}
+	if len(tofu.appliedDirs()) == 0 {
+		t.Fatalf("the pass refused nothing and applied nothing; the fixture is not exercising the case")
+	}
+}

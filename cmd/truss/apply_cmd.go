@@ -954,16 +954,17 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		// exactly the input nobody understands -- the absent-reads-as-
 		// compliant bug that internal/gates exists to keep out of this
 		// codebase. Unreadable is gated, like everything else.
-		changes, parsed := countResourceChanges(planJSON)
-		if !parsed {
-			// ⚠️ ITS OWN REFUSAL, NAMING ITS OWN CAUSE. Falling through to
-			// the digest comparison here would refuse too -- correct -- but
-			// under "does not match the one approved at", which blames the
-			// world for moving when what actually happened is that this
-			// plan could not be read. A refusal naming the wrong cause is
-			// the difference the threat model is written around.
+		changes, err := countResourceChanges(planJSON)
+		if err != nil {
+			// ⚠️ ITS OWN REFUSAL, CARRYING ITS OWN CAUSE. Falling through to
+			// the digest comparison would refuse too -- correct -- but under
+			// "does not match the one approved at", which blames the world
+			// for moving when what actually happened is that this plan could
+			// not be read. The reason travels with it, because "not a plan
+			// document" and "resource_changes is not a list" are different
+			// repairs.
 			return ledger.RootSummary{}, false, fmt.Sprintf(
-				"could not read our own plan for %s: it is not a plan document with resource_changes in it", root)
+				"could not read our own plan for %s: %v", root, err)
 		}
 		if changes == 0 {
 			d.logf("plan for %s changes nothing; no digest to check, because there is nothing to apply", root)
@@ -997,7 +998,7 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 
 	var n *int
 	if pj, err := runner.ShowJSON(ctx, rootDir, planFile); err == nil {
-		if count, ok := countResourceChanges(pj); ok {
+		if count, err := countResourceChanges(pj); err == nil {
 			n = &count
 		}
 	}
@@ -1057,69 +1058,69 @@ func rootDeclaresCloudflare(workdir, root string) (bool, error) {
 	return bytes.Contains(b, []byte(`provider "registry.opentofu.org/cloudflare/cloudflare"`)), nil
 }
 
-func countResourceChanges(planJSON []byte) (int, bool) {
-	var parsed struct {
-		// ⚠️ A POINTER, SO AN ABSENT KEY IS NOT AN EMPTY PLAN. `{}` and
-		// `null` unmarshal without error into a nil slice, so a value slice
-		// reported (0, true) -- "parsed fine, nothing to change" -- for a
-		// document that is not a plan at all. The one caller skips the
-		// digest gate on exactly that answer, so a ShowJSON that came back
-		// with anything JSON-shaped turned a fail-closed refusal into a
-		// silent apply. Absent is not compliant; it is unreadable, and
-		// unreadable is gated.
-		//
-		// A real no-change plan is unaffected: OpenTofu emits a
-		// resource_changes entry for EVERY resource in the plan, no-ops
-		// included (see plan.theFilter's own evidence), so the key is
-		// present and full. A root whose plan holds no resources at all
-		// gets gated instead of skipped, and gating it is harmless -- both
-		// sides hash the same empty list.
-		ResourceChanges *[]struct {
-			Change struct {
-				Actions []string `json:"actions"`
-				// ⚠️ AN IMPORT IS RENDERED AS A no-op AND STILL MUTATES
-				// STATE. OpenTofu reports an import block whose resource
-				// already matches configuration with actions ["no-op"] and
-				// `importing` set, and applying it writes the resource into
-				// state, so a plan holding one does not "change nothing"
-				// and must not take the skip.
-				//
-				// ⚠️ WHAT THIS BUYS IS THE GATE RUNNING, NOT THE IMPORT
-				// BEING COMPARED. plan.theFilter drops every entry whose
-				// actions are exactly ["no-op"] regardless of `importing`,
-				// so both sides hash the import away and a matching digest
-				// says nothing about it. Running the gate still catches the
-				// case that matters most -- no approved digest recorded at
-				// all -- and the count it reports stops being a lie. The
-				// filter itself cannot be widened here: it is byte-identical
-				// to the consumer's jq and every digest already in the
-				// ledger. Recorded in docs/work-items.md.
-				//
-				// Not verified against a real `tofu show -json` here -- this
-				// environment has no tofu binary -- which is acceptable only
-				// because the direction is safe: if the field never appears,
-				// this is inert; if it does, the plan is gated rather than
-				// skipped. A shape depended on to fail OPEN would need the
-				// measurement first.
-				Importing json.RawMessage `json:"importing"`
-			} `json:"change"`
-		} `json:"resource_changes"`
+func countResourceChanges(planJSON []byte) (int, error) {
+	// ⚠️ MEASURED FROM OPENTOFU'S OWN STRUCT TAGS, 2026-09-09
+	// (internal/command/jsonplan, the plan representation this consumes):
+	// `resource_changes` is omitempty and `errored` is NOT. So a plan that
+	// changes nothing omits the key entirely -- refusing on its absence
+	// would wedge, forever and every pass, a root whose last resource a
+	// commit destroys -- while `errored` is written by every plan document
+	// OpenTofu emits, empty ones included.
+	//
+	// That is what tells "an empty plan" apart from "not a plan". `{}` and
+	// `null` unmarshal without error and carry neither key; reading those as
+	// "nothing to change" let the one caller skip the digest gate on exactly
+	// the input nobody understands, which is absent reading as compliant in
+	// the one place this codebase exists to prevent it.
+	//
+	// resource_changes alone also counts as a plan, because every fixture in
+	// this tree and in the recorded corpus is written that way.
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(planJSON, &doc); err != nil {
+		return 0, fmt.Errorf("the plan JSON does not parse: %v", err)
 	}
-	if err := json.Unmarshal(planJSON, &parsed); err != nil {
-		return 0, false
+	raw, hasChanges := doc["resource_changes"]
+	if _, hasErrored := doc["errored"]; !hasErrored && !hasChanges {
+		return 0, errors.New("it carries neither errored nor resource_changes, so it is not a plan document")
 	}
-	if parsed.ResourceChanges == nil {
-		return 0, false
+	if !hasChanges || string(raw) == "null" {
+		return 0, nil
+	}
+
+	var changes []struct {
+		Change struct {
+			Actions []string `json:"actions"`
+			// ⚠️ AN IMPORT IS RENDERED AS A no-op AND STILL MUTATES STATE.
+			// OpenTofu carries `importing` on the change (measured in the
+			// same struct tags: *Importing, omitempty), and applying an
+			// import block whose resource already matches configuration
+			// writes that resource into state. It does not "change
+			// nothing", so it must not take the skip.
+			//
+			// ⚠️ WHAT THIS BUYS IS THE GATE RUNNING, NOT THE IMPORT BEING
+			// COMPARED. plan.theFilter drops every entry whose actions are
+			// exactly ["no-op"] regardless of importing, so both CI and the
+			// applier hash it away and a matching digest says nothing about
+			// it. Running the gate still catches the case that matters most
+			// -- no approved digest recorded at all -- and the count stops
+			// being a lie. The filter cannot be widened: it is
+			// byte-identical to the consumer's jq and to every digest
+			// already in the ledger. Recorded in docs/work-items.md.
+			Importing json.RawMessage `json:"importing"`
+		} `json:"change"`
+	}
+	if err := json.Unmarshal(raw, &changes); err != nil {
+		return 0, fmt.Errorf("its resource_changes does not read as a list of changes: %v", err)
 	}
 	count := 0
-	for _, rc := range *parsed.ResourceChanges {
+	for _, rc := range changes {
 		importing := len(rc.Change.Importing) > 0 && !bytes.Equal(rc.Change.Importing, []byte("null"))
 		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" && !importing {
 			continue
 		}
 		count++
 	}
-	return count, true
+	return count, nil
 }
 
 // runRotation re-plans and, if a generation boundary passed, re-applies

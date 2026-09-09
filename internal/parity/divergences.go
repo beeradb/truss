@@ -635,18 +635,25 @@ func emptyPlanIsNotGated(d Diff) bool {
 			return d.Bash == "0" && d.Truss == "1"
 		case "/last_sha":
 			// The bash leaves HEAD where it was; truss advances it to the
-			// commit it applied.
+			// commit it applied. Pinned to the two values the corpus
+			// actually holds, measured 2026-09-09 by refusing this path and
+			// reading what came back: bash "base", truss "sha1", in both
+			// scenarios this entry names.
 			//
-			// ⚠️ `d.Bash != d.Truss` WOULD BE TAUTOLOGICAL: compareObject
-			// emits a value diff only when the two sides already differ, so
-			// that spelling accepts everything, exactly like the
-			// `default: return true` this replaced. What can be pinned
-			// without the scenario's own shas is that both sides WROTE one:
-			// an absent or empty last_sha on either side is truss failing to
-			// record where it got to, which is not this story. The direction
-			// is carried by /applied above, which is pinned.
-			return d.Bash != "<absent>" && d.Bash != "" &&
-				d.Truss != "<absent>" && d.Truss != ""
+			// ⚠️ NEITHER `d.Bash != d.Truss` NOR AN ABSENT/EMPTY CHECK CAN
+			// FAIL HERE. compareObject emits a value diff only when the two
+			// sides already differ, and ledger.Heartbeat.LastSHA is a plain
+			// string with no omitempty, so truss always writes one. Both
+			// spellings were tried and both accept everything, exactly like
+			// the `default: return true` they replaced -- so a regression
+			// advancing the watermark to the WRONG sha would be forgiven,
+			// which is the one thing this path is here to notice.
+			//
+			// The literals are the price. A re-recorded corpus fails here
+			// and must be looked at, which is correct: the story is "the
+			// queue advanced past the commit the bash refused", and only
+			// somebody reading the new recording can say it still holds.
+			return d.Bash == "base" && d.Truss == "sha1"
 		default:
 			return false
 		}
