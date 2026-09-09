@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Retention on the ledger's records bucket: the WORM half of making the
+# ledger tamper-evident. See docs/work-items.md, "Making the ledger
+# tamper-evident".
+#
+# WHAT THIS IS FOR. Whoever holds the bucket write credential can today
+# rewrite applied/<sha> and failed/<sha>, or roll HEAD backwards (replaying
+# commits) or forwards (silently passing over them), and the ledger's own
+# bytes carry no evidence of it. A locked retention policy is the only
+# control in reach that stops that WITHOUT trusting the credential holder:
+# Cloud Storage enforces it in the storage layer, not through IAM, so it
+# binds the project owner and an org admin the same way it binds a leaked
+# key.
+#
+# ⚠️ LOCKING IS IRREVERSIBLE AND THAT IS THE POINT. Google's words: "Once
+# you lock a policy, you cannot remove it or reduce the retention period it
+# has", and "you cannot delete a bucket until every object in the bucket has
+# met the retention period". For a bucket that keeps receiving records, that
+# second sentence means the escape hatch never opens in practice. Choose the
+# period as if you cannot change it, because you cannot -- only increase it.
+#
+# ⚠️ THIS SCRIPT WILL NOT LOCK ANYTHING YOU HAVE NOT MEASURED FIRST.
+# `lock` refuses unless the bucket already carries an unlocked policy AND
+# TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT is set to the bucket's own
+# name. Two different mistakes -- running it against the wrong bucket, and
+# running it before anyone has watched a write be refused -- have the same
+# shape as the one that bricked a repository the first time
+# scripts/protection was run.
+set -euo pipefail
+
+# ⚠️ NO DEFAULT BUCKET, for the same reason scripts/protection has no default
+# repository: a default is very good at hiding the fact that a payload is
+# aimed at the wrong target, and here the wrong target cannot be un-aimed.
+BUCKET="${TRUSS_RECORDS_BUCKET:-}"
+
+# 90 days. The ledger's records are a few hundred bytes each and one commit
+# produces one, so a decade of them is megabytes -- the period is bounded by
+# how long an audit needs to be able to look back, not by storage cost. It is
+# deliberately not `never`: docs/credentials.md already argues that a thing
+# which never expires is a thing nobody ever looks at again, and a period you
+# can extend beats one you cannot shorten.
+RETENTION="${TRUSS_RETENTION_PERIOD:-90d}"
+
+need_bucket() {
+  [ -n "$BUCKET" ] || {
+    echo "refusing: TRUSS_RECORDS_BUCKET is unset." >&2
+    echo "          It must name the bucket that holds applied/ and failed/ --" >&2
+    echo "          NOT the bucket holding HEAD, the heartbeat or plan digests," >&2
+    echo "          which are overwritten every pass and which retention would" >&2
+    echo "          refuse. See docs/work-items.md." >&2
+    exit 2
+  }
+}
+
+usage() { echo "usage: $0 {show|set|lock|check-writes}" >&2; exit 2; }
+[ $# -eq 1 ] || usage
+
+case "$1" in
+  show)
+    need_bucket
+    gcloud storage buckets describe "gs://$BUCKET" \
+      --format='value[separator="  "](name, retention_policy.retention_period, retention_policy.is_locked)'
+    ;;
+
+  # Sets an UNLOCKED policy. Reversible, and the state you want to sit in
+  # while the applier runs against the bucket long enough to prove it never
+  # needs to overwrite a record.
+  set)
+    need_bucket
+    gcloud storage buckets update "gs://$BUCKET" --retention-period="$RETENTION"
+    echo "retention: $RETENTION on gs://$BUCKET, UNLOCKED (removable with --clear-retention-period)"
+    ;;
+
+  # ⚠️ THE ONE-WAY DOOR.
+  lock)
+    need_bucket
+
+    # Refuse to lock a bucket with no policy: `lock` on an unset policy is
+    # either a no-op or a surprise, and neither is what somebody typing this
+    # word wants.
+    period=$(gcloud storage buckets describe "gs://$BUCKET" \
+      --format='value(retention_policy.retention_period)' 2>/dev/null || true)
+    [ -n "$period" ] || {
+      echo "refusing: gs://$BUCKET has no retention policy to lock. Run \`$0 set\` first," >&2
+      echo "          then leave it unlocked until check-writes has passed for long enough" >&2
+      echo "          to trust it." >&2
+      exit 1
+    }
+
+    # ⚠️ NAMING THE BUCKET, not answering yes. A confirmation you can satisfy
+    # by reflex is not a confirmation; this one cannot be satisfied without
+    # having read which bucket is about to become permanent.
+    [ "${TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT:-}" = "$BUCKET" ] || {
+      echo "refusing to lock gs://$BUCKET." >&2
+      echo "  Locking cannot be undone: the period can never be shortened or removed," >&2
+      echo "  and the bucket cannot be deleted until every object in it has aged out." >&2
+      echo "  Current period: $period" >&2
+      echo "  To proceed, set TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT=$BUCKET" >&2
+      exit 1
+    }
+
+    gcloud storage buckets update "gs://$BUCKET" --lock-retention-period
+    echo "retention: LOCKED on gs://$BUCKET at $period -- this cannot be undone"
+    ;;
+
+  # ⚠️ THE CHECK THAT HAS TO PASS BEFORE lock, AND THE REASON THIS SCRIPT
+  # HAS FOUR SUBCOMMANDS INSTEAD OF TWO. Retention refuses a REPLACE, not
+  # just a delete, so it only works on a bucket whose objects are written
+  # exactly once. Two of this ledger's writes are not, today:
+  #
+  #   - failed/<sha> is rewritten every pass while a commit stays refused.
+  #     A wedged commit rewrites it 288 times a day.
+  #   - applied/<sha> is rewritten if AdvanceHead fails after it was written,
+  #     because the next pass redoes the same commit.
+  #
+  # Locking before those are once-only turns the failure modes you most need
+  # recorded into a bucket that refuses to record them. This lists objects
+  # written more than once, by comparing generation counts -- a non-empty
+  # answer means DO NOT LOCK.
+  check-writes)
+    need_bucket
+    echo "objects with more than one generation in gs://$BUCKET (any output means DO NOT LOCK):"
+    # Versioning must be on for this to be able to see anything; if it is
+    # off, say so rather than printing nothing and reading as a pass. A
+    # check that cannot fail is a claim, not a check.
+    versioning=$(gcloud storage buckets describe "gs://$BUCKET" \
+      --format='value(versioning.enabled)' 2>/dev/null || true)
+    if [ "$versioning" != "True" ]; then
+      echo "  cannot answer: versioning is not enabled on gs://$BUCKET, so overwritten" >&2
+      echo "  generations were discarded and there is nothing left to count. Enable it" >&2
+      echo "  (gcloud storage buckets update gs://$BUCKET --versioning) and let the" >&2
+      echo "  applier run before trusting this." >&2
+      exit 1
+    fi
+    gcloud storage ls -a "gs://$BUCKET/**" |
+      sed 's/#[0-9]*$//' |
+      sort | uniq -d
+    ;;
+
+  *) usage ;;
+esac
