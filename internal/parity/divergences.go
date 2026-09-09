@@ -342,7 +342,9 @@ var Divergences = []Divergence{
 		Bash: "resource_changes: every entry in tofu's own resource_changes array, no-ops " +
 			"included -- summary_from_plan (apply.sh:598) is `jq '.resource_changes | length'`",
 		Truss: "resource_changes: only entries whose actions are not exactly the single element " +
-			"\"no-op\"; a replace ([\"delete\",\"create\"]) is one changed resource, not two",
+			"\"no-op\"; a replace ([\"delete\",\"create\"]) is one changed resource, not two; and a " +
+			"\"no-op\" carrying `importing` counts, because an import block writes the resource into " +
+			"state and so does not change nothing",
 		Why: "Not an accident: OpenTofu lists every resource the plan LOOKED AT in resource_changes, " +
 			"including ones it will not touch, marked `\"actions\":[\"no-op\"]` (verified against a real " +
 			"`tofu show -json` from a scratch root, not assumed). The bash counts the array; measured in " +

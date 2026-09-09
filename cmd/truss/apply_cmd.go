@@ -478,14 +478,19 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// the previous code then discarded it. That threw away the one
 	// credential whose lapse takes the applier down, exactly when the vault
 	// was misbehaving.
-	// ⚠️ DAILY, THOUGH check_credential_lifetimes IS UNCONDITIONAL IN THE
-	// REFERENCE (apply.sh:834-847), AND TRUSS ONCE COPIED IT THAT WAY --
-	// outside this branching entirely, so it ran even when the
-	// branch-protection gate had already failed. The deployed applier gates
-	// it on the drift pass with a dated reason of its own: asking 288 times
-	// a day "is most of what rate-limited the service account on
-	// 2026-09-07". Running it every pass reproduced the exact pattern that
-	// caused that outage.
+	// ⚠️ DAILY, AS THE DEPLOYED APPLIER IS: apply.sh:1110 is
+	// `[ "$DRIFT_ONLY" != "1" ] || check_credential_lifetimes`. Truss ran it
+	// every pass instead, which is the pattern that caused an outage -- the
+	// sweep lists both vaults and reads every item's `expires`, a question
+	// whose answer cannot change inside a day, and apply.sh:1081 records
+	// that asking it 288 times a day "is most of what rate-limited the
+	// service account on 2026-09-07".
+	//
+	// ⚠️ DAILY IS NOT THE SAME AS GATED. It sits outside the gate_ok
+	// branching, so it still runs on a daily pass whose branch-protection
+	// gate failed -- a gate failure and an unusable sweep appear in the same
+	// alert without either explaining the other, which
+	// TestAnUnusableExpirySweepIsReportedAndDoesNotFailThePass pins.
 	var expiring []secrets.Expiring
 	var expiryUnavailable string
 	if driftRun {

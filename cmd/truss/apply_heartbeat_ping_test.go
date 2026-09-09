@@ -253,6 +253,14 @@ func TestAPassWithSomethingToReportStillMessagesEvenThoughItPinged(t *testing.T)
 	defer cancel()
 	result := runApplyPass(ctx, deps, "headsha1")
 
+	// ⚠️ THE PASS MUST HAVE SUCCEEDED, OR THIS PROVES NOTHING. A FAILED pass
+	// messages unconditionally and its alert also carries the drift clauses,
+	// so without this the test stays green with the suppression reverted and
+	// the shared protection fixture drifted -- passing for the one reason it
+	// is not testing.
+	if result.failure != "" {
+		t.Fatalf("the pass failed (%q), so messaging proves nothing about the idle rule", result.failure)
+	}
 	if got := ping.count(); got != 1 {
 		t.Fatalf("monitor was hit %d times, want exactly 1", got)
 	}
