@@ -24,6 +24,13 @@ on:
 permissions:
   contents: write
   packages: write
+  # The following permissions are required by actions/attest-build-provenance to
+  # generate OIDC tokens and create attestations. id-token is used to mint
+  # Sigstore certificates; attestations to store the signed attestation; and
+  # artifact-metadata to record the artifact storage relationship.
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -75,6 +82,24 @@ jobs:
       - name: Checksums
         run: (cd dist && sha256sum truss-linux-amd64 truss-linux-arm64 > SHA256SUMS)
 
+      # Attest the binaries: prove THIS CI produced them. Pinning by digest in
+      # a reviewed diff proves the diff names a digest; it does not prove where
+      # that digest came from. A consumer verifies with
+      # `gh attestation verify <binary> --repo <owner>/<repo>`.
+      #
+      # ⚠️ THIS STEP FAILS ON A PRIVATE REPOSITORY UNLESS THE ACCOUNT IS ON
+      # ENTERPRISE CLOUD. The action's own README: attestations are available
+      # in public repositories on all current plans, and "to use artifact
+      # attestations in private or internal repositories, you must be on a
+      # GitHub Enterprise Cloud plan". This repository is intended to be public
+      # and is not yet, so the first release cut while it is still private will
+      # go red here -- the same shape as the branch-protection-costs-money note
+      # in docs/threat-model.md, and worth knowing before the release rather
+      # than during it.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/truss-linux-amd64, dist/truss-linux-arm64
+
       # ⚠️ amd64 ONLY, DELIBERATELY, AND THE arm64 BINARY IS STILL PUBLISHED.
       # A multi-arch image needs QEMU on the runner, which means third-party
       # actions this repository has otherwise avoided (see `gh` below, used in
@@ -88,6 +113,7 @@ jobs:
           set -euo pipefail
           echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          > dist/IMAGE_DIGESTS.txt
           while read -r tofu; do
             [ -n "$tofu" ] || continue
             tag="${IMAGE}:${GITHUB_REF_NAME}-tofu${tofu}"
@@ -97,8 +123,25 @@ jobs:
             # The digest is what a consumer pins; printing it here means it can
             # be read off the release without a registry round-trip.
             docker inspect --format '{{index .RepoDigests 0}}' "$tag" | tee -a dist/IMAGE_DIGESTS
+            # ⚠️ BARE HEX BEFORE THE FIRST SPACE, NOT "sha256:...". The attest
+            # action splits each line at the first space, takes everything to
+            # its left as the digest, and validates it against a hex-only
+            # regex -- `sha256:abc...` throws "Invalid digest" (verified in
+            # actions/attest src/subject.ts, getSubjectFromChecksumsString).
+            # docker inspect gives "image:tag@sha256:<hex>", so both halves are
+            # cut out of that one string.
+            ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")
+            printf '%s %s\n' "${ref##*@sha256:}" "${ref%@*}" >> dist/IMAGE_DIGESTS.txt
             echo "::endgroup::"
           done < tofu-versions
+
+      # Attest all built images: prove they came from this CI. The action reads
+      # a checksums file where each line is "sha256:... image:tag". A consumer
+      # verifies each image with: gh attestation verify --repo <owner>/<repo>
+      # <image>@sha256:...
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/IMAGE_DIGESTS.txt
 
       # `gh` rather than a third-party release action: it ships on the runner,
       # and publishing a file should not add a supply-chain dependency.
