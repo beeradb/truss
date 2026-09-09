@@ -64,11 +64,14 @@ the layout and the build.
 
 Before committing:
 
-    go build ./... && go vet ./... && go test -count=1 ./... && scripts/leakscan
+    scripts/check
 
-⚠️ `-count=1` is not optional — cached results have twice passed over code
-that did not compile. Never chain a test run and a commit: it commits either
-way, and reads a different tree than it tested.
+Build, vet, `go test -count=1`, govulncheck, the leak scanner's own test, then
+the leak scanner. CI runs that same script rather than restating the steps, so
+the two cannot drift; the reason for each is written beside the command.
+
+⚠️ Never chain the check and the commit: `scripts/check && git commit` commits
+either way under some shells, and reads a different tree than it tested.
 
 ⚠️ **This repository is public; the infrastructure it manages is not.**
 `leakscan` refuses classes of identifier, not a denylist of real values —

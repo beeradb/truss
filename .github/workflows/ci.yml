@@ -38,9 +38,6 @@ jobs:
           # developer runs cannot drift apart.
           go-version-file: go.mod
 
-      - run: go build ./...
-      - run: go vet ./...
-
       # ⚠️ jq IS A TEST DEPENDENCY, AND ITS ABSENCE MUST BE LOUD. The plan
       # digest has to be byte-identical to what `jq -S -c | sha256sum`
       # produces, and the only thing that proves it is a differential test
@@ -49,13 +46,16 @@ jobs:
       # green on a comparison it never made.
       - run: jq --version
 
-      # TRUSS_REQUIRE_JQ=1 turns that skip into a failure. Setting it here is
-      # what makes the differential test mean something in CI.
-      # ⚠️ -count=1 disables test caching, which actions/setup-go enables by
-      # default (it caches GOCACHE, where Go stores test results). A PR that
-      # does not change go.mod can restore stale cached results, silently
-      # passing tests against broken code. See AGENTS.md.
-      - run: go test -count=1 ./...
+      # ⚠️ THE SAME SCRIPT A DEVELOPER RUNS BEFORE COMMITTING, not a second
+      # copy of its steps. build, vet, test -count=1, govulncheck, the leak
+      # scanner's own test, and the leak scanner -- in that order, with the
+      # reasons for the order written where the commands are. A chain stated
+      # twice is a chain that drifts, and CI keeping a step this repository's
+      # own instructions had dropped is exactly how that failure reads.
+      #
+      # TRUSS_REQUIRE_JQ=1 turns the digest differential test's skip into a
+      # failure. Setting it here is what makes that test mean something in CI.
+      - run: scripts/check
         env:
           TRUSS_REQUIRE_JQ: "1"
 
@@ -70,25 +70,3 @@ jobs:
       - run: go test -count=1 ./internal/plan/ -run 'XXX_none' -fuzz FuzzCanonicalAgreesWithJQ -fuzztime 30s
         env:
           TRUSS_REQUIRE_JQ: "1"
-
-      # ⚠️ IT IS THE STANDARD LIBRARY THIS SCANS, NOT DEPENDENCIES -- there are
-      # none. go.mod is three lines and there is no go.sum (port-plan.md §7.1),
-      # so what govulncheck can find here is a vulnerability in the stdlib or
-      # toolchain that this code actually REACHES, which is precisely the class
-      # a zero-dependency project cannot fix by bumping something. Reachability
-      # is why it is this rather than a scanner: it reports call paths, not
-      # advisories against a version number.
-      #
-      # ⚠️ Pinned, not @latest -- a tag is a mutable pointer somebody else
-      # controls, and `@latest` is strictly worse than a tag. The module proxy
-      # and checksum database verify what this fetches; nothing is added to
-      # go.mod or go.sum, which is asserted by leakscan's own narrow exemption.
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
-
-      # ⚠️ THE SCANNER'S OWN TEST RUNS FIRST, AND THAT ORDER IS THE POINT.
-      # A leak scan that has quietly stopped matching reports success, so the
-      # question "does the guard still work" has to be answered before its
-      # answer is trusted. Two of its patterns were once inert under this very
-      # runner's grep while passing here in green.
-      - run: scripts/leakscan-test
-      - run: scripts/leakscan

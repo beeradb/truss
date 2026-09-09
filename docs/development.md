@@ -25,12 +25,16 @@ nothing.
 
 ## Building and testing
 
-    go build ./...
-    go vet ./...
-    go test -count=1 ./...
-    go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # reachable stdlib vulnerabilities
-    scripts/leakscan          # refuses anything identifying a real deployment
-    scripts/leakscan-test     # proves leakscan still fails when it should
+    scripts/check
+
+That is the whole chain, in the order it must run: build, vet,
+`go test -count=1`, govulncheck for reachable standard-library
+vulnerabilities, `scripts/leakscan-test` — which proves the leak scanner still
+fails when it should — and then `scripts/leakscan` itself, which refuses
+anything identifying a real deployment.
+
+CI runs the same script. A chain stated in two places drifts, and the reason
+for each step is written beside the command rather than here.
 
 This repository is public and the platform it manages is not — that's the whole
 risk. A live deployment has real account ids, bucket names, hostnames and vault
