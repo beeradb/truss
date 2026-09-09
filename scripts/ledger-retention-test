@@ -38,8 +38,8 @@ trap 'rm -rf "$tmp"' EXIT
 # ⚠️ want_msg MUST BE UNIQUE TO ITS BRANCH. "cannot answer" appears in two of
 # them and the unconditional header carries the words DO NOT LOCK, so those
 # substrings passed under mutations that skipped the logic entirely.
-check() { # name want versioning listing ls_exit want_msg [stderr]
-  local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6" said="${7:-}"
+check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
+  local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6" said="${7:-}" want_relay="${8:-}"
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin"
   {
@@ -62,11 +62,25 @@ check() { # name want versioning listing ls_exit want_msg [stderr]
     return
   fi
   case "$out" in
-    *"$want_msg"*) pass=$((pass + 1)); echo "ok    $name ($got)" ;;
+    *"$want_msg"*) ;;
     *) fail=$((fail + 1))
        echo "FAIL  $name: $got, but for the wrong reason -- wanted it to say \"$want_msg\"" >&2
-       echo "$out" | sed 's/^/      /' >&2 ;;
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
   esac
+  # want_relay is what gcloud itself said, which the refusal must hand to the
+  # human: two inputs the script cannot tell apart (an empty bucket and a
+  # 403) are told apart HERE or nowhere.
+  if [ -n "$want_relay" ]; then
+    case "$out" in
+      *"$want_relay"*) ;;
+      *) fail=$((fail + 1))
+         echo "FAIL  $name: $got for the right reason, but did not relay \"$want_relay\"" >&2
+         echo "$out" | sed 's/^/      /' >&2
+         return ;;
+    esac
+  fi
+  pass=$((pass + 1)); echo "ok    $name ($got)"
 }
 
 # ⚠️ THE LOAD-BEARING CASE. Two generations of one key is precisely what
@@ -93,11 +107,16 @@ check "versioning off refuses rather than printing nothing" refuse False \
 # silence a wrong project or an expired credential gives. Zero objects is no
 # evidence that objects are written once, so it refuses -- and says which of
 # the three answers it is giving.
-check "an empty bucket cannot answer, and refuses" refuse True '' 1 "did not complete"
+check "an empty bucket cannot answer, and refuses" refuse True '' 1 "listed no objects" \
+  'One or more URLs matched no objects.\n' "matched no objects"
 
+# ⚠️ THE SCRIPT CANNOT TELL THIS FROM AN EMPTY BUCKET, and must not pretend
+# to: both print nothing and exit non-zero. What separates them is gcloud's
+# own words, which is why the refusal relays them and why this asserts that.
 check "a failed listing refuses rather than reading as rewritten" refuse True \
-  '' 1 "did not complete" \
-  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n'
+  '' 1 "listed no objects" \
+  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n' \
+  "HTTPError 403"
 
 # ⚠️ THE CASE THAT MAKES THE EXIT CODE LOAD-BEARING. Every other refusal is
 # reachable through the empty-listing half of the guard, so with only those,
@@ -112,8 +131,9 @@ check "a listing that failed partway is not a measurement" refuse True \
 # perfectly successful call, and the script once merged them into the listing:
 # a single notice made an EMPTY bucket look measured and clean, and a warning
 # printed twice came back from `uniq -d` as a rewritten object.
-check "a notice on stderr is not an object" refuse True '' 0 "Updates are available" \
-  'Updates are available for some Google Cloud CLI components.\n'
+check "a notice on stderr is not an object" refuse True '' 0 "listed no objects" \
+  'Updates are available for some Google Cloud CLI components.\n' \
+  "Updates are available"
 
 check "a warning repeated on stderr is not a rewrite" clean True \
   'gs://<bucket>/applied/sha1#1\ngs://<bucket>/HEAD#5\n' 0 "none: every object" \

@@ -164,12 +164,17 @@ case "$1" in
     # exactly the case the exit code is here to catch -- and a refusal naming
     # the wrong cause is the failure this repository keeps paying for.
     if [ "$listed" -ne 0 ] || [ -z "$listing" ]; then
-      if [ "$listed" -ne 0 ]; then
+      # ⚠️ ON WHAT IT PRINTED, NOT ON THE EXIT CODE. An empty bucket exits
+      # non-zero too -- the wildcard matched nothing -- so branching on
+      # `listed` told a fresh bucket its listing was "a fragment" of
+      # something, about a listing that printed no bytes at all. The two
+      # answers differ in whether there IS a fragment.
+      if [ -n "$listing" ]; then
         echo "  cannot answer: the listing of gs://$BUCKET did not complete (gcloud exit $listed)," >&2
         echo "  so what it did print is a fragment and says nothing about the rest." >&2
       else
-        echo "  cannot answer: gs://$BUCKET listed no objects at all, and zero objects is" >&2
-        echo "  not evidence that objects are written once." >&2
+        echo "  cannot answer: gs://$BUCKET listed no objects (gcloud exit $listed), and zero" >&2
+        echo "  objects is not evidence that objects are written once." >&2
       fi
       if [ -s "$said" ]; then
         echo "  gcloud said:" >&2
