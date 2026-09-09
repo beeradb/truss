@@ -173,6 +173,9 @@ func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "1", Truss: "0"},
 		// A failure that does not name the digest gate.
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
+		// The watermark appearing only on truss's side is not this story
+		// either: both sides always write applied/HEAD.
+		{Kind: "extra-key", Key: "applied/HEAD"},
 		// The watermark moved to a sha that is not the commit this story is
 		// about is the regression this key exists to catch.
 		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "someothersha"},

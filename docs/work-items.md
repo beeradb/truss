@@ -192,11 +192,14 @@ no-ops. It also settles the mirror-image case, which was equally stuck: a
 change somebody had already made by hand, exactly as approved, left an empty
 plan that was refused forever rather than recorded as already satisfied.
 
-⚠️ **An UNREADABLE plan is still gated.** `countResourceChanges` returns
-`(0, false)` for a plan it cannot parse, and treating that as "no changes"
-would skip the gate on exactly the input nobody understands — absent reading
-as compliant, which `internal/gates` exists to keep out. Both halves are
-asserted in `TestAPlanThatChangesNothingIsNotGated`.
+⚠️ **An UNREADABLE plan is refused, by name.** `countResourceChanges` returns
+an error for a document it cannot read as a plan, and treating that as "no
+changes" would skip the gate on exactly the input nobody understands — absent
+reading as compliant, which `internal/gates` exists to keep out. The
+no-changes half is asserted in `TestAPlanThatChangesNothingIsNotGated`; the
+unreadable half in `TestAPlanThatIsNotAPlanIsRefusedByName`, and the plan
+that legitimately changes nothing — OpenTofu omits `resource_changes` when
+there is none — in `TestAPlanWithTheChangesKeyOmittedIsNotRefused`.
 
 ⚠️ **Two fixtures were wrong and hid this.** `fakeTofu`'s default `show -json`
 was `{"resource_changes":[]}`, so every digest-gate unit test drove a plan
