@@ -93,16 +93,26 @@ check "versioning off refuses rather than printing nothing" refuse False \
 # silence a wrong project or an expired credential gives. Zero objects is no
 # evidence that objects are written once, so it refuses -- and says which of
 # the three answers it is giving.
-check "an empty bucket cannot answer, and refuses" refuse True '' 1 "produced no objects"
+check "an empty bucket cannot answer, and refuses" refuse True '' 1 "did not complete"
 
 check "a failed listing refuses rather than reading as rewritten" refuse True \
-  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n' 1 "produced no objects"
+  '' 1 "did not complete" \
+  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n'
+
+# ⚠️ THE CASE THAT MAKES THE EXIT CODE LOAD-BEARING. Every other refusal is
+# reachable through the empty-listing half of the guard, so with only those,
+# deleting the exit-code test left the suite green. A listing that dies
+# partway has already printed objects: the stdout is non-empty, it looks like
+# two well-behaved keys, and it is a fragment.
+check "a listing that failed partway is not a measurement" refuse True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\n' 1 "did not complete" \
+  'ERROR: (gcloud.storage.ls) HTTPError 500\n'
 
 # ⚠️ THE STREAM CASES. gcloud writes notices and retry warnings to stderr on a
 # perfectly successful call, and the script once merged them into the listing:
 # a single notice made an EMPTY bucket look measured and clean, and a warning
 # printed twice came back from `uniq -d` as a rewritten object.
-check "a notice on stderr is not an object" refuse True '' 0 "produced no objects" \
+check "a notice on stderr is not an object" refuse True '' 0 "Updates are available" \
   'Updates are available for some Google Cloud CLI components.\n'
 
 check "a warning repeated on stderr is not a rewrite" clean True \

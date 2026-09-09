@@ -159,11 +159,22 @@ case "$1" in
     set +e
     listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>"$said"); listed=$?
     set -e
+    # ⚠️ TWO REFUSALS, NOT ONE SENTENCE FOR BOTH. A listing that dies partway
+    # has already printed objects, so "produced no objects" would be false of
+    # exactly the case the exit code is here to catch -- and a refusal naming
+    # the wrong cause is the failure this repository keeps paying for.
     if [ "$listed" -ne 0 ] || [ -z "$listing" ]; then
-      echo "  cannot answer: the listing produced no objects (gcloud exit $listed)." >&2
-      echo "  An empty bucket and a failed listing are the same silence here, and" >&2
-      echo "  neither is evidence that objects are written once. gcloud said:" >&2
-      sed 's/^/    /' "$said" >&2
+      if [ "$listed" -ne 0 ]; then
+        echo "  cannot answer: the listing of gs://$BUCKET did not complete (gcloud exit $listed)," >&2
+        echo "  so what it did print is a fragment and says nothing about the rest." >&2
+      else
+        echo "  cannot answer: gs://$BUCKET listed no objects at all, and zero objects is" >&2
+        echo "  not evidence that objects are written once." >&2
+      fi
+      if [ -s "$said" ]; then
+        echo "  gcloud said:" >&2
+        sed 's/^/    /' "$said" >&2
+      fi
       exit 1
     fi
     rewritten=$(printf '%s\n' "$listing" |
