@@ -3,7 +3,8 @@
 Truss reports what it did, every pass, as Prometheus metrics — and the three
 Grafana dashboards and the alerting rules in this directory read them.
 
-    alerts/truss.rules.yml            every alert, with the reasoning inline
+    alerts/truss.rules.yml            every truss alert, with the reasoning inline
+    alerts/vault.rules.yml            and the credential store's own
     dashboards/truss-overview.json    is it alive, what did it do, what broke
     dashboards/truss-timeline.json    what state it was in, when
     dashboards/truss-logs.json        what it actually said, line by line
@@ -137,6 +138,25 @@ editing; pick your Prometheus from the dropdown on first open.
 | `truss-credentials` | a credential expired, expiring within 14 days, or recording no expiry; a sweep that could not run |
 | `truss-rotation` | rotation failed; rotation is not running at all; the publisher did not confirm the write |
 | `truss-drift` | a root drifted; a root whose drift could not be checked |
+
+`alerts/vault.rules.yml` covers the store itself, because truss can be
+perfectly healthy and refusing everything simply because Vault is sealed:
+
+| Group | Fires when |
+|---|---|
+| `vault-availability` | Vault is sealed; no Vault metrics exist at all; the audit log cannot be written |
+| `vault-health` | leases climbing; goroutines climbing; mean latency above 250ms |
+
+⚠️ **`VaultAuditLogIsFailing` is the one that looks like nothing.** Vault
+refuses any request it cannot write an audit record for, so with every device
+failing it serves nothing while remaining unsealed, healthy and `up` by every
+other measure — and truss's failures then read as permission problems.
+
+⚠️ **`VaultIsNotReporting` is what makes the rest of that file honest.** Vault
+emits nothing without a `telemetry` stanza, and without `disable_hostname =
+true` every metric is prefixed with the pod's hostname so no selector matches.
+Either way the other five rules are silent — they cannot fire on data that
+does not exist. This is the rule that says so.
 
 Two of these deserve naming outright:
 
@@ -321,7 +341,8 @@ which looks exactly like a quiet week. `cmd/truss/metrics_contract_test.go`
 fails the build when that happens, in both directions:
 
 - every `truss_*` series a dashboard or rule names must be one `passMetrics`
-  can emit;
+  can emit (the `vault_*` series are Vault's, not truss's, and are checked by
+  parsing rather than by this);
 - every series `passMetrics` emits must be named by at least one dashboard or
   rule — an unwatched metric is one nobody will notice the absence of either.
 
@@ -379,8 +400,10 @@ than reasoned about.
 the series arrive as `{job="truss", pass="drift"}`. This is the setting whose
 absence breaks every selector here while looking like nothing.
 
-**The alerting rules.** All 19 load into Prometheus across all 6 groups, and
-all 19 evaluate against real data with no `lastError`. Better: they were
+**The alerting rules.** All 25 — 19 truss and 6 vault — load into Prometheus
+across all 8 groups and evaluate against real data with no `lastError`. With
+no Vault in the lab, `VaultIsNotReporting` is the one that goes pending and
+the other five stay inactive, which is exactly what that rule is for. Better: they were
 watched going **red and then green**. The test fixture's clock runs behind
 real time, so the first push left `TrussApplierStopped`, `TrussDriftPassStopped`,
 `TrussRotationIsNotRunning` and `TrussExpirySweepCouldNotRun` all pending —

@@ -56,11 +56,18 @@ if ! command -v logcli >/dev/null 2>&1; then
   no_logcli=1
 fi
 
-rules=observability/alerts/truss.rules.yml
-[ -f "$rules" ] || { echo "check-observability: no $rules" >&2; exit 1; }
+# ⚠️ EVERY RULES FILE, NOT A NAMED ONE. This checked
+# observability/alerts/truss.rules.yml by name, so vault.rules.yml arrived
+# beside it completely unchecked -- the exact gap this script exists to close,
+# reintroduced by adding a file. A glob cannot be outrun by a second one.
+shopt -s nullglob
+rules=(observability/alerts/*.yml observability/alerts/*.yaml)
+[ ${#rules[@]} -gt 0 ] || { echo "check-observability: no rules files under observability/alerts" >&2; exit 1; }
 
-echo "check-observability: $rules"
-promtool check rules "$rules"
+for r in "${rules[@]}"; do
+  echo "check-observability: $r"
+  promtool check rules "$r"
+done
 
 # Every panel target, wrapped as a recording rule so promtool will parse it.
 # A block scalar carries the expression verbatim: panel queries contain double
