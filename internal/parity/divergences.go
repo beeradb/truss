@@ -383,8 +383,11 @@ var Divergences = []Divergence{
 			"in it changes nothing, so there is nothing to prove and nothing an attacker gains -- the apply " +
 			"is a no-op either way. This is the same argument plan.Canonical already makes for dropping " +
 			"individual no-op resources, applied to a plan that is entirely no-ops. ⚠️ An UNREADABLE plan is " +
-			"still gated: countResourceChanges returns (0, false) for one it cannot parse, and treating that " +
-			"as \"no changes\" would be absent-reads-as-compliant, which internal/gates exists to keep out.",
+			"still refused, by name: countResourceChanges errors on a document it cannot read as a plan, and " +
+			"treating that as \"no changes\" would be absent-reads-as-compliant, which internal/gates exists " +
+			"to keep out. A plan that legitimately changes nothing is the other answer -- OpenTofu marshals " +
+			"resource_changes omitempty and errored not, so an omitted key on a real plan document counts " +
+			"zero and applies, exactly as the bash's own (.resource_changes // []) does.",
 		Ref: "cmd/truss/apply_cmd.go applyOneRoot (the no-changes exit); " +
 			"cmd/truss/apply_digest_gate_test.go TestAPlanThatChangesNothingIsNotGated; " +
 			"cmd/truss/apply_partial_multiroot_test.go",

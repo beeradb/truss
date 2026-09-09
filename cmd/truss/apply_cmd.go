@@ -948,12 +948,13 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		// as approved, left an empty plan that was refused forever rather
 		// than recorded as already satisfied.
 		//
-		// ⚠️ `parsed` IS LOAD-BEARING AND MUST NOT BE DROPPED.
-		// countResourceChanges returns (0, false) for a plan it could not
-		// read, and treating that as "no changes" would skip the gate on
-		// exactly the input nobody understands -- the absent-reads-as-
-		// compliant bug that internal/gates exists to keep out of this
-		// codebase. Unreadable is gated, like everything else.
+		// ⚠️ THE ERROR IS LOAD-BEARING AND MUST NOT BE DROPPED.
+		// countResourceChanges refuses a document it cannot read as a plan,
+		// and treating that as "no changes" would skip the gate on exactly
+		// the input nobody understands -- the absent-reads-as-compliant bug
+		// that internal/gates exists to keep out of this codebase. A plan
+		// that legitimately changes nothing is a different answer, and the
+		// two are told apart on a field: see countResourceChanges.
 		changes, err := countResourceChanges(planJSON)
 		if err != nil {
 			// ⚠️ ITS OWN REFUSAL, CARRYING ITS OWN CAUSE. Falling through to
@@ -1025,8 +1026,10 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 // kind of guess the "if we put a number somewhere, we must be sure it is
 // right" rule forbids. Fail loud by counting it, not by swallowing it.
 //
-// Returns "could not be parsed" (false, matching RootSummary.ResourceChanges'
-// own doc) rather than zero when the plan JSON itself does not parse.
+// Returns an error, never a zero count, for a document it cannot read as a
+// plan -- one that does not parse, one carrying neither `errored` nor a
+// usable `resource_changes`, or one whose `resource_changes` is not a list.
+// The caller refuses on it; RootSummary.ResourceChanges is left nil.
 // rootDeclaresCloudflare reports whether a root's COMMITTED lockfile declares
 // the Cloudflare provider.
 //
@@ -1080,10 +1083,18 @@ func countResourceChanges(planJSON []byte) (int, error) {
 		return 0, fmt.Errorf("the plan JSON does not parse: %v", err)
 	}
 	raw, hasChanges := doc["resource_changes"]
+	// ⚠️ A null VALUE IS NOT A PRESENT KEY, for the purpose of deciding
+	// whether this is a plan at all. `{"resource_changes":null}` carries the
+	// name of a plan field and nothing else, and accepting it as evidence
+	// let a document with no `errored` either be read as an empty plan and
+	// applied ungated -- the same hole one layer in.
+	if string(raw) == "null" {
+		hasChanges = false
+	}
 	if _, hasErrored := doc["errored"]; !hasErrored && !hasChanges {
 		return 0, errors.New("it carries neither errored nor resource_changes, so it is not a plan document")
 	}
-	if !hasChanges || string(raw) == "null" {
+	if !hasChanges {
 		return 0, nil
 	}
 

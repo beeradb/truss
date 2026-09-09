@@ -109,6 +109,14 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 			wantErr:   "",
 		},
 		{
+			// The same hole one layer in: the key is there and carries
+			// nothing, so it is no evidence that this is a plan.
+			name:      "a null resource_changes with no errored is not a plan",
+			planJSON:  `{"resource_changes":null}`,
+			wantCount: 0,
+			wantErr:   "not a plan document",
+		},
+		{
 			name:      "a null resource_changes on a real plan counts zero",
 			planJSON:  `{"errored":false,"resource_changes":null}`,
 			wantCount: 0,
