@@ -147,14 +147,23 @@ case "$1" in
     # answer and it says so. It still refuses: zero objects is not evidence
     # that objects are written once, which is the only thing that makes a
     # lock safe.
+    # ⚠️ STDERR IS THE MESSAGE, NEVER THE LISTING. `2>&1` here read gcloud's
+    # own chatter as object names: one routine "Updates are available" notice
+    # on an empty bucket made the listing non-empty, so this printed "every
+    # object has exactly one generation" and cleared an unmeasured bucket for
+    # an irreversible lock -- and a warning repeated twice came back from
+    # `uniq -d` as a rewritten object. Parse stdout; keep stderr for the
+    # human.
+    said=$(mktemp)
+    trap 'rm -f "$said"' EXIT
     set +e
-    listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>&1); listed=$?
+    listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>"$said"); listed=$?
     set -e
     if [ "$listed" -ne 0 ] || [ -z "$listing" ]; then
-      echo "  cannot answer: listing gs://$BUCKET produced nothing (gcloud exit $listed)." >&2
+      echo "  cannot answer: the listing produced no objects (gcloud exit $listed)." >&2
       echo "  An empty bucket and a failed listing are the same silence here, and" >&2
       echo "  neither is evidence that objects are written once. gcloud said:" >&2
-      printf '%s\n' "$listing" | sed 's/^/    /' >&2
+      sed 's/^/    /' "$said" >&2
       exit 1
     fi
     rewritten=$(printf '%s\n' "$listing" |
