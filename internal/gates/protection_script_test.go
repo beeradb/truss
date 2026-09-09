@@ -27,9 +27,15 @@ func TestProtectionScriptSatisfiesTheGate(t *testing.T) {
 		} `json:"required_status_checks"`
 		EnforceAdmins *bool `json:"enforce_admins"`
 		Reviews       *struct {
-			RequireCodeOwners *bool `json:"require_code_owner_reviews"`
-			DismissStale      *bool `json:"dismiss_stale_reviews"`
-			Count             *int  `json:"required_approving_review_count"`
+			RequireCodeOwners       *bool `json:"require_code_owner_reviews"`
+			DismissStale            *bool `json:"dismiss_stale_reviews"`
+			Count                   *int  `json:"required_approving_review_count"`
+			RequireLastPushApproval *bool `json:"require_last_push_approval"`
+			BypassAllowances        *struct {
+				Users []string `json:"users"`
+				Teams []string `json:"teams"`
+				Apps  []string `json:"apps"`
+			} `json:"bypass_pull_request_allowances"`
 		} `json:"required_pull_request_reviews"`
 		AllowForcePushes *bool `json:"allow_force_pushes"`
 		AllowDeletions   *bool `json:"allow_deletions"`
@@ -40,15 +46,24 @@ func TestProtectionScriptSatisfiesTheGate(t *testing.T) {
 	if got.RequiredStatusChecks == nil || got.Reviews == nil {
 		t.Fatal("payload omits required_status_checks or required_pull_request_reviews entirely")
 	}
+	// ⚠️ THE SCRIPT MUST NOT SET THIS KEY AT ALL. bypass_pull_request_allowances
+	// present means someone is exempted from the count and code-owner
+	// requirements above; the compliant payload leaves the key out entirely
+	// (nil here, not an empty object), same as GitHub does for "nobody".
+	if got.Reviews.BypassAllowances != nil {
+		t.Error("payload sets bypass_pull_request_allowances; the compliant setting is to omit the key")
+	}
 
 	p := Protection{
-		RequiredApprovals:     got.Reviews.Count,
-		RequireCodeOwners:     got.Reviews.RequireCodeOwners,
-		DismissStaleReviews:   got.Reviews.DismissStale,
-		EnforceAdmins:         got.EnforceAdmins,
-		AllowForcePushes:      got.AllowForcePushes,
-		RequireUpToDateBranch: got.RequiredStatusChecks.Strict,
-		StatusChecks:          got.RequiredStatusChecks.Contexts,
+		RequiredApprovals:       got.Reviews.Count,
+		RequireCodeOwners:       got.Reviews.RequireCodeOwners,
+		DismissStaleReviews:     got.Reviews.DismissStale,
+		EnforceAdmins:           got.EnforceAdmins,
+		AllowForcePushes:        got.AllowForcePushes,
+		AllowDeletions:          got.AllowDeletions,
+		RequireUpToDateBranch:   got.RequiredStatusChecks.Strict,
+		RequireLastPushApproval: got.Reviews.RequireLastPushApproval,
+		StatusChecks:            got.RequiredStatusChecks.Contexts,
 	}
 
 	// "plan" is config.Config.RequiredCheck. Importing config here would be an
@@ -84,7 +99,8 @@ func TestTheGateRefusesEachFieldTheScriptSets(t *testing.T) {
 		return Protection{
 			RequiredApprovals: &one, RequireCodeOwners: &yes,
 			DismissStaleReviews: &yes, EnforceAdmins: &yes,
-			AllowForcePushes: &no, RequireUpToDateBranch: &yes,
+			AllowForcePushes: &no, AllowDeletions: &no,
+			RequireUpToDateBranch: &yes, RequireLastPushApproval: &yes,
 			StatusChecks: []string{"plan"},
 		}
 	}
@@ -93,17 +109,21 @@ func TestTheGateRefusesEachFieldTheScriptSets(t *testing.T) {
 	}
 
 	weaken := map[string]func(*Protection){
-		"no approvals required": func(p *Protection) { p.RequiredApprovals = &zero },
-		"approvals absent":      func(p *Protection) { p.RequiredApprovals = nil },
-		"code owners off":       func(p *Protection) { p.RequireCodeOwners = &no },
-		"code owners absent":    func(p *Protection) { p.RequireCodeOwners = nil },
-		"dismiss stale off":     func(p *Protection) { p.DismissStaleReviews = &no },
-		"enforce admins off":    func(p *Protection) { p.EnforceAdmins = &no },
-		"force pushes on":       func(p *Protection) { yes := true; p.AllowForcePushes = &yes },
-		"force pushes absent":   func(p *Protection) { p.AllowForcePushes = nil },
-		"strict off":            func(p *Protection) { p.RequireUpToDateBranch = &no },
-		"plan check missing":    func(p *Protection) { p.StatusChecks = []string{"lint"} },
-		"no checks at all":      func(p *Protection) { p.StatusChecks = nil },
+		"no approvals required":     func(p *Protection) { p.RequiredApprovals = &zero },
+		"approvals absent":          func(p *Protection) { p.RequiredApprovals = nil },
+		"code owners off":           func(p *Protection) { p.RequireCodeOwners = &no },
+		"code owners absent":        func(p *Protection) { p.RequireCodeOwners = nil },
+		"dismiss stale off":         func(p *Protection) { p.DismissStaleReviews = &no },
+		"enforce admins off":        func(p *Protection) { p.EnforceAdmins = &no },
+		"force pushes on":           func(p *Protection) { yes := true; p.AllowForcePushes = &yes },
+		"force pushes absent":       func(p *Protection) { p.AllowForcePushes = nil },
+		"deletions on":              func(p *Protection) { yes := true; p.AllowDeletions = &yes },
+		"deletions absent":          func(p *Protection) { p.AllowDeletions = nil },
+		"strict off":                func(p *Protection) { p.RequireUpToDateBranch = &no },
+		"last push approval off":    func(p *Protection) { p.RequireLastPushApproval = &no },
+		"last push approval absent": func(p *Protection) { p.RequireLastPushApproval = nil },
+		"plan check missing":        func(p *Protection) { p.StatusChecks = []string{"lint"} },
+		"no checks at all":          func(p *Protection) { p.StatusChecks = nil },
 	}
 	for name, break_ := range weaken {
 		t.Run(name, func(t *testing.T) {

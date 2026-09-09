@@ -202,6 +202,31 @@ func TestDriftCheckAcceptsOnlyZeroOrOne(t *testing.T) {
 	}
 }
 
+// TestHeartbeatPingURLAbsentMeansEmpty verifies that HEARTBEAT_PING_URL is a
+// true optional-with-no-default: leaving it unset produces an empty
+// HeartbeatPingURL and adds no problem, unlike a required var.
+func TestHeartbeatPingURLAbsentMeansEmpty(t *testing.T) {
+	getenv := func(name string) string {
+		switch name {
+		case "REPO", "APPROVER", "LEDGER_BUCKET",
+			"LEDGER_APPLIED_PREFIX", "LEDGER_FAILED_PREFIX", "LEDGER_HEAD_KEY",
+			"HEARTBEAT_KEY", "PLAN_DIGEST_PREFIX", "WORKDIR", "OP_TOKEN_FILE":
+			return "dummy"
+		default:
+			return "" // HEARTBEAT_PING_URL included: left unset
+		}
+	}
+
+	cfg, problems := Load(getenv)
+
+	if len(problems) != 0 {
+		t.Fatalf("expected no problems with HEARTBEAT_PING_URL unset, got: %v", problems)
+	}
+	if cfg.HeartbeatPingURL != "" {
+		t.Errorf("expected HeartbeatPingURL to be empty when unset, got %q", cfg.HeartbeatPingURL)
+	}
+}
+
 // TestRootsAreNotConfigurable uses reflection to verify that no field name
 // suggests a configurable root path.
 func TestRootsAreNotConfigurable(t *testing.T) {

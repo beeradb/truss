@@ -10,6 +10,7 @@ package gates
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -22,13 +23,31 @@ import (
 // readily as on null. Absent must be its own case and must never read as
 // compliant.
 type Protection struct {
-	RequiredApprovals     *int
-	RequireCodeOwners     *bool
-	DismissStaleReviews   *bool
-	EnforceAdmins         *bool
-	AllowForcePushes      *bool
-	RequireUpToDateBranch *bool // required_status_checks.strict
-	StatusChecks          []string
+	RequiredApprovals           *int
+	RequireCodeOwners           *bool
+	DismissStaleReviews         *bool
+	EnforceAdmins               *bool
+	AllowForcePushes            *bool
+	AllowDeletions              *bool
+	RequireUpToDateBranch       *bool // required_status_checks.strict
+	RequireLastPushApproval     *bool // required_pull_request_reviews.require_last_push_approval
+	BypassPullRequestAllowances *BypassAllowances
+	StatusChecks                []string
+}
+
+// BypassAllowances lists the actors GitHub lets skip
+// required_approving_review_count and require_code_owner_reviews entirely.
+//
+// ⚠️ THE ONE FIELD ON THIS TYPE WHERE ABSENT IS THE COMPLIANT VALUE. GitHub
+// omits bypass_pull_request_allowances from the wire payload altogether when
+// no bypass is configured -- there is no `{}`, only a missing key -- so a nil
+// *BypassAllowances means "nobody may bypass" and must NOT be refused the way
+// AllowForcePushes' nil is. Refusing it would refuse every correctly
+// configured repository, which is exactly backwards.
+type BypassAllowances struct {
+	Users []string
+	Teams []string
+	Apps  []string
 }
 
 // ProtectionBar is what the applier refuses to run without. Each field of
@@ -54,8 +73,46 @@ func CheckProtection(p Protection, requiredCheck string) []string {
 	if p.AllowForcePushes == nil || *p.AllowForcePushes {
 		problems = append(problems, "allow_force_pushes is on, or unreadable")
 	}
+	// Same shape as AllowForcePushes, same reason: docs/design.md lists
+	// "Allow force pushes / deletions off" as one requirement, and
+	// scripts/protection sets both in the same payload. History is the
+	// audit log only if nothing in it can be deleted.
+	if p.AllowDeletions == nil || *p.AllowDeletions {
+		problems = append(problems, "allow_deletions is on, or unreadable")
+	}
 	if !isTrue(p.RequireUpToDateBranch) {
 		problems = append(problems, "required_status_checks.strict is off: an approval against a stale main can merge")
+	}
+	// Without this, CheckApproval's "the approval must be at the head sha"
+	// (see the doc comment on Approval below) is undercut one level up: a
+	// push AFTER the last approval can still merge, because GitHub does not
+	// itself require that push to be re-approved. This is that same rule,
+	// asked of the branch-protection endpoint instead of the PR.
+	if !isTrue(p.RequireLastPushApproval) {
+		problems = append(problems, "require_last_push_approval is off: a push after the last approval can still merge")
+	}
+	// ⚠️ ABSENT IS COMPLIANT HERE, THE ONE PLACE IN THIS FUNCTION WHERE IT
+	// IS. GitHub omits bypass_pull_request_allowances entirely when nobody
+	// may bypass; a nil pointer is that fact, not a missing read. Only a
+	// non-empty list is a problem, and it is named so an operator does not
+	// have to go and look: RequiredApprovals and RequireCodeOwners above are
+	// not true for whoever is named in it.
+	if b := p.BypassPullRequestAllowances; b != nil {
+		var who []string
+		if len(b.Users) > 0 {
+			who = append(who, "users")
+		}
+		if len(b.Teams) > 0 {
+			who = append(who, "teams")
+		}
+		if len(b.Apps) > 0 {
+			who = append(who, "apps")
+		}
+		if len(who) > 0 {
+			problems = append(problems, fmt.Sprintf(
+				"bypass_pull_request_allowances is non-empty (%s): required_approving_review_count and require_code_owner_reviews do not apply to them",
+				strings.Join(who, ", ")))
+		}
 	}
 	if !contains(p.StatusChecks, requiredCheck) {
 		problems = append(problems, fmt.Sprintf("required status check %q is not required", requiredCheck))

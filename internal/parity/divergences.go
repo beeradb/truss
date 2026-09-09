@@ -357,6 +357,39 @@ var Divergences = []Divergence{
 		Ref: "cmd/truss/apply_cmd.go countResourceChanges; applier/apply.sh:598 summary_from_plan",
 	},
 
+	{
+		ID:     "EMPTY-PLAN-IS-NOT-GATED",
+		Status: StatusIntended,
+		Scenarios: []string{
+			"test_a_plan_that_differs_from_the_approved_one_is_refused",
+			"test_a_root_with_no_approved_plan_is_refused",
+		},
+		Accept: emptyPlanIsNotGated,
+		Bash:   "refuses the commit, files failed/<sha> and alerts FAILED, because the digest of its plan is not the digest on file (or none is)",
+		Truss:  "applies, records applied/<sha> and advances HEAD, because the plan it just built changes nothing",
+		Why: "⚠️ BOTH FIXTURES SET `tofu_show` TO `{\"resource_changes\":[]}`, SO WHAT THEY ACTUALLY " +
+			"EXERCISE IS THE DIGEST GATE AGAINST A PLAN THAT APPLIES NOTHING -- not, as their names say, a " +
+			"plan that differs. The bash refuses it; truss no longer does, and the reason is a defect the " +
+			"bash has and truss had until 2026-09-09. Roots are applied one at a time and applied/<sha> is " +
+			"written only after all of them succeed, so a failure in the SECOND root of a commit leaves the " +
+			"FIRST one applied with HEAD unmoved. The next pass re-plans that first root against " +
+			"infrastructure that already carries its changes, gets an empty plan, and hashes it to the " +
+			"digest of `[]` -- which can never match the digest CI filed for a plan that changed something. " +
+			"Every later pass repeats it, so the queue stops for good, and the refusal blames \"the world " +
+			"moved between review and apply\" when what moved it was the previous pass. Reproduced in " +
+			"cmd/truss/apply_partial_multiroot_test.go, and it matches the incident in docs/work-items.md " +
+			"where the watermark had to be advanced by hand, twice, past a commit that could never apply. " +
+			"The gate proves that what is about to CHANGE is what the approver read; a plan with no changes " +
+			"in it changes nothing, so there is nothing to prove and nothing an attacker gains -- the apply " +
+			"is a no-op either way. This is the same argument plan.Canonical already makes for dropping " +
+			"individual no-op resources, applied to a plan that is entirely no-ops. ⚠️ An UNREADABLE plan is " +
+			"still gated: countResourceChanges returns (0, false) for one it cannot parse, and treating that " +
+			"as \"no changes\" would be absent-reads-as-compliant, which internal/gates exists to keep out.",
+		Ref: "cmd/truss/apply_cmd.go applyOneRoot (the no-changes exit); " +
+			"cmd/truss/apply_digest_gate_test.go TestAPlanThatChangesNothingIsNotGated; " +
+			"cmd/truss/apply_partial_multiroot_test.go",
+	},
+
 	// -----------------------------------------------------------------
 	// FINDINGS -- nobody decided these. Reported to the owner as defects.
 	// -----------------------------------------------------------------
@@ -554,4 +587,44 @@ func nonNegativeAndNoGreater(bash, truss string) bool {
 		return false
 	}
 	return t <= b
+}
+
+// emptyPlanIsNotGated matches EMPTY-PLAN-IS-NOT-GATED's one shape: the bash
+// refuses on the plan digest and truss applies instead, plus the structural
+// consequences of the queue advancing rather than stopping. Every diff is
+// pinned to that story -- the bash side has to actually name the digest gate
+// wherever it carries a reason, so an unrelated failure in these two
+// scenarios cannot slip through under this entry.
+func emptyPlanIsNotGated(d Diff) bool {
+	namesTheGate := func(s string) bool {
+		return strings.Contains(s, "does not match the one approved at") ||
+			strings.Contains(s, "no approved plan recorded for")
+	}
+	switch d.Kind {
+	case "exit":
+		// The bash stops the queue; truss finishes the commit.
+		return d.Bash == "1" && d.Truss == "0"
+	case "alert":
+		return namesTheGate(d.Bash) && !strings.Contains(d.Truss, "FAILED")
+	case "missing-key":
+		// failed/<sha>, which truss has no reason to write.
+		return strings.HasPrefix(d.Key, "failed/") && namesTheGate(d.Bash)
+	case "extra-key":
+		// applied/<sha>, which the bash never reaches.
+		return strings.HasPrefix(d.Key, "applied/")
+	case "value":
+		if d.Key == "applied/HEAD" {
+			return true
+		}
+		if !strings.HasPrefix(d.Key, "heartbeat") {
+			return false
+		}
+		switch d.Path {
+		case "/failure":
+			return namesTheGate(d.Bash)
+		default:
+			return true
+		}
+	}
+	return false
 }

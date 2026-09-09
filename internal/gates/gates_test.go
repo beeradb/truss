@@ -25,13 +25,17 @@ func strPtr(s string) *string { return &s }
 // break one thing.
 func compliantProtection() Protection {
 	return Protection{
-		RequiredApprovals:     intPtr(1),
-		RequireCodeOwners:     boolPtr(true),
-		DismissStaleReviews:   boolPtr(true),
-		EnforceAdmins:         boolPtr(true),
-		AllowForcePushes:      boolPtr(false),
-		RequireUpToDateBranch: boolPtr(true),
-		StatusChecks:          []string{"plan"},
+		RequiredApprovals:       intPtr(1),
+		RequireCodeOwners:       boolPtr(true),
+		DismissStaleReviews:     boolPtr(true),
+		EnforceAdmins:           boolPtr(true),
+		AllowForcePushes:        boolPtr(false),
+		AllowDeletions:          boolPtr(false),
+		RequireUpToDateBranch:   boolPtr(true),
+		RequireLastPushApproval: boolPtr(true),
+		// BypassPullRequestAllowances is left nil: that is its COMPLIANT
+		// value, the one place in this struct where the zero value passes.
+		StatusChecks: []string{"plan"},
 	}
 }
 
@@ -62,7 +66,9 @@ func TestCheckProtectionRefusesEachMissingSetting(t *testing.T) {
 		{"dismiss stale off", func(p *Protection) { p.DismissStaleReviews = boolPtr(false) }, "dismiss_stale_reviews is off"},
 		{"enforce admins off", func(p *Protection) { p.EnforceAdmins = boolPtr(false) }, "enforce_admins is off"},
 		{"force pushes on", func(p *Protection) { p.AllowForcePushes = boolPtr(true) }, "allow_force_pushes is on, or unreadable"},
+		{"deletions on", func(p *Protection) { p.AllowDeletions = boolPtr(true) }, "allow_deletions is on, or unreadable"},
 		{"branch not required up to date", func(p *Protection) { p.RequireUpToDateBranch = boolPtr(false) }, "required_status_checks.strict is off"},
+		{"last push approval off", func(p *Protection) { p.RequireLastPushApproval = boolPtr(false) }, "require_last_push_approval is off"},
 		{"required check missing", func(p *Protection) { p.StatusChecks = []string{"other"} }, `required status check "plan" is not required`},
 	}
 
@@ -93,7 +99,9 @@ func TestAMissingKeyIsNotReadAsCompliant(t *testing.T) {
 		{"dismiss stale reviews nil", func(p *Protection) { p.DismissStaleReviews = nil }},
 		{"enforce admins nil", func(p *Protection) { p.EnforceAdmins = nil }},
 		{"allow force pushes nil", func(p *Protection) { p.AllowForcePushes = nil }},
+		{"allow deletions nil", func(p *Protection) { p.AllowDeletions = nil }},
 		{"require up to date branch nil", func(p *Protection) { p.RequireUpToDateBranch = nil }},
+		{"require last push approval nil", func(p *Protection) { p.RequireLastPushApproval = nil }},
 	}
 
 	for _, c := range cases {
@@ -112,6 +120,60 @@ func TestAnExplicitFalseAllowForcePushesIsCompliant(t *testing.T) {
 	p.AllowForcePushes = boolPtr(false)
 	if problems := CheckProtection(p, "plan"); len(problems) != 0 {
 		t.Fatalf("an explicit false allow_force_pushes was refused: %v", problems)
+	}
+}
+
+func TestAnExplicitFalseAllowDeletionsIsCompliant(t *testing.T) {
+	p := compliantProtection()
+	p.AllowDeletions = boolPtr(false)
+	if problems := CheckProtection(p, "plan"); len(problems) != 0 {
+		t.Fatalf("an explicit false allow_deletions was refused: %v", problems)
+	}
+}
+
+// TestBypassPullRequestAllowancesNilIsCompliant is the inverse of every
+// other absent-field test in this file on purpose: GitHub omits
+// bypass_pull_request_allowances from the wire entirely when no bypass is
+// configured, so nil here is "nobody may bypass", not "unreadable". Refusing
+// it, the way AllowForcePushes' nil is refused, would refuse every
+// correctly configured repository -- the one place that pattern does not
+// apply.
+func TestBypassPullRequestAllowancesNilIsCompliant(t *testing.T) {
+	p := compliantProtection()
+	p.BypassPullRequestAllowances = nil
+	if problems := CheckProtection(p, "plan"); len(problems) != 0 {
+		t.Fatalf("a nil BypassPullRequestAllowances was refused: %v", problems)
+	}
+}
+
+func TestBypassPullRequestAllowancesRefusesAnyNonEmptyList(t *testing.T) {
+	cases := []struct {
+		name    string
+		bypass  *BypassAllowances
+		wantSub string
+	}{
+		{"a named user", &BypassAllowances{Users: []string{"alice"}}, "users"},
+		{"a named team", &BypassAllowances{Teams: []string{"platform"}}, "teams"},
+		{"a named app", &BypassAllowances{Apps: []string{"some-app"}}, "apps"},
+		{"all three", &BypassAllowances{Users: []string{"alice"}, Teams: []string{"platform"}, Apps: []string{"some-app"}}, "users, teams, apps"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := compliantProtection()
+			p.BypassPullRequestAllowances = c.bypass
+			problems := CheckProtection(p, "plan")
+			if !hasProblemContaining(problems, "bypass_pull_request_allowances") || !hasProblemContaining(problems, c.wantSub) {
+				t.Fatalf("problems %v do not mention bypass_pull_request_allowances and %q", problems, c.wantSub)
+			}
+		})
+	}
+
+	// An allocated-but-empty struct -- all three lists present and empty --
+	// is the same fact as nil (nobody named), and must not be refused.
+	p := compliantProtection()
+	p.BypassPullRequestAllowances = &BypassAllowances{}
+	if problems := CheckProtection(p, "plan"); len(problems) != 0 {
+		t.Fatalf("an empty (but non-nil) BypassPullRequestAllowances was refused: %v", problems)
 	}
 }
 
@@ -139,6 +201,16 @@ func TestEveryProtectionFieldIsChecked(t *testing.T) {
 		t.Fatalf("the compliant baseline was refused: %v", problems)
 	}
 
+	// BypassPullRequestAllowances is the one field whose COMPLIANT value IS
+	// its zero value (nil, §"THE ONE FIELD..." on BypassAllowances) --
+	// zeroing it is therefore a no-op that would falsely report "not
+	// checked". It is proven checked the same way TestBypassPull-
+	// RequestAllowancesRefusesAnyNonEmptyList does: by setting it to a
+	// violating value instead of clearing it.
+	violating := map[string]any{
+		"BypassPullRequestAllowances": &BypassAllowances{Users: []string{"someone"}},
+	}
+
 	typ := reflect.TypeOf(base)
 	for i := 0; i < typ.NumField(); i++ {
 		name := typ.Field(i).Name
@@ -146,11 +218,15 @@ func TestEveryProtectionFieldIsChecked(t *testing.T) {
 			mutated := compliantProtection()
 			v := reflect.ValueOf(&mutated).Elem()
 			field := v.Field(i)
-			field.Set(reflect.Zero(field.Type()))
+			if bad, ok := violating[name]; ok {
+				field.Set(reflect.ValueOf(bad))
+			} else {
+				field.Set(reflect.Zero(field.Type()))
+			}
 
 			problems := CheckProtection(mutated, "plan")
 			if len(problems) == 0 {
-				t.Fatalf("zeroing Protection.%s did not change the result -- this field is not checked", name)
+				t.Fatalf("mutating Protection.%s did not change the result -- this field is not checked", name)
 			}
 		})
 	}
@@ -340,7 +416,7 @@ func TestGatesImportsNothingThatDoesIO(t *testing.T) {
 	// cheapest way that promise breaks silently, so pin it to the exact set
 	// this package needs today rather than to a denylist that a future I/O
 	// package might not be on.
-	allowed := map[string]bool{"fmt": true, "time": true}
+	allowed := map[string]bool{"fmt": true, "time": true, "strings": true}
 
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(info fs.FileInfo) bool {

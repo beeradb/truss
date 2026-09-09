@@ -299,6 +299,73 @@ func TestProtectionKeepsAbsentAsAbsent(t *testing.T) {
 	if p.RequiredApprovals == nil || *p.RequiredApprovals != 1 {
 		t.Fatalf("RequiredApprovals = %v, want 1 (it WAS present)", p.RequiredApprovals)
 	}
+	if p.AllowDeletions != nil {
+		t.Fatalf("AllowDeletions = %v, want nil for an absent key", *p.AllowDeletions)
+	}
+	if p.RequireLastPushApproval != nil {
+		t.Fatalf("RequireLastPushApproval = %v, want nil for an absent key", *p.RequireLastPushApproval)
+	}
+	// ⚠️ THE ONE FIELD WHERE ABSENT MUST DECODE TO NIL FOR THE OPPOSITE
+	// REASON FROM EVERY OTHER FIELD IN THIS TEST: nil here is what makes the
+	// repository COMPLIANT, not what makes it unreadable.
+	if p.BypassPullRequestAllowances != nil {
+		t.Fatalf("BypassPullRequestAllowances = %+v, want nil for an absent key", p.BypassPullRequestAllowances)
+	}
+}
+
+// TestProtectionReadsTheThreeAddedFieldsWhenPresent decodes
+// allow_deletions, require_last_push_approval, and
+// bypass_pull_request_allowances the way GitHub sends them when they ARE
+// set, mirroring TestProtectionKeepsAbsentAsAbsent's coverage of when they
+// are not.
+func TestProtectionReadsTheThreeAddedFieldsWhenPresent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations/7654321/access_tokens":
+			mintHandler("ghs_x")(w, r)
+		case "/repos/acme/widgets/branches/main/protection":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"required_pull_request_reviews": {
+					"required_approving_review_count": 1,
+					"require_code_owner_reviews": true,
+					"dismiss_stale_reviews": true,
+					"require_last_push_approval": true,
+					"bypass_pull_request_allowances": {
+						"users": ["alice"],
+						"teams": [],
+						"apps": ["some-app"]
+					}
+				},
+				"enforce_admins": {"enabled": true},
+				"allow_deletions": {"enabled": true}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL)
+	p, err := c.Protection(context.Background(), "main")
+	if err != nil {
+		t.Fatalf("Protection: %v", err)
+	}
+	if p.AllowDeletions == nil || *p.AllowDeletions != true {
+		t.Fatalf("AllowDeletions = %v, want true (it WAS present)", p.AllowDeletions)
+	}
+	if p.RequireLastPushApproval == nil || *p.RequireLastPushApproval != true {
+		t.Fatalf("RequireLastPushApproval = %v, want true (it WAS present)", p.RequireLastPushApproval)
+	}
+	if p.BypassPullRequestAllowances == nil {
+		t.Fatal("BypassPullRequestAllowances = nil, want the users/apps it was set with")
+	}
+	if len(p.BypassPullRequestAllowances.Users) != 1 || p.BypassPullRequestAllowances.Users[0] != "alice" {
+		t.Fatalf("BypassPullRequestAllowances.Users = %v, want [alice]", p.BypassPullRequestAllowances.Users)
+	}
+	if len(p.BypassPullRequestAllowances.Apps) != 1 || p.BypassPullRequestAllowances.Apps[0] != "some-app" {
+		t.Fatalf("BypassPullRequestAllowances.Apps = %v, want [some-app]", p.BypassPullRequestAllowances.Apps)
+	}
 }
 
 func TestProtectionReadsBothStatusCheckShapes(t *testing.T) {

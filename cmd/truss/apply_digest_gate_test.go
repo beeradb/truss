@@ -56,7 +56,7 @@ func gateDeps(t *testing.T, sha, head string) (applyDeps, *fakeLedger, *fakeTele
 // returns. Derived from the same input the code sees, never transcribed.
 func ourDigest(t *testing.T) string {
 	t.Helper()
-	d, err := plan.Digest(noopPlanJSON)
+	d, err := plan.Digest(changingPlanJSON)
 	if err != nil {
 		t.Fatalf("plan.Digest: %v", err)
 	}
@@ -216,4 +216,79 @@ func TestTheGateRefusalNamesTheRoot(t *testing.T) {
 	if !strings.Contains(result.failure, gateRoot) {
 		t.Errorf("refusal %q does not name the root %q", result.failure, gateRoot)
 	}
+}
+
+// ⚠️ THE GATE DOES NOT APPLY TO A PLAN THAT APPLIES NOTHING, AND THAT IS A
+// DELIBERATE NARROWING OF "A MISSING DIGEST IS A REFUSAL".
+//
+// The digest proves that what is about to change is what the approver read.
+// A plan with no changes in it changes nothing, so there is nothing for it to
+// prove and nothing an attacker could gain: the apply is a no-op either way.
+// Refusing anyway is not caution, it is the bug in
+// apply_partial_multiroot_test.go -- a root applied on an earlier pass
+// re-plans to nothing, cannot match the digest CI filed for a plan that
+// changed something, and wedges the queue for good.
+//
+// Both halves are asserted here, because only asserting the permissive one
+// would let the whole gate be deleted and still pass.
+func TestAPlanThatChangesNothingIsNotGated(t *testing.T) {
+	const sha = "commitsha2"
+	const head = "commitsha2"
+
+	t.Run("an empty plan is not refused by a digest it cannot match", func(t *testing.T) {
+		deps, fl, _, tofu := gateDeps(t, sha, head)
+		// Already applied on an earlier pass: OpenTofu still lists the
+		// resource, as a no-op.
+		tofu.ShowJSONBytes = noopAfterApplyJSON
+		fl.put("digests/"+head+"/"+gateSlug+".digest", []byte(notOurDigest(t)))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result := runApplyPass(ctx, deps, head)
+
+		if result.failure != "" {
+			t.Fatalf("result.failure = %q, want empty: a plan that applies nothing has nothing to gate", result.failure)
+		}
+		if _, ok := fl.get("applied/" + sha); !ok {
+			t.Errorf("applied/%s was not written, so the commit still cannot complete", sha)
+		}
+	})
+
+	t.Run("an empty plan is not refused when no digest was filed at all", func(t *testing.T) {
+		deps, fl, _, tofu := gateDeps(t, sha, head)
+		tofu.ShowJSONBytes = noopAfterApplyJSON
+		// Nothing seeded: ApprovedDigest returns ErrNotFound.
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result := runApplyPass(ctx, deps, head)
+
+		if result.failure != "" {
+			t.Fatalf("result.failure = %q, want empty: there is no plan to have reviewed", result.failure)
+		}
+		if _, ok := fl.get("applied/" + sha); !ok {
+			t.Errorf("applied/%s was not written", sha)
+		}
+	})
+
+	// ⚠️ THE HALF THAT KEEPS THE OTHER HALF HONEST. countResourceChanges
+	// returns (0, false) for a plan it cannot read, and if that were treated
+	// as "no changes" the gate would be skipped on exactly the input nobody
+	// understands -- absent reading as compliant, the bug internal/gates
+	// exists to keep out. An unreadable plan is refused.
+	t.Run("a plan that cannot be read is still refused and never applies", func(t *testing.T) {
+		deps, _, _, tofu := gateDeps(t, sha, head)
+		tofu.ShowJSONBytes = []byte(`{"resource_changes":"not an array"}`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result := runApplyPass(ctx, deps, head)
+
+		if result.failure == "" {
+			t.Fatal("result.failure is empty: a plan that could not be read must never take the no-changes exit")
+		}
+		if got := tofu.appliedDirs(); len(got) != 0 {
+			t.Fatalf("tofu Apply was reached %d time(s) on a plan that could not be read: %v", len(got), got)
+		}
+	})
 }

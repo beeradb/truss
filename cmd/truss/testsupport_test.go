@@ -158,6 +158,19 @@ func compliantGatesProtection() gates.Protection {
 		AllowForcePushes:      &no,
 		RequireUpToDateBranch: &yes,
 		StatusChecks:          []string{"plan"},
+
+		// ⚠️ EVERY FIELD CheckProtection READS MUST BE SET HERE, and adding
+		// one there without adding it here turns every cmd/truss test that
+		// expects a pass into "branch protection does not meet the bar" --
+		// a failure that names the gate, not the test's own subject, so it
+		// reads like an unrelated regression. That is the mirror of the
+		// warning on gates.Protection itself.
+		//
+		// BypassPullRequestAllowances is deliberately left nil: nil is the
+		// compliant value there (GitHub omits the key when nobody may
+		// bypass), so a compliant fixture is one that does NOT set it.
+		AllowDeletions:          &no,
+		RequireLastPushApproval: &yes,
 	}
 }
 
@@ -428,9 +441,11 @@ func compliantProtection() map[string]any {
 			"required_approving_review_count": 1,
 			"require_code_owner_reviews":      true,
 			"dismiss_stale_reviews":           true,
+			"require_last_push_approval":      true,
 		},
 		"enforce_admins":     map[string]any{"enabled": true},
 		"allow_force_pushes": map[string]any{"enabled": false},
+		"allow_deletions":    map[string]any{"enabled": false},
 		"required_status_checks": map[string]any{
 			"strict":   true,
 			"contexts": []string{"plan"},
@@ -841,9 +856,25 @@ func (f *fakeTofu) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, 
 	if f.ShowJSONBytes != nil {
 		return f.ShowJSONBytes, nil
 	}
-	return []byte(`{"resource_changes":[]}`), nil
+	return changingPlanJSON, nil
 }
 
+// ⚠️ THE DEFAULT PLAN CHANGES SOMETHING, AND IT USED TO NOT.
+// This fixture was `{"resource_changes":[]}` -- a plan that applies nothing --
+// and every digest-gate test drove it. When applyOneRoot stopped gating a plan
+// with no changes in it (there is nothing to gate), those tests went green
+// while asserting refusals that could no longer happen: they had been
+// exercising the gate on the one input it does not apply to. The fixture was
+// the bug, so the default is now a plan with a real change in it and the
+// empty one is asked for explicitly by the tests that mean it.
+var changingPlanJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["create"],"before":null,"after":{}}}]}`)
+
 // noopPlanJSON is a plan whose resource_changes is empty -- the shape a
-// clean, no-op apply produces.
+// clean, no-op apply produces, and what a root that has ALREADY been applied
+// re-plans to.
 var noopPlanJSON = []byte(`{"resource_changes":[]}`)
+
+// noopAfterApplyJSON is the same resource as changingPlanJSON once that plan
+// has been applied: OpenTofu still emits the entry, with actions ["no-op"],
+// which Canonical drops and countResourceChanges does not count.
+var noopAfterApplyJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["no-op"],"before":{},"after":{}}}]}`)

@@ -17,6 +17,13 @@ type Config struct {
 	RequiredCheck                                 string // "plan"
 	ExpiryWarnDays                                int    // defaulted 30
 	DriftOnly                                     bool
+	// HeartbeatPingURL is a dead-man's-switch monitor (Healthchecks.io,
+	// Cronitor, ...) the pass pings on every completion, success or not.
+	// Optional with NO default: empty means the feature is off and nothing
+	// about the pass changes. It is a bearer secret -- the ping URL alone
+	// authenticates to the monitor -- so it must never be logged, and it is
+	// never rendered into the heartbeat or the chat message.
+	HeartbeatPingURL string
 }
 
 // Load reads and validates configuration from the environment via the provided
@@ -94,6 +101,14 @@ func Load(getenv func(string) string) (Config, []string) {
 		}
 	} else {
 		cfg.ExpiryWarnDays = 30
+	}
+
+	// HEARTBEAT_PING_URL is optional with no default: absent or empty means
+	// the dead-man's-switch feature is off, full stop. Never validated or
+	// echoed back into a problem string -- it is a secret, and a rejected
+	// value would otherwise print it into a log line the moment it is wrong.
+	if pingURL := getenv("HEARTBEAT_PING_URL"); pingURL != "" {
+		cfg.HeartbeatPingURL = pingURL
 	}
 
 	// Load DRIFT_CHECK - accepts only 0, 1, or unset

@@ -17,6 +17,18 @@ type wireProtection struct {
 		RequiredApprovingReviewCount *int  `json:"required_approving_review_count"`
 		RequireCodeOwnerReviews      *bool `json:"require_code_owner_reviews"`
 		DismissStaleReviews          *bool `json:"dismiss_stale_reviews"`
+		RequireLastPushApproval      *bool `json:"require_last_push_approval"`
+		// ⚠️ A POINTER TO A STRUCT, NOT A STRUCT. GitHub omits this key
+		// entirely when no bypass is configured -- there is no `{}` on the
+		// wire for "nobody" -- so BypassPullRequestAllowances stays nil
+		// through decode exactly when it should, and gates.Protection reads
+		// that nil as compliant. A non-pointer struct would decode to its
+		// zero value either way and lose the distinction.
+		BypassPullRequestAllowances *struct {
+			Users []string `json:"users"`
+			Teams []string `json:"teams"`
+			Apps  []string `json:"apps"`
+		} `json:"bypass_pull_request_allowances"`
 	} `json:"required_pull_request_reviews"`
 	EnforceAdmins *struct {
 		Enabled *bool `json:"enabled"`
@@ -24,6 +36,9 @@ type wireProtection struct {
 	AllowForcePushes *struct {
 		Enabled *bool `json:"enabled"`
 	} `json:"allow_force_pushes"`
+	AllowDeletions *struct {
+		Enabled *bool `json:"enabled"`
+	} `json:"allow_deletions"`
 	RequiredStatusChecks *struct {
 		Strict   *bool    `json:"strict"`
 		Contexts []string `json:"contexts"`
@@ -40,12 +55,23 @@ func (w wireProtection) toGates() gates.Protection {
 		p.RequiredApprovals = w.RequiredPullRequestReviews.RequiredApprovingReviewCount
 		p.RequireCodeOwners = w.RequiredPullRequestReviews.RequireCodeOwnerReviews
 		p.DismissStaleReviews = w.RequiredPullRequestReviews.DismissStaleReviews
+		p.RequireLastPushApproval = w.RequiredPullRequestReviews.RequireLastPushApproval
+		if bpa := w.RequiredPullRequestReviews.BypassPullRequestAllowances; bpa != nil {
+			p.BypassPullRequestAllowances = &gates.BypassAllowances{
+				Users: bpa.Users,
+				Teams: bpa.Teams,
+				Apps:  bpa.Apps,
+			}
+		}
 	}
 	if w.EnforceAdmins != nil {
 		p.EnforceAdmins = w.EnforceAdmins.Enabled
 	}
 	if w.AllowForcePushes != nil {
 		p.AllowForcePushes = w.AllowForcePushes.Enabled
+	}
+	if w.AllowDeletions != nil {
+		p.AllowDeletions = w.AllowDeletions.Enabled
 	}
 	// Both shapes GitHub has used for the required check list are accepted
 	// and merged into one slice: a plain list of context strings, or a list

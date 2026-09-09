@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/beeradb/truss/internal/config"
+	"github.com/beeradb/truss/internal/deadman"
 	"github.com/beeradb/truss/internal/forge"
 	"github.com/beeradb/truss/internal/gates"
 	"github.com/beeradb/truss/internal/handoff"
@@ -534,21 +535,70 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		ExpiryUnavailable: expiryUnavailable,
 	}
 	text := notify.Compose(report)
-	// ⚠️ NON-FATAL, BUT NOT SILENT -- and this line used to be both, under a
-	// comment claiming a parity with the bash that it did not have.
-	// apply.sh:447 ends its curl with
-	// `|| echo "telegram send failed (non-fatal)" >&2`.
+
+	// idlePass is exactly notify.Compose's own idle case -- no failure,
+	// nothing applied, nothing noop, the branch that produces "<subject>:
+	// nothing to apply" -- recomputed here rather than sniffed out of text
+	// because matching a rendered string is exactly the mistake AGENTS.md
+	// already warns against ("gate on the field, never rendered text").
+	idlePass := failure == "" && appliedCount == 0 && noopCount == 0
+
+	// The dead-man's-switch ping: every completed pass reaches this tail
+	// exactly once (same guarantee as the heartbeat and the alert below), so
+	// pinging here, unconditionally on d.Cfg.HeartbeatPingURL being set,
+	// covers success, refusal and idle alike -- it answers only "did the
+	// pass finish", never what it found, which is what the chat message is
+	// for.
 	//
-	// Non-fatal is right: a broken alert channel must not fail a pass that
-	// otherwise succeeded. Silent is not, because Telegram is the channel that
-	// reports every OTHER failure -- so a send that dies without a trace is
-	// the one signal whose absence looks exactly like good news.
+	// ⚠️ NON-FATAL, LIKE THE TELEGRAM SEND BELOW: a monitor that did not hear
+	// from us is the monitor's own problem to alert on, and failing this pass
+	// over it would make the liveness signal less reliable than the thing it
+	// exists to make more reliable.
 	//
-	// Safe to log the error: Telegram.Send redacts the bot token from every
-	// error it returns (internal/notify/telegram.go, redactToken), so the URL
-	// carrying it cannot arrive here.
-	if err := d.Telegram.Send(ctx, text); err != nil {
-		d.logf("telegram send failed (non-fatal): %v", err)
+	// Safe to log the error: deadman.Ping never returns one that carries the
+	// URL (see its own doc) -- the URL is a bearer secret and must never
+	// reach a log line.
+	pinged := false
+	if d.Cfg.HeartbeatPingURL != "" {
+		if err := deadman.Ping(ctx, d.Cfg.HeartbeatPingURL); err != nil {
+			d.logf("heartbeat ping failed (non-fatal): %v", err)
+		}
+		pinged = true
+	}
+
+	// The one-sentence rule: when a dead-man's-switch is configured, an idle
+	// pass pings it instead of messaging. Every other pass -- a failure, or
+	// one that applied or no-opped something -- still messages exactly as it
+	// does today, and a pass with no HeartbeatPingURL configured always
+	// messages, unconditionally, which is the regression guard for every
+	// deployment that has not opted in.
+	//
+	// ⚠️ A FAILED PING STILL SUPPRESSES THE IDLE MESSAGE, AND THAT IS NOT AN
+	// OVERSIGHT. `pinged` means the ping was ATTEMPTED, not that it landed.
+	// Messaging when it fails would be a fallback path -- a second way to
+	// report the same fact, taken only sometimes -- and this project has one
+	// correct path or none. It is also unnecessary: a ping that did not
+	// arrive is a monitor that heard nothing, which is the exact condition a
+	// dead-man's-switch exists to alert on. The silence IS the signal, and
+	// re-routing it to the channel the switch was adopted to quieten would
+	// undo the reason for adopting it.
+	if !(pinged && idlePass) {
+		// ⚠️ NON-FATAL, BUT NOT SILENT -- and this line used to be both, under a
+		// comment claiming a parity with the bash that it did not have.
+		// apply.sh:447 ends its curl with
+		// `|| echo "telegram send failed (non-fatal)" >&2`.
+		//
+		// Non-fatal is right: a broken alert channel must not fail a pass that
+		// otherwise succeeded. Silent is not, because Telegram is the channel that
+		// reports every OTHER failure -- so a send that dies without a trace is
+		// the one signal whose absence looks exactly like good news.
+		//
+		// Safe to log the error: Telegram.Send redacts the bot token from every
+		// error it returns (internal/notify/telegram.go, redactToken), so the URL
+		// carrying it cannot arrive here.
+		if err := d.Telegram.Send(ctx, text); err != nil {
+			d.logf("telegram send failed (non-fatal): %v", err)
+		}
 	}
 
 	return applyResult{failure: failure, notifyText: text}
@@ -866,23 +916,59 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 			}
 			return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
 		}
-		mine, err := plan.Digest(planJSON)
-		if err != nil {
-			return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
-		}
-		approved, err := d.Journal.ApprovedDigest(ctx, headSHA, root)
-		approvedFound := true
-		if err != nil {
-			if errors.Is(err, ledger.ErrNotFound) {
-				approvedFound = false
-			} else {
-				return ledger.RootSummary{}, false, fmt.Sprintf("could not read the approved plan digest for %s at %s: %v", root, headSHA, err)
+		// ⚠️ A PLAN THAT CHANGES NOTHING IS NOT GATED, BECAUSE THERE IS
+		// NOTHING TO GATE. The digest proves that what we are about to
+		// change is what the approver read. A plan with no changes in it
+		// changes nothing, so it cannot deviate from what was approved --
+		// the same argument Canonical already makes for dropping
+		// individual no-op resources, applied to a plan that is entirely
+		// no-ops.
+		//
+		// ⚠️ WITHOUT THIS, A COMMIT TOUCHING TWO ROOTS COULD WEDGE THE
+		// QUEUE FOREVER. Roots are applied one at a time and applied/<sha>
+		// is written only after all of them succeed, so a failure in the
+		// second root leaves the first one APPLIED with HEAD unmoved. The
+		// next pass re-plans that first root against infrastructure that
+		// now already carries its changes, gets an empty plan, and hashes
+		// it to the digest of `[]` -- which cannot match the digest CI
+		// filed for a plan that changed something. Every later pass
+		// repeated it identically, and the refusal blamed "the world moved
+		// between review and apply" when what had moved it was the
+		// previous pass. Reproduced in apply_partial_multiroot_test.go.
+		//
+		// It also settles the case this gate got wrong in the other
+		// direction: a change somebody had already made by hand, exactly
+		// as approved, left an empty plan that was refused forever rather
+		// than recorded as already satisfied.
+		//
+		// ⚠️ `parsed` IS LOAD-BEARING AND MUST NOT BE DROPPED.
+		// countResourceChanges returns (0, false) for a plan it could not
+		// read, and treating that as "no changes" would skip the gate on
+		// exactly the input nobody understands -- the absent-reads-as-
+		// compliant bug that internal/gates exists to keep out of this
+		// codebase. Unreadable is gated, like everything else.
+		changes, parsed := countResourceChanges(planJSON)
+		if parsed && changes == 0 {
+			d.logf("plan for %s changes nothing; no digest to check, because there is nothing to apply", root)
+		} else {
+			mine, err := plan.Digest(planJSON)
+			if err != nil {
+				return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
 			}
+			approved, err := d.Journal.ApprovedDigest(ctx, headSHA, root)
+			approvedFound := true
+			if err != nil {
+				if errors.Is(err, ledger.ErrNotFound) {
+					approvedFound = false
+				} else {
+					return ledger.RootSummary{}, false, fmt.Sprintf("could not read the approved plan digest for %s at %s: %v", root, headSHA, err)
+				}
+			}
+			if problems := gates.CheckPlanDigest(root, headSHA, d.Journal.Layout.DigestKey(headSHA, root), mine, approved, approvedFound); len(problems) > 0 {
+				return ledger.RootSummary{}, false, strings.Join(problems, "; ")
+			}
+			d.logf("plan for %s matches the one approved at %s", root, headSHA)
 		}
-		if problems := gates.CheckPlanDigest(root, headSHA, d.Journal.Layout.DigestKey(headSHA, root), mine, approved, approvedFound); len(problems) > 0 {
-			return ledger.RootSummary{}, false, strings.Join(problems, "; ")
-		}
-		d.logf("plan for %s matches the one approved at %s", root, headSHA)
 	}
 
 	if err := runner.Apply(ctx, rootDir, planFile); err != nil {

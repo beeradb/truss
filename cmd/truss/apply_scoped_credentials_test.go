@@ -51,7 +51,7 @@ func credEnvFor(t *testing.T, root string) []string {
 		return tofu
 	})
 
-	digest, err := plan.Digest(noopPlanJSON)
+	digest, err := plan.Digest(changingPlanJSON)
 	if err != nil {
 		t.Fatalf("plan.Digest: %v", err)
 	}
