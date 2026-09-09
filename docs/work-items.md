@@ -399,20 +399,91 @@ Already paid for: three fields, three files, and
 `TestProtectionScriptSatisfiesTheGate` already exists to keep the payload and
 the gate from disagreeing. Absent must be its own case, as everywhere else.
 
-## Rulesets: not a hole, but a way to become unusable
+## Rulesets: a hole after all, demonstrated 2026-09-09
 
-Checked, because it looked like one. GitHub's rulesets are additive — repo
-and org rulesets layer with classic protection and the most restrictive rule
-wins — so a ruleset bypass actor cannot weaken what classic protection
-already forbids. There is no gate missing here.
+⚠️ **AN EARLIER VERSION OF THIS SECTION SAID THIS WAS NOT A HOLE. IT IS, AND
+THE EVIDENCE IS A PUSH TO THIS REPOSITORY'S OWN main.** The reasoning that
+retired it was that rulesets are additive -- repo and org rulesets layer with
+classic protection and the most restrictive rule wins -- so a bypass actor
+cannot weaken what classic protection already forbids. That is true and it is
+not the whole question. What it misses is the case where the requirement is
+enforced by a **ruleset in the first place**, because then there is nothing in
+classic protection for it to be more restrictive than.
 
-⚠️ **What is real is the migration.** GitHub shipped automatic
+Measured: a fast-forward push of four commits straight to `main` here, which
+GitHub accepted and answered with
+
+    remote: Bypassed rule violations for refs/heads/main:
+    remote: - Changes must be made through a pull request.
+    remote: - Required status check "check" is expected.
+
+"Bypassed rule violations" is ruleset language, not classic-protection
+language -- classic protection declines with a protected-branch hook error and
+no push happens. So on this repository the pull-request requirement and the
+required check live in a **ruleset**, and the pushing identity is a **bypass
+actor** on it. Both rules were skipped and the push succeeded.
+
+⚠️ **`forge.Protection` reads exactly one endpoint:**
+`/repos/{o}/{r}/branches/{branch}/protection`. It has never read
+`/rulesets` or `/rules/branches/{branch}`, and `gates.Protection` has no field
+for a ruleset, an enforcement level, or a bypass actor. So the dangerous
+arrangement is not exotic, it is the one in front of us: classic protection
+configured and compliant, a ruleset carrying the real requirement, and named
+actors permitted to skip it. `CheckProtection` returns no problems and the
+applier runs, having satisfied itself about a control that is not the one
+actually governing the branch.
+
+⚠️ **The failure is quiet, which is the part that matters.** Turning classic
+protection off makes the applier refuse everything and say so in every alert.
+Adding a bypass actor to a ruleset changes nothing it can see.
+
+**What closing it takes.** `GET /repos/{o}/{r}/rules/branches/{branch}` returns
+the effective rules for a branch across org and repo rulesets already
+flattened, which is the right first read -- but it does **not** carry
+`bypass_actors`. That needs `GET /repos/{o}/{r}/rulesets?includes_parents=true`
+and then each ruleset that targets the branch. A new `forge.Rulesets` reader
+and a `gates.CheckRulesets`, mirroring the existing `Protection`/
+`CheckProtection` pair, refusing on `enforcement != "active"` and on any
+non-empty (or unreadable) `bypass_actors` -- absent must be its own case, as
+everywhere else in that package. Never a relaxation of the existing gate: the
+two are read together and both must pass.
+
+⚠️ **Also still true, and now more pressing:** GitHub shipped automatic
 classic-to-ruleset conversion in August 2026. On a converted repository
-`GET /branches/main/protection` 404s, `forge.Protection` errors, and the pass
-refuses — correct, and it fails closed, but it means truss cannot run against
-a repository whose owner accepted that migration. Deferred until a consumer
-hits it; the fix is a `forge.Rulesets` reader and a `gates.CheckRulesets`
-mirroring the existing pair, never a relaxation of the existing gate.
+`GET /branches/main/protection` 404s, `forge.Protection` errors and the pass
+refuses -- fails closed, correctly, but it means truss cannot run at all
+against a repository whose owner accepted that migration.
+
+**CLOSED 2026-09-09.** `internal/forge/rulesets.go` and
+`internal/gates.CheckRulesets` exist now, wired into `runApplyPass` in
+`cmd/truss/apply_cmd.go` beside the `Protection` read, joined into the same
+refusal sentence. Verified against GitHub's REST API description (not
+guessed): `rules/branches/{branch}` never carries `bypass_actors`, only
+`ruleset_id` per entry, confirming the two-read shape above; `enforcement` is
+`active` | `evaluate` | `disabled`; a bypass actor's `actor_type` also
+includes `User` (not listed above) and `bypass_mode` also includes `exempt`
+(likewise not listed above). `rules/branches/{branch}` itself documents that
+it omits rules from an `evaluate` or `disabled` ruleset entirely, so a
+ruleset reaching `gates.Rulesets.Applicable` at all is proof it was active
+moments earlier; `CheckRulesets` refuses one whose *second* read (the
+per-ruleset call, which is the only one carrying `bypass_actors`) disagrees
+and no longer says `active`, treating that disagreement as a race or an
+attempt to dodge the bypass-actor read rather than as "additive and inert".
+A ruleset that was never active in the first place is not refused for
+existing, matching the ruling above that a non-enforcing ruleset is not
+automatically a hole.
+
+⚠️ **OPERATIONAL NOTE: this can stop a live applier, and that is the point.**
+If the managed repository has any bypass actor on any ruleset that applies to
+`main`, truss now refuses every apply -- correctly, fail-closed, the same
+class of stop `CheckProtection` already causes when classic protection is
+misconfigured. `CheckRulesets`'s refusal names the ruleset, its id, and the
+actor types (and bypass mode) so an operator goes straight to the GitHub UI
+for that ruleset rather than re-deriving which one from a generic message.
+Before turning this on against a repository nobody has audited for bypass
+actors, check `GET /repos/{o}/{r}/rules/branches/main` and each ruleset it
+names for a non-empty `bypass_actors` -- the gate will otherwise announce it
+the hard way, by refusing the next pass.
 
 ## `data "external"` executes during the applier's own plan
 
@@ -565,13 +636,15 @@ digest covers, which touches the gate's evidentiary basis rather than just
 tidiness. The same limit applies to Telegram for a drift report naming many
 roots.
 
-**Artifact attestation on the release.** Pinning by digest inside the
+**Artifact attestation on the release.** DONE. Pinning by digest inside the
 reviewed diff proves the diff NAMES a digest; it does not prove that digest
 came from this CI rather than being typed in. `actions/attest-build-provenance`
 plus `gh attestation verify` closes it using infrastructure GitHub already
 hosts and this project already trusts for merge-commit verification. ⚠️ It
 does NOT belong on the plan digest, where independent re-execution is already
 the stronger proof and a signature would be a second way to prove one fact.
+
+To verify an artifact, run: `gh attestation verify <artifact> --repo <owner>/<repo>`
 
 **`govulncheck ./...`** next to `go vet` in the pre-commit chain and in
 `ci.yml`. It reports only reachable vulnerabilities, so it does not bring the

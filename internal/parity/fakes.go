@@ -100,7 +100,7 @@ func (f *fakeLedger) handle(w http.ResponseWriter, r *http.Request) {
 
 // --- the forge, GitHub's API ------------------------------------------------
 
-// newFakeForge answers the six endpoints internal/forge calls, out of the
+// newFakeForge answers the seven endpoints internal/forge calls, out of the
 // scenario's own fixtures. Anything else is a 404, so an endpoint added to
 // the client without being added here fails loudly instead of decoding a
 // zero value.
@@ -126,6 +126,18 @@ func newFakeForge(f Fixtures, mintToken string) *httptest.Server {
 				body = json.RawMessage(`{}`)
 			}
 			_, _ = w.Write(body)
+
+		case strings.Contains(p, "/rules/branches/"):
+			// ⚠️ ALWAYS "NO RULESETS APPLY", BECAUSE apply.sh NEVER READ ONE.
+			// The recorded corpus (internal/parity's whole reason to exist)
+			// has no ruleset fixtures to replay -- the bash this project
+			// ports never called this endpoint, so there is nothing to
+			// record. An empty list is a real, compliant answer
+			// (gates.CheckRulesets has nothing to refuse on it), not a stand-in
+			// for "unreadable"; if a scenario ever needs a ruleset with a
+			// bypass actor, it needs a fixture field added here, deliberately,
+			// not a fake answering something the recording never saw.
+			_, _ = w.Write([]byte(`[]`))
 
 		case strings.Contains(p, "/commits/") && strings.HasSuffix(p, "/pulls"):
 			sha := between(p, "/commits/", "/pulls")
