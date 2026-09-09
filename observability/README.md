@@ -6,6 +6,7 @@ Grafana dashboards and the alerting rules in this directory read them.
     alerts/truss.rules.yml            every alert, with the reasoning inline
     dashboards/truss-overview.json    is it alive, what did it do, what broke
     dashboards/truss-timeline.json    what state it was in, when
+    dashboards/truss-logs.json        what it actually said, line by line
     dashboards/vault.json             the credential store, and what truss can read of it
 
 Nothing here is deployment-specific: no host, no bucket, no vault name. The one
@@ -229,11 +230,32 @@ Every pass narrates to **stderr in logfmt**, with a level:
 something that was **lost** — a ledger object that was not written, a durable
 record that no longer exists.
 
-Both are counted into `truss_pass_log_events{level=...}`, so the error and
-warning panels work with no log pipeline at all. If you do run one (Loki,
-Alloy, anything that parses logfmt), the same field is what a
-`| logfmt | level="error"` query selects on, and the panels get their detail
-back.
+Both are counted into `truss_pass_log_events{level=...}`, so **the error and
+warning panels and their alerts work with no log pipeline at all** — and do
+not stop working when one breaks.
+
+`dashboards/truss-logs.json` is the other half: the lines themselves. It
+queries **Loki**, not Prometheus, and declares its own `loki` datasource
+variable for that reason.
+
+⚠️ **Ship these logs somewhere, or you do not have them.** The frequent pass
+runs every five minutes with `successfulJobsHistoryLimit: 3`, so a successful
+pass's pod logs are deleted with its Job roughly **fifteen minutes** later.
+Every incident this project has had was investigated from logs; an incident
+noticed an hour later currently has none. That is what the collector is for,
+and it is why this is not a nicety.
+
+The collector promotes `level` to a real Loki label, so `{level="error"}` is
+an index lookup rather than a substring scan. Lines that are not logfmt —
+`tofu`, `git` and Vault all write prose to the same stream — keep their
+content and simply carry no level; a pipeline that dropped them would lose the
+plan output that explains a failure.
+
+⚠️ **The pod name is deliberately not a label.** Every CronJob run has a new
+pod name, so labelling by it would mint a Loki stream per pass — 288 a day for
+the frequent pass alone, which is the standard way a small Loki falls over.
+It travels as structured metadata instead: queryable and displayable, not an
+index key.
 
 ⚠️ **The message is one quoted prose value on purpose.** Structured attributes
 per call site — `commit=`, `root=`, `duration=` — remain the entry in
@@ -298,14 +320,26 @@ consumer's `plan-digest` jq, answered the same way.
 A metric name being real is not the same as a query being valid, though, and
 `go test` cannot tell the difference — a syntactically broken expression names
 perfectly good metrics. `scripts/check-observability` parses every alerting
-rule AND every panel query with Prometheus's own parser:
+rule and every panel query, routing each one to the parser for the datasource
+its panel actually names — PromQL to `promtool`, LogQL to `logcli`:
 
     scripts/check-observability          # skips loudly without promtool
 
 It runs in CI with `TRUSS_REQUIRE_PROMTOOL=1`, which turns that skip into a
-failure. Worth knowing what each half stops: a bad panel query renders "No
-data", which is what a quiet week looks like; a bad rule makes Prometheus
-reject the **whole file**, silently disarming every other rule beside it.
+failure for both tools. Worth knowing what each half stops: a bad panel query
+renders "No data", which is what a quiet week looks like; a bad rule makes
+Prometheus reject the **whole file**, silently disarming every other rule
+beside it.
+
+⚠️ **Routing by datasource is the part that is easy to get wrong.** LogQL fed
+to `promtool` is a syntax error on every Loki panel, and the obvious fix —
+ignoring what `promtool` rejects — would have silently stopped checking real
+PromQL errors too. `logcli query --stdin` cannot execute an aggregation and
+answers `Metrics Query: not supported` for a well-formed one; it parses first,
+so the discriminator is the *parse error*, and that is what the script tests
+for. Measured: a bad duration unit, an empty label matcher, a misspelt
+function, an unbalanced paren and an unknown parser stage each produce one
+from inside the same aggregation.
 
 ### What has actually been run against real components
 

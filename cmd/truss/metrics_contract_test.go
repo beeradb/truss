@@ -158,42 +158,87 @@ func TestEveryFailureClassIsWatched(t *testing.T) {
 // pastes into Grafana; a truncated one fails at import with a parser message
 // and no clue which file. And a dashboard that names a datasource by uid
 // imports into any other Grafana as a wall of "datasource not found", which
-// is why each of these declares a `datasource` template variable instead.
+// is why each of these declares a datasource template variable instead.
+//
+// ⚠️ THE VARIABLE'S TYPE MUST MATCH WHAT THE PANELS ACTUALLY QUERY, WHICH IS
+// STRICTER THAN "HAS A VARIABLE" AND IS THE VERSION THAT CATCHES SOMETHING.
+// truss-logs.json queries Loki; had it reused the Prometheus dashboards'
+// `datasource` variable, the picker would have offered a Prometheus and every
+// panel would have failed at query time rather than at import -- the slowest
+// possible way to find out.
 func TestEveryDashboardParsesAndStaysPortable(t *testing.T) {
 	for path, body := range observabilityFiles(t) {
 		if filepath.Ext(path) != ".json" {
 			continue
 		}
+		name := filepath.Base(path)
+
 		var dash struct {
 			UID        string `json:"uid"`
 			Title      string `json:"title"`
 			Templating struct {
 				List []struct {
-					Name string `json:"name"`
-					Type string `json:"type"`
+					Name  string `json:"name"`
+					Type  string `json:"type"`
+					Query string `json:"query"`
 				} `json:"list"`
 			} `json:"templating"`
+			Panels []struct {
+				Type    string `json:"type"`
+				Targets []struct {
+					Datasource struct {
+						Type string `json:"type"`
+					} `json:"datasource"`
+					Expr string `json:"expr"`
+				} `json:"targets"`
+			} `json:"panels"`
 		}
 		if err := json.Unmarshal([]byte(body), &dash); err != nil {
-			t.Errorf("%s is not valid JSON: %v", filepath.Base(path), err)
+			t.Errorf("%s is not valid JSON: %v", name, err)
 			continue
 		}
 		if dash.UID == "" || dash.Title == "" {
-			t.Errorf("%s has no uid or no title", filepath.Base(path))
-		}
-		found := false
-		for _, v := range dash.Templating.List {
-			if v.Name == "datasource" && v.Type == "datasource" {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s declares no datasource variable; it will import with a dead datasource", filepath.Base(path))
+			t.Errorf("%s has no uid or no title", name)
 		}
 		if strings.Contains(body, `"uid": "P`) {
-			t.Errorf("%s looks like it carries a baked datasource uid", filepath.Base(path))
+			t.Errorf("%s looks like it carries a baked datasource uid", name)
+		}
+
+		// The datasource types this dashboard actually queries.
+		want := map[string]bool{}
+		for _, p := range dash.Panels {
+			for _, tgt := range p.Targets {
+				if tgt.Expr != "" && tgt.Datasource.Type != "" {
+					want[tgt.Datasource.Type] = true
+				}
+			}
+		}
+		if len(want) == 0 {
+			t.Errorf("%s has no panel queries at all", name)
+		}
+
+		offered := map[string]bool{}
+		for _, v := range dash.Templating.List {
+			if v.Type == "datasource" {
+				offered[v.Query] = true
+			}
+		}
+		for kind := range want {
+			if !offered[kind] {
+				t.Errorf("%s queries a %q datasource but its variables offer %v",
+					name, kind, keysOf(offered))
+			}
 		}
 	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func valuesOf(m map[string]string) []string {

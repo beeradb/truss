@@ -176,6 +176,8 @@ check 'prometheus release'   clean  d.txt 'curl -o p.tgz https://github.com/prom
 # organisation through -- and, far worse, taught the next person that an
 # org-wide match is acceptable here. The pin is to one project path.
 check 'prometheus, other repo' refuse d.txt 'https://github.com/prometheus/pushgateway/releases/download/v1.11.1/pushgateway.tar.gz'
+check 'loki release'         clean  d.txt 'curl -o l.zip https://github.com/grafana/loki/releases/download/v3.4.2/logcli-linux-amd64.zip'
+check 'grafana, other repo'  refuse d.txt 'https://github.com/grafana/alloy/releases/download/v1.10.0/alloy-linux-amd64.zip'
 check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
 check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
 

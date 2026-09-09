@@ -39,6 +39,23 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 
+# ⚠️ TWO QUERY LANGUAGES LIVE IN THIS DIRECTORY NOW, AND ONE PARSER WOULD
+# SILENTLY MISS HALF OF THEM. dashboards/truss-logs.json queries Loki, and
+# LogQL is not PromQL -- handed to promtool, every one of its panels would be
+# reported as a syntax error, and the obvious fix (skip what promtool rejects)
+# would have skipped real PromQL errors too. So each query is routed by the
+# datasource its panel actually names, and the Loki half goes to logcli, whose
+# --stdin mode parses a query offline without a server.
+if ! command -v logcli >/dev/null 2>&1; then
+  if [ "${TRUSS_REQUIRE_PROMTOOL:-}" = "1" ]; then
+    echo "check-observability: logcli is not installed and TRUSS_REQUIRE_PROMTOOL=1" >&2
+    echo "check-observability: the Loki dashboards would go unchecked" >&2
+    exit 1
+  fi
+  echo "check-observability: logcli is not installed -- Loki queries will NOT be checked." >&2
+  no_logcli=1
+fi
+
 rules=observability/alerts/truss.rules.yml
 [ -f "$rules" ] || { echo "check-observability: no $rules" >&2; exit 1; }
 
@@ -75,10 +92,65 @@ for dash in observability/dashboards/*.json; do
     # and this check would go on passing over queries it no longer reads.
     # Walking every object that has an `expr` cannot be outrun by a layout
     # change.
-  done < <(jq -r '.. | objects | select(has("expr")) | .expr | select(. != "" and . != null)' "$dash")
+    #
+    # A target with no datasource of its own inherits the panel's, and every
+    # panel here names one; `// "prometheus"` is the last resort for a target
+    # that names nothing at all, which is Grafana's own default.
+  done < <(jq -r '.. | objects | select(has("expr"))
+                  | select((.datasource.type // "prometheus") != "loki")
+                  | .expr | select(. != "" and . != null)' "$dash")
 done
 
 [ "$n" -gt 0 ] || { echo "check-observability: no dashboard panel queries found -- did the JSON shape change?" >&2; exit 1; }
 
-echo "check-observability: $n dashboard panel queries"
+echo "check-observability: $n PromQL panel queries"
 promtool check rules "$synth"
+
+# --- the Loki half ---------------------------------------------------------
+[ -n "${no_logcli:-}" ] && exit 0
+
+logql=0
+logql_bad=0
+for dash in observability/dashboards/*.json; do
+  while IFS= read -r expr; do
+    [ -n "$expr" ] || continue
+    logql=$((logql + 1))
+
+    # ⚠️ GRAFANA MACROS ARE SUBSTITUTED, NOT STRIPPED, AND THE DIFFERENCE
+    # MATTERS. `$__auto` is Grafana's adaptive range; logcli has never heard of
+    # it and would report a parse error on every panel using one. Replacing it
+    # with a concrete duration keeps the REST of the expression under real
+    # scrutiny -- deleting the brackets instead would have made a genuinely
+    # malformed range unnoticeable.
+    probe=${expr//\$__auto/5m}
+
+    out=$(printf 'time=00:00 level=info msg="probe"\n' \
+          | logcli query --stdin "$probe" 2>&1 || true)
+
+    # ⚠️ "Metrics Query: not supported" IS A PASS, AND THAT IS NOT A FUDGE.
+    # `logcli --stdin` runs a query against stdin and cannot execute an
+    # aggregation, so every count_over_time panel here ends there. It PARSES
+    # FIRST: measured 2026-09-09, a bad duration unit, an empty label matcher,
+    # a misspelt function, an unbalanced paren and an unknown parser stage each
+    # produce `parse error` from inside the same aggregations, and only the
+    # well-formed query reaches "not supported". So the discriminator is the
+    # parse error, and it is the thing tested for.
+    case "$out" in
+      *"parse error"*)
+        logql_bad=$((logql_bad + 1))
+        echo "  FAILED: $expr" >&2
+        printf '%s\n' "$out" | sed -n 's/^.*Query failed: /          /p' >&2
+        ;;
+    esac
+  done < <(jq -r '.. | objects | select(has("expr"))
+                  | select((.datasource.type // "prometheus") == "loki")
+                  | .expr | select(. != "" and . != null)' "$dash")
+done
+
+if [ "$logql" -eq 0 ]; then
+  echo "check-observability: no LogQL queries found -- did truss-logs.json move?" >&2
+  exit 1
+fi
+echo "check-observability: $logql LogQL panel queries"
+[ "$logql_bad" -eq 0 ] || { echo "  $logql_bad did not parse" >&2; exit 1; }
+echo "  SUCCESS: $logql queries parsed"

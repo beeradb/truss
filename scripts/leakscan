@@ -105,6 +105,12 @@ scan() { # pattern description
   # NOTE ABOVE GIVES: `github.com/<owner>/<repo>` is exactly the shape that
   # names ours, so a URL into any other repository is still refused.
   hits=$(echo "$hits" | grep -vE 'https://github\.com/prometheus/prometheus/releases/download/' || true)
+  # Loki's release archive and its checksum file, under the identical rule.
+  # ci.yml fetches logcli to parse the LogQL in observability/dashboards --
+  # the same string for every user of Loki, naming the vendor's public
+  # release. Pinned to `grafana/loki/releases/download/`, so a URL into any
+  # other repository in that organisation is still refused.
+  hits=$(echo "$hits" | grep -vE 'https://github\.com/grafana/loki/releases/download/' || true)
   # The 1Password CLI's apt repository and signing key, under the same rule and
   # with the same limit: `downloads.1password.com/linux/` is a public package
   # source identical for every user, and the path after it carries a

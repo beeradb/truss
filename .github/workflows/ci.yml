@@ -114,9 +114,34 @@ jobs:
           tar xzf /tmp/prom.tar.gz -C /tmp "${f}/promtool"
           sudo mv "/tmp/${f}/promtool" /usr/local/bin/promtool
 
+      # ⚠️ AND logcli, BECAUSE THE DASHBOARDS SPEAK TWO QUERY LANGUAGES NOW.
+      # dashboards/truss-logs.json queries Loki, and LogQL handed to promtool
+      # would be reported as a syntax error on every panel -- so
+      # check-observability routes by each panel's datasource and the Loki half
+      # goes here. `logcli query --stdin` parses a query without a server.
+      #
+      # Same verification as promtool above: the release's own SHA256SUMS.
+      # Unzipped with python because the runner has unzip but this is one less
+      # thing to depend on being present.
+      - name: logcli
+        run: |
+          set -eux
+          v=3.4.2
+          curl -fsSL -o /tmp/logcli.zip \
+            "https://github.com/grafana/loki/releases/download/v${v}/logcli-linux-amd64.zip"
+          curl -fsSL -o /tmp/loki.sums \
+            "https://github.com/grafana/loki/releases/download/v${v}/SHA256SUMS"
+          grep " logcli-linux-amd64.zip\$" /tmp/loki.sums \
+            | sed "s|logcli-linux-amd64.zip|/tmp/logcli.zip|" \
+            | sha256sum -c -
+          python3 -c "import zipfile; zipfile.ZipFile('/tmp/logcli.zip').extractall('/tmp')"
+          sudo install -m 0755 /tmp/logcli-linux-amd64 /usr/local/bin/logcli
+
       # TRUSS_REQUIRE_PROMTOOL=1 turns the script's local skip into a failure,
       # the same way TRUSS_REQUIRE_JQ=1 does for the digest differential test
       # above. A check that passes when its own tool is absent is not a check.
+      # The same variable governs logcli, so the Loki dashboards cannot go
+      # unchecked here either.
       - run: scripts/check-observability
         env:
           TRUSS_REQUIRE_PROMTOOL: "1"
