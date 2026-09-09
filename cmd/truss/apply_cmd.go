@@ -455,12 +455,10 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		}
 	}
 
-	// The expiry sweep runs on every pass, drift or not, gate-passed or
-	// not -- check_credential_lifetimes is unconditional in the reference
-	// (apply.sh:834-847), because a hand-held credential lapsing takes the
-	// whole applier down regardless of what else happened this run.
-	// §4.7, §2 item 16: the sweep never reports a clean bill it did not
-	// earn. Its problem is REPORTED, never swallowed as "nothing is
+	// The expiry sweep runs on the DAILY pass only, which is what the
+	// deployed applier does -- see the ⚠️ below for why, and for what
+	// running it every pass cost. §4.7, §2 item 16: the sweep never reports
+	// a clean bill it did not earn. Its problem is REPORTED, never swallowed as "nothing is
 	// expiring" -- but it does not set failure.
 	//
 	// ⚠️ IT USED TO SET failure, AND THAT WOULD HAVE MADE EVERY PRODUCTION
@@ -480,12 +478,14 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// the previous code then discarded it. That threw away the one
 	// credential whose lapse takes the applier down, exactly when the vault
 	// was misbehaving.
-	// ⚠️ THE SWEEP IS DAILY-ONLY, AND TRUSS RAN IT EVERY PASS -- outside this
-	// branching entirely, so it ran even when the branch-protection gate had
-	// already failed. The deployed applier gates it on the drift pass with a
-	// dated reason of its own: asking 288 times a day "is most of what
-	// rate-limited the service account on 2026-09-07". Running it on every
-	// pass reproduced the exact pattern that caused that outage.
+	// ⚠️ DAILY, THOUGH check_credential_lifetimes IS UNCONDITIONAL IN THE
+	// REFERENCE (apply.sh:834-847), AND TRUSS ONCE COPIED IT THAT WAY --
+	// outside this branching entirely, so it ran even when the
+	// branch-protection gate had already failed. The deployed applier gates
+	// it on the drift pass with a dated reason of its own: asking 288 times
+	// a day "is most of what rate-limited the service account on
+	// 2026-09-07". Running it every pass reproduced the exact pattern that
+	// caused that outage.
 	var expiring []secrets.Expiring
 	var expiryUnavailable string
 	if driftRun {

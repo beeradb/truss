@@ -41,6 +41,11 @@ step "go test";      go test -count=1 ./...
 # go.sum, which leakscan's own narrow exemption asserts.
 step "govulncheck";  go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+# ⚠️ THE GATE BEFORE AN IRREVERSIBLE LOCK, WATCHED FAILING. check-writes
+# ended at `uniq -d` and exited 0 whether or not it printed the objects that
+# forbid locking, so it reported success while listing them.
+step "ledger-retention-test"; scripts/ledger-retention-test
+
 # ⚠️ THE SCANNER'S OWN TEST FIRST, AND THAT ORDER IS THE POINT. A scan that has
 # quietly stopped matching reports success, so "does the guard still work" is
 # answered before its answer is trusted. Two of its patterns were once inert

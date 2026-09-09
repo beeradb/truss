@@ -29,9 +29,15 @@ nothing.
 
 That is the whole chain, in the order it must run: build, vet,
 `go test -count=1`, govulncheck for reachable standard-library
-vulnerabilities, `scripts/leakscan-test` — which proves the leak scanner still
-fails when it should — and then `scripts/leakscan` itself, which refuses
-anything identifying a real deployment.
+vulnerabilities, `scripts/ledger-retention-test` — which proves the gate
+before an irreversible retention lock still refuses — `scripts/leakscan-test`
+— which proves the leak scanner still fails when it should — and then
+`scripts/leakscan` itself, which refuses anything identifying a real
+deployment.
+
+The two `-test` scripts are there for the same reason: a guard nobody has
+watched fail is a claim, and both of those guards have been vacuous in green
+CI before.
 
 CI runs the same script. A chain stated in two places drifts, and the reason
 for each step is written beside the command rather than here.

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Proves scripts/ledger-retention still refuses what it claims to refuse.
+#
+# ⚠️ THIS EXISTS BECAUSE check-writes ONCE ALWAYS PASSED. It is the gate
+# before `lock`, which cannot be undone, and it ended at `uniq -d` -- which
+# exits 0 whether or not it printed anything. So it listed the objects that
+# forbid locking and reported success while doing it. Only the lesser
+# "versioning is off" case ever refused.
+#
+# It drives the REAL script with a fake `gcloud` on PATH, because the answers
+# are what the script reads and a rewrite of its logic here would be testing
+# a copy.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/ledger-retention"
+[ -x "$SCRIPT" ] || { echo "ledger-retention-test: $SCRIPT is not executable" >&2; exit 1; }
+
+pass=0 fail=0
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Runs check-writes against a fake gcloud answering with the given versioning
+# setting and object listing. want=refuse|clean
+check() { # name want versioning listing
+  local name="$1" want="$2" versioning="$3" listing="$4"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin"
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    printf "  *describe*) printf '%%s\\\\n' '%s' ;;\n" "$versioning"
+    printf "  *ls*) printf '%s' ;;\n" "$listing"
+    echo 'esac'
+  } > "$dir/bin/gcloud"
+  chmod +x "$dir/bin/gcloud"
+
+  set +e
+  out=$(PATH="$dir/bin:$PATH" TRUSS_RECORDS_BUCKET=scratch "$SCRIPT" check-writes 2>&1); rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+  if [ "$got" = "$want" ]; then
+    pass=$((pass + 1)); echo "ok    $name ($got)"
+  else
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+  fi
+}
+
+# ⚠️ THE LOAD-BEARING CASE. Two generations of one key is precisely what
+# forbids a lock: retention refuses a REPLACE as well as a delete, so a
+# bucket whose objects are rewritten cannot record the failures you most
+# need recorded once it is locked.
+check "an object with two generations refuses" refuse True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha1#2\ngs://<bucket>/HEAD#5\n'
+
+check "one generation each is clean" clean True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\ngs://<bucket>/HEAD#5\n'
+
+# A rewritten HEAD is the same defect on the key that matters most.
+check "a rewritten HEAD refuses" refuse True \
+  'gs://<bucket>/HEAD#1\ngs://<bucket>/HEAD#2\n'
+
+# Versioning off means overwritten generations were discarded, so the count
+# cannot answer the question -- and saying nothing would read as a pass.
+check "versioning off refuses rather than printing nothing" refuse False \
+  'gs://<bucket>/applied/sha1#1\n'
+
+check "an empty bucket is clean" clean True ''
+
+echo
+echo "ledger-retention-test: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
