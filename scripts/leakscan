@@ -11,6 +11,13 @@
 # It scans for CLASSES of thing, not a list of the author's secrets -- a
 # denylist of real values would itself be the leak.
 set -euo pipefail
+# ⚠️ FROM THE REPOSITORY ROOT, WHATEVER THE CALLER'S DIRECTORY. `git ls-files`
+# lists paths relative to the root, and the exemptions that name a file --
+# scripts/toolchain, scripts/toolchain.sha256 -- are written against those. Run
+# from scripts/, the hits came back as bare names and matched nothing, so the
+# scanner refused the manifest it is written to permit. Both sibling scripts
+# do the same thing for the same reason.
+cd "$(dirname "$0")/.."
 
 fail=0
 note() { echo "leakscan: $*" >&2; fail=1; }
@@ -34,6 +41,14 @@ files=$(git ls-files | grep -vE '^(vendor/|go\.sum$)' || true)
 scan() { # pattern description
   local hits
   hits=$(grep -nEIi "$1" $files 2>/dev/null | grep -v 'leakscan' || true)
+  # Held aside before any exemption runs; see the rule at the end.
+  local traversals
+  # ⚠️ NO `://` REQUIRED. The module path and the provider registry are
+  # written without a scheme, and both were exempt with a traversal after
+  # them. These lines have already matched a scan pattern, so a `..` segment
+  # in one is not an ordinary relative path -- it is a permitted address being
+  # walked out of.
+  traversals=$(echo "$hits" | grep -E '/\.\.(/|["'"'"'[:space:]]|$)' || true)
   # Two exemptions, both for public identifiers that this repository is
   # REQUIRED to state, and both written as the exact line shape rather than as
   # a filename -- exempting a whole file would hide a real leak added to it.
@@ -94,7 +109,13 @@ scan() { # pattern description
   # infrastructure -- the platform repository is one. The match is pinned to
   # `opentofu/opentofu/releases/download/`, so a URL into any other repository
   # is still refused, including ours.
-  hits=$(echo "$hits" | grep -vE 'https://github\.com/opentofu/opentofu/releases/download/' || true)
+  # ⚠️ ANCHORED TO THE TWO PLACES THAT FETCH IT, like the go.dev and jqlang
+  # exemptions below. Unanchored, it excused whatever else shared the line --
+  # a sentence naming a mirror host beside it scanned clean. The Dockerfile
+  # builds these URLs from build args, so `${VAR}` is permitted inside a
+  # segment; the manifest line is the same record shape as the others.
+  hits=$(echo "$hits" | grep -vE '^Dockerfile:[0-9]+:[[:space:]]*"?https://github\.com/opentofu/opentofu/releases/download/[A-Za-z0-9._${}-]+/[A-Za-z0-9._${}-]+"?;?[[:space:]]*\\?$' || true)
+  hits=$(echo "$hits" | grep -vE '^scripts/toolchain:[0-9]+:tofu\|(amd64|arm64)\|[0-9.]+\|[A-Za-z0-9._-]+\|https://github\.com/opentofu/opentofu/releases/download/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || true)
   # The 1Password CLI's apt repository and signing key, under the same rule and
   # with the same limit: `downloads.1password.com/linux/` is a public package
   # source identical for every user, and the path after it carries a
@@ -120,7 +141,57 @@ scan() { # pattern description
   # is the whole rule; only the variable and the angle-bracket placeholder are
   # exempt, and only immediately after the scheme.
   hits=$(echo "$hits" | grep -vE '(gs|s3)://(\$\{?[A-Za-z_]|<[a-z-]+>)' || true)
+  # ⚠️ TWO MORE VENDOR RELEASE PATHS, PINNED EXACTLY LIKE OPENTOFU'S ABOVE AND
+  # FOR THE SAME REASON. scripts/toolchain fetches the toolchain this
+  # repository is pinned to, and the address of a published release is the
+  # identical string for every user on earth -- it names the vendor, never a
+  # deployment.
+  #
+  # ⚠️ `go.dev/dl/` AND NOT `go.dev`, `jqlang/jq/releases/download/` AND NOT
+  # `jqlang`: a link to an issue, a wiki or anything else under either host is
+  # still refused, and so is every other repository on the forge -- which is
+  # exactly the shape that names OUR infrastructure.
+  #
+  # ⚠️ AND ANCHORED TO THE WHOLE MANIFEST LINE, which the older exemptions
+  # above are not. Every exemption here drops the entire `file:line:content`
+  # hit, so one written as a bare substring also excuses whatever else shares
+  # that line -- a bucket name beside a release URL would go unreported.
+  # Requiring the line to BE a manifest record -- tool|arch|version|filename|url
+  # and nothing else -- means anything extra on it breaks the shape and is
+  # refused again. See docs/work-items.md for the same weakness in the older
+  # ones.
+  #
+  # When the arch column was added these stopped matching and the scanner
+  # refused the manifest until they were updated, which is the anchor doing
+  # its job: a record that changes shape is a record nobody has looked at in
+  # this light yet.
+  hits=$(echo "$hits" | grep -vE '^scripts/toolchain:[0-9]+:(go|jq|tofu)\|(amd64|arm64)\|[0-9.]+\|[A-Za-z0-9._-]+\|https://go\.dev/dl/[A-Za-z0-9._-]+$' || true)
+  hits=$(echo "$hits" | grep -vE '^scripts/toolchain:[0-9]+:(go|jq|tofu)\|(amd64|arm64)\|[0-9.]+\|[A-Za-z0-9._-]+\|https://github\.com/jqlang/jq/releases/download/[A-Za-z0-9._/-]+$' || true)
+  # ⚠️ A CANONICAL sha256sum LINE IN THE FILE THAT OWNS THE CHECKSUMS. The hex
+  # scan exists because an account id or a key id is a long hex string, and a
+  # published checksum is the one long hex string this repository must be able
+  # to write down: pinning an artefact by digest is what makes "what ran last
+  # night" answerable, and it is already how .github/workflows pins actions.
+  #
+  # Matched as the exact `sha256sum -c` shape -- 64 lowercase hex, two spaces,
+  # a filename -- and only in scripts/toolchain.sha256. A checksum-shaped
+  # string anywhere else still refuses, a 40-character one still refuses, and
+  # so does the same 64 characters with a single space, because that is not
+  # the format sha256sum reads and there would be no reason to write it.
+  hits=$(echo "$hits" | grep -vE '^scripts/toolchain\.sha256:[0-9]+:[0-9a-f]{64}  [A-Za-z0-9._-]+$' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
+  # ⚠️ NO EXEMPTION SURVIVES A `..` IN A URL PATH, AND THIS IS ONE RULE RATHER
+  # THAN SEVEN ANCHORS. Every exemption above is a substring match that drops
+  # the WHOLE line, so a permitted address with `/../..` after it walks out of
+  # the project it names while the line stays exempt: measured 2026-09-09,
+  # `.../opentofu/releases/download/v1.12.6/tofu.zip/../../../../someorg/
+  # private-platform/apply.sh` scanned clean, and so did the same trick after
+  # this repository's own module path and after the provider registry.
+  # Anchoring each exemption was tried first and closed one of them; a URL
+  # that walks upwards has no legitimate use in this repository, so refusing
+  # the shape outright covers every exemption written here and every one
+  # written later.
+  hits=$(printf '%s\n%s\n' "$hits" "$traversals" | grep -v '^$' | sort -u || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
 
@@ -162,7 +233,10 @@ scan '\b(op://|cloudflare account|gs://|s3://)' \
 # reviewed file rather than a flag, and each entry must still match a real
 # commit that still carries a trailer -- so the list cannot outlive the debt
 # it records.
-grandfathered_file="$(dirname "$0")/leakscan-grandfathered"
+# Repo-relative, because this script cds to the root: `dirname "$0"` was "."
+# when invoked from scripts/, so the list was not found and the seven commits
+# it excuses were refused.
+grandfathered_file="scripts/leakscan-grandfathered"
 grandfathered=""
 if [ -f "$grandfathered_file" ]; then
   grandfathered=$(sed 's/#.*//' "$grandfathered_file" | tr -d '[:blank:]' | grep -v '^$' || true)

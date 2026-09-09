@@ -47,11 +47,11 @@ jobs:
       - run: jq --version
 
       # ⚠️ THE SAME SCRIPT A DEVELOPER RUNS BEFORE COMMITTING, not a second
-      # copy of its steps. build, vet, test -count=1, govulncheck, the leak
-      # scanner's own test, and the leak scanner -- in that order, with the
-      # reasons for the order written where the commands are. A chain stated
-      # twice is a chain that drifts, and CI keeping a step this repository's
-      # own instructions had dropped is exactly how that failure reads.
+      # copy of its steps -- and deliberately not a list of them either, since
+      # a list here is a second statement of the order that drifts from the
+      # one that runs. scripts/check says what it does and why, beside each
+      # command. CI keeping a step this repository's own instructions had
+      # dropped is exactly how that failure reads.
       #
       # TRUSS_REQUIRE_JQ=1 turns the digest differential test's skip into a
       # failure. Setting it here is what makes that test mean something in CI.

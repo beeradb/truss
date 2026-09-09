@@ -41,6 +41,11 @@ step "go test";      go test -count=1 ./...
 # go.sum, which leakscan's own narrow exemption asserts.
 step "govulncheck";  go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+# ⚠️ THE INSTALLER THAT FETCHES THIS TOOLCHAIN, WATCHED REFUSING. It verifies
+# every archive against a pinned checksum, and a verification nobody has seen
+# fail is a claim. Needs no network: the test drives it with a fake curl.
+step "toolchain-test"; scripts/toolchain-test
+
 # ⚠️ THE GATE BEFORE AN IRREVERSIBLE LOCK, AND THE DOOR ITSELF, WATCHED
 # FAILING. check-writes ended at `uniq -d` and exited 0 whether or not it
 # printed the objects that forbid locking, so it reported success while

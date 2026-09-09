@@ -1,0 +1,884 @@
+#!/usr/bin/env bash
+# Proves scripts/toolchain refuses what it claims to refuse.
+#
+# ⚠️ THE GUARD THAT MATTERS HERE IS THE CHECKSUM. Everything else this script
+# does is convenience; refusing an archive that is not the one this repository
+# pinned is the reason it exists rather than a README full of curl commands. A
+# verification nobody has watched fail is a claim.
+#
+# It drives the REAL script with a fake `curl` on PATH, so the manifest, the
+# checksum file and the install steps under test are the ones that ship.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/toolchain"
+[ -x "$SCRIPT" ] || { echo "toolchain-test: $SCRIPT is not executable" >&2; exit 1; }
+
+pass=0 fail=0 skip=0
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/toolchain-test.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+
+# ⚠️ THE FIXTURES FOLLOW THE HOST, BECAUSE THE SCRIPT DOES. Named for amd64,
+# they made this suite -- and so scripts/check -- fail on arm64, a machine
+# this repository ships binaries for; and worse, they made the "a refused
+# archive does not stay in the cache" guard VACUOUS there, because it probed a
+# path that could never exist. A test that depends on the machine running it
+# is testing the machine.
+# ⚠️ ASKED, NOT RESTATED. A copy of the script's own uname mapping here would
+# make this suite refuse a machine the installer supports, the first time a
+# third architecture is added -- the same two-copies-of-one-fact failure the
+# fixtures above were just fixed for.
+# ⚠️ AND IF IT CANNOT ANSWER, THIS SUITE SKIPS ITSELF RATHER THAN DYING. The
+# installer refuses a host it does not build for, so on one of those this
+# assignment killed the run under `set -e` -- one line of output, no summary,
+# and scripts/check failed wholesale even though the toolchain being
+# unsupported there is a fact rather than a fault.
+# ⚠️ AND ONLY THE HOST REFUSAL SKIPS. `arch` runs the pin and checksum gates
+# first, so treating any non-zero exit as "unsupported host" turned a drifted
+# go.mod pin, a mismatched tofu-versions or an orphan checksum line into a
+# green run with every case unrun and a false reason printed -- and the
+# consistency cases that exist for exactly those defects became vacuous.
+# Anything that is not the host refusal is this suite's problem, said in the
+# installer's own words.
+if ! arch_said="$("$SCRIPT" arch 2>&1)"; then
+  case "$arch_said" in
+    *"is not supported"*)
+      echo "skip  every case: $(uname -s)/$(uname -m) is not a host scripts/toolchain installs for"
+      echo
+      echo "toolchain-test: 0 passed, 0 failed, 1 skipped"
+      exit 0 ;;
+    *)
+      echo "toolchain-test: scripts/toolchain will not run at all: $arch_said" >&2
+      exit 1 ;;
+  esac
+fi
+ARCH="$arch_said"
+GO_ARCHIVE="go1.25.0.linux-$ARCH.tar.gz"
+JQ_BINARY="jq-linux-$ARCH"
+TOFU_ARCHIVE="tofu_1.12.6_linux_$ARCH.tar.gz"
+
+# Runs `toolchain install jq` into a throwaway prefix, with a fake curl that
+# writes `body` instead of downloading. jq is the subject because it installs
+# as a single file: the checksum path is identical for every tool, and this
+# keeps the fixture a few bytes rather than a Go distribution.
+#
+# want=refuse|clean, want_msg is wording unique to the branch that should fire.
+run() { # name want body want_msg
+  local name="$1" want="$2" body="$3" want_msg="$4"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin" "$dir/prefix"
+  {
+    echo '#!/bin/sh'
+    echo '# The fake curl: last argument is the URL, -o names the output.'
+    echo 'out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; esac; shift; done'
+    printf 'printf %%s %s > "$out"\n' "'$body'"
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    "$SCRIPT" install jq 2>&1); rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+
+  if [ "$got" != "$want" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"$want_msg"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  $name: $got, but for the wrong reason -- wanted \"$want_msg\"" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  # ⚠️ NOTHING IS INSTALLED ON A REFUSAL, AND THAT IS THE POINT. An installer
+  # that refuses after putting the binary in place has refused nothing.
+  if [ "$want" = refuse ] && [ -e "$dir/prefix/bin/jq" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: refused, and installed it anyway" >&2; return
+  fi
+  # ⚠️ AND A REFUSED ARCHIVE DOES NOT STAY IN THE CACHE, or the next run reads
+  # it back and refuses again with no way to recover but knowing to delete it.
+  if [ "$want" = refuse ] && [ -e "$dir/cache/$JQ_BINARY" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: refused, and kept the archive" >&2; return
+  fi
+  pass=$((pass + 1)); echo "ok    $name ($got)"
+}
+
+# The real jq binary is 30MB; what is under test is the checksum comparison,
+# so the "good" body is a file whose sha256 is what the manifest pins -- which
+# no short string has. So the refusing cases are the ones driven here, and the
+# passing case is covered by the installed toolchain itself (scripts/toolchain
+# check, and the fact that scripts/check runs jq).
+run "an archive that is not the pinned one is refused" refuse \
+  'this is not jq' "does not match its pinned checksum"
+
+run "an empty download is refused" refuse '' "does not match its pinned checksum"
+
+# The two consistency checks, which run before anything is fetched.
+# want_msg is wording unique to the refusal. A fourth argument of `allow`
+# inverts it: the mutation is legitimate and the script must carry on.
+consistency() { # name want_msg mutate [allow]
+  local name="$1" want_msg="$2" mutate="$3" allow="${4:-}"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/repo/scripts" "$dir/prefix"
+  cp "$HERE/toolchain" "$HERE/toolchain.sha256" "$dir/repo/scripts/"
+  cp "$HERE/../go.mod" "$HERE/../tofu-versions" "$dir/repo/"
+  ( cd "$dir/repo" && eval "$mutate" )
+  set +e
+  out=$(cd "$dir/repo" && TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" \
+    ./scripts/toolchain check 2>&1); rc=$?
+  set -e
+  # ⚠️ THE GATES RUN BEFORE THE SUBCOMMAND, so what `allow` asserts is that
+  # they stayed quiet -- `check` itself exits non-zero here for the unrelated
+  # reason that a throwaway prefix has nothing installed in it, and reading
+  # that as a refusal would make this case pass for the wrong reason.
+  if [ -n "$allow" ]; then
+    case "$out" in
+      *"TOOL"*"WANT"*) pass=$((pass + 1)); echo "ok    $name (clean)" ;;
+      *) fail=$((fail + 1)); echo "FAIL  $name: refused something legitimate" >&2
+         echo "$out" | sed 's/^/      /' >&2 ;;
+    esac
+    return
+  fi
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: accepted a manifest that disagrees with itself" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"$want_msg"*) pass=$((pass + 1)); echo "ok    $name (refuse)" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  $name: refused, but for the wrong reason -- wanted \"$want_msg\"" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
+}
+
+# ⚠️ THE VERSION THIS REPOSITORY ALREADY STATES SOMEWHERE ELSE WINS. A table
+# that had drifted from go.mod would install a toolchain that builds locally
+# and a different one in CI.
+consistency "a table disagreeing with go.mod is refused" \
+  "go.mod says go" "sed -i 's/^go 1\.25/go 1.24/' go.mod"
+
+consistency "a table disagreeing with tofu-versions is refused" \
+  "does not list" "echo 1.11.0 > tofu-versions"
+
+# ⚠️ A CHECKSUM MISSING FOR A FILE THE TABLE INSTALLS is how a version bump
+# gets half done: the new archive downloads and nothing checks it.
+consistency "a file with no checksum is refused" \
+  "has no checksum" "sed -i '/$JQ_BINARY/d' scripts/toolchain.sha256"
+
+#
+# ⚠️ The stand-in checksum is GENERATED, not written down. Sixty-four hex
+# characters in a tracked file is exactly what scripts/leakscan refuses, and
+# this file is not the one its narrow exemption is written for -- which is the
+# exemption being as narrow as intended. scripts/leakscan-test builds its
+# throwaway SHA the same way, for the same reason.
+# ⚠️ ONE SPACE INSTEAD OF TWO IS NOT A COSMETIC SLIP. fetch selects the line
+# with `grep -F "  $file"`, so a single-space line passed the older
+# whitespace-splitting consistency check and then made every install report
+# "does not match its pinned checksum" and delete a good archive.
+consistency "a checksum line with one space is refused" \
+  "is not <64 hex><two spaces><filename>" \
+  "sed -i 's/  $JQ_BINARY/ $JQ_BINARY/' scripts/toolchain.sha256"
+
+# ⚠️ grep EXITS 1 ON NO MATCH, so a checksum file that is all comments took
+# the whole script down under `set -e` with nothing printed -- the one outcome
+# worse than a wrong message.
+consistency "a checksum file with no checksums in it is refused" \
+  "has no checksum" "sed -i 's/^[0-9a-f]/# &/' scripts/toolchain.sha256"
+
+consistency "a checksum for nothing is refused" \
+  "which no tool in the table installs" \
+  "printf '%s  %s\n' \"\$(printf '%064d' 0)\" leftover.tar.gz >> scripts/toolchain.sha256"
+
+# ⚠️ THE PASSING HALF, AND WITHOUT IT NOTHING HERE EXECUTES AN INSTALL. Every
+# case above ends in a refusal, so stage(), install_go, install_jq and
+# install_tofu never ran under scripts/check at all -- a typo in the tar
+# member install_tofu extracts would have shipped green. This builds three
+# synthetic archives of the shapes the real ones have, pins them by their own
+# sha256 (computed here, never written down), and installs them for real.
+install_ok() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/repo/scripts" "$dir/prefix" "$dir/serve" "$dir/build/go/bin" "$dir/bin"
+  cp "$HERE/toolchain" "$dir/repo/scripts/"
+  cp "$HERE/../go.mod" "$HERE/../tofu-versions" "$dir/repo/"
+
+  # A fake `go` distribution: the tarball shape install_go unpacks (a single
+  # top-level go/ directory) with the two binaries it links into bin/.
+  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/build/go/bin/go"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/build/go/bin/gofmt"
+  chmod +x "$dir/build/go/bin/go" "$dir/build/go/bin/gofmt"
+  tar -C "$dir/build" -czf "$dir/serve/$GO_ARCHIVE" go
+
+  # jq ships as a bare binary, tofu inside a tarball as a single file.
+  printf '#!/bin/sh\necho jq-1.7.1\n' > "$dir/serve/$JQ_BINARY"
+  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n' > "$dir/build/tofu"
+  chmod +x "$dir/build/tofu"
+  tar -C "$dir/build" -czf "$dir/serve/$TOFU_ARCHIVE" tofu
+
+  # Pinned by what they actually hash to. Computed, so no checksum-shaped
+  # literal is written into a tracked file -- scripts/leakscan refuses those
+  # outside the one file that owns them, which is the exemption being narrow.
+  # ⚠️ AND THE ARCHITECTURE THIS IS NOT RUNNING ON KEEPS ITS REAL CHECKSUMS.
+  # The manifest carries both, and the consistency gate requires every file in
+  # it to have one -- so a fixture listing only the three it serves refuses
+  # before the install it is trying to test.
+  ( cd "$dir/serve" && sha256sum ./* | sed 's|\./||' ) > "$dir/repo/scripts/toolchain.sha256"
+  grep -E '^[0-9a-f]' "$HERE/toolchain.sha256" \
+    | grep -vF -f <(cd "$dir/serve" && ls) >> "$dir/repo/scripts/toolchain.sha256"
+
+  { echo '#!/bin/sh'
+    echo 'out=""; url=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done'
+    printf 'cp "%s/$(basename "$url")" "$out"\n' "$dir/serve"
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+
+  set +e
+  out=$(cd "$dir/repo" && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a matching archive installs: exit $rc" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  # ⚠️ AND IT SAID NOTHING THE SHELL WROTE. Every case here matches wording it
+  # expects, so noise on stderr passed straight through: a cleanup trap
+  # reading a variable that no longer existed printed "PART: unbound variable"
+  # on every download and the suite stayed green. A successful install is
+  # quiet.
+  case "$out" in
+    *"unbound variable"*|*"command not found"*|*"No such file or directory"*)
+      fail=$((fail + 1))
+      echo "FAIL  a matching archive installs: the shell complained" >&2
+      echo "$out" | sed 's/^/      /' >&2
+      return ;;
+  esac
+
+  # ⚠️ ASSERTED THROUGH THE INSTALLED TOOL, not by looking for a file. The
+  # script's own post-install check runs the binary and compares versions, so
+  # this asks the same question the way a user would.
+  local tool want have
+  for tool in go jq tofu; do
+    case "$tool" in
+      go)   want=1.25.0; have=$("$dir/prefix/bin/go" version | awk '{print $3}' | sed 's/^go//') ;;
+      jq)   want=1.7.1;  have=$("$dir/prefix/bin/jq" --version | sed 's/^jq-//') ;;
+      tofu) want=1.12.6; have=$("$dir/prefix/bin/tofu" version | awk '{print $2}' | sed 's/^v//') ;;
+    esac
+    if [ "$have" != "$want" ]; then
+      fail=$((fail + 1)); echo "FAIL  a matching archive installs: $tool reports $have, want $want" >&2
+      return
+    fi
+  done
+  # ⚠️ A SYMLINK INTO THE TREE, NEVER A COPY OF THE BINARY. Go finds GOROOT
+  # from the path of the executable that is running; a copy sitting in bin/
+  # computes it from there and cannot find its own standard library. The
+  # fake go in this fixture answers `version` either way, so the link is
+  # asserted directly.
+  if [ ! -x "$dir/prefix/lib/go/bin/go" ]; then
+    fail=$((fail + 1)); echo "FAIL  a matching archive installs: no go tree under lib/" >&2
+    return
+  fi
+  if [ ! -L "$dir/prefix/bin/go" ]; then
+    fail=$((fail + 1)); echo "FAIL  a matching archive installs: bin/go is a copy, not a link into lib/go" >&2
+    return
+  fi
+  # Nothing staged is left behind.
+  if ls "$dir/prefix"/lib/.toolchain.* >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "FAIL  a matching archive installs: left a staging directory behind" >&2
+    return
+  fi
+  # And a second run installs nothing, because everything is already there.
+  set +e
+  out=$(cd "$dir/repo" && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install 2>&1); rc=$?
+  set -e
+  # ⚠️ THE EXIT CODE TOO, not just the wording: rc was captured and never
+  # read, so a second pass that failed after printing "already installed" for
+  # the first tool still counted as a no-op.
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a second install is a no-op: exit $rc" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"already installed"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a second install is a no-op: wanted it to say already installed" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  case "$out" in
+    *"unbound variable"*|*"command not found"*|*"No such file or directory"*)
+      fail=$((fail + 1))
+      echo "FAIL  a second install is a no-op: the shell complained" >&2
+      echo "$out" | sed 's/^/      /' >&2
+      return ;;
+  esac
+  pass=$((pass + 1)); echo "ok    a matching archive installs, and installing twice does not"
+}
+
+install_ok
+
+# ⚠️ AN ARCHIVE THAT MATCHES ITS CHECKSUM AND IS NOT WHAT IT CLAIMS. The
+# checksum proves the bytes are the pinned ones; it says nothing about the
+# version inside. Removing the post-install verification left every other case
+# here green, because they assert the version themselves.
+install_wrong_version() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/repo/scripts" "$dir/prefix" "$dir/serve" "$dir/bin"
+  cp "$HERE/toolchain" "$dir/repo/scripts/"
+  cp "$HERE/../go.mod" "$HERE/../tofu-versions" "$dir/repo/"
+  printf '#!/bin/sh\necho jq-1.6\n' > "$dir/serve/$JQ_BINARY"
+  ( cd "$dir/serve" && sha256sum "$JQ_BINARY" ) > "$dir/repo/scripts/toolchain.sha256"
+  # Everything else keeps its real checksum -- including the OTHER
+  # architecture's jq -- or the consistency gate fires first and this passes
+  # for a reason that has nothing to do with the version inside the archive.
+  grep -E '^[0-9a-f]' "$HERE/toolchain.sha256" | grep -vF "  $JQ_BINARY" \
+    >> "$dir/repo/scripts/toolchain.sha256"
+  { echo '#!/bin/sh'
+    echo 'out=""; url=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done'
+    printf 'cp "%s/$(basename "$url")" "$out"\n' "$dir/serve"
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+
+  set +e
+  out=$(cd "$dir/repo" && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install jq 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  an archive of the wrong version is refused: it was accepted" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"nothing was installed"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  an archive of the wrong version is refused: wrong reason" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  # ⚠️ AND IT REALLY IS NOT INSTALLED. The version was checked after the tool
+  # was already in bin/ -- and for go, after the working lib/go had been
+  # removed to put it there -- so the refusal left the wrong tool in place and
+  # refused nothing.
+  if [ -e "$dir/prefix/bin/jq" ]; then
+    fail=$((fail + 1)); echo "FAIL  an archive of the wrong version is refused: it is installed anyway" >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    an archive of the wrong version is refused (refuse)"
+}
+
+install_wrong_version
+
+# ⚠️ AND THE CASE THE FIX IS ACTUALLY FOR: a Go archive of the wrong version
+# must not cost you the Go you already had. install_go removes lib/go to make
+# room, so a check that ran afterwards refused an install it had already made
+# irreversible. This installs a good tree, then offers a bad one.
+wrong_version_keeps_the_old_tree() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/repo/scripts" "$dir/prefix" "$dir/serve" "$dir/build/go/bin" "$dir/bin"
+  cp "$HERE/toolchain" "$dir/repo/scripts/"
+  cp "$HERE/../go.mod" "$HERE/../tofu-versions" "$dir/repo/"
+  { echo '#!/bin/sh'
+    echo 'out=""; url=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done'
+    printf 'cp "%s/$(basename "$url")" "$out"\n' "$dir/serve"
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+
+  sums() {
+    ( cd "$dir/serve" && sha256sum ./* | sed 's|\./||' ) > "$dir/repo/scripts/toolchain.sha256"
+    grep -E '^[0-9a-f]' "$HERE/toolchain.sha256" \
+      | grep -vF -f <(cd "$dir/serve" && ls) >> "$dir/repo/scripts/toolchain.sha256"
+  }
+  run_install() {
+    ( cd "$dir/repo" && PATH="$dir/bin:$PATH" \
+      TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+      ./scripts/toolchain install go 2>&1 )
+  }
+
+  # The good tree first.
+  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/build/go/bin/go"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/build/go/bin/gofmt"
+  chmod +x "$dir/build/go/bin"/*
+  tar -C "$dir/build" -czf "$dir/serve/$GO_ARCHIVE" go
+  sums
+  if ! run_install >/dev/null 2>&1; then
+    fail=$((fail + 1)); echo "FAIL  a bad go archive keeps the old tree: the good one would not install" >&2
+    return
+  fi
+
+  # Now the same filename, a different version inside, and a cache cleared so
+  # it is fetched again. The symlink in bin/ is removed so do_install does not
+  # short-circuit on "already installed" -- the tree under lib/ stays, which
+  # is the thing that must survive.
+  rm -rf "$dir/cache"
+  rm -f "$dir/prefix/bin/go"
+  printf '#!/bin/sh\necho "go version go1.21.0 linux/amd64"\n' > "$dir/build/go/bin/go"
+  tar -C "$dir/build" -czf "$dir/serve/$GO_ARCHIVE" go
+  sums
+  set +e
+  out=$(run_install); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a bad go archive keeps the old tree: it was accepted" >&2
+    return
+  fi
+  case "$out" in
+    *"nothing was installed"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a bad go archive keeps the old tree: wrong reason" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  # ⚠️ `|| have=""`, or this DIES instead of reporting. Under `set -e` an
+  # assignment from a command substitution that fails takes the shell with it,
+  # and the whole point of this case is the run where that binary is gone --
+  # so without it the suite aborted at 127 with no summary, which is how a
+  # mutation that deletes the tree read as green.
+  local have
+  have=$("$dir/prefix/lib/go/bin/go" version 2>/dev/null | awk '{print $3}') || have=""
+  if [ "$have" != "go1.25.0" ]; then
+    fail=$((fail + 1))
+    echo "FAIL  a bad go archive keeps the old tree: go now reports ${have:-nothing}" >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    a bad go archive keeps the old tree (refuse)"
+}
+
+wrong_version_keeps_the_old_tree
+
+# ⚠️ THE SAME FOR tofu, whose install is a different shape: one file out of a
+# tarball rather than a tree.
+wrong_version_tofu() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/repo/scripts" "$dir/prefix" "$dir/serve" "$dir/build" "$dir/bin"
+  cp "$HERE/toolchain" "$dir/repo/scripts/"
+  cp "$HERE/../go.mod" "$HERE/../tofu-versions" "$dir/repo/"
+  { echo '#!/bin/sh'
+    echo 'out=""; url=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done'
+    printf 'cp "%s/$(basename "$url")" "$out"\n' "$dir/serve"
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+  printf '#!/bin/sh\necho "OpenTofu v1.9.0"\n' > "$dir/build/tofu"
+  chmod +x "$dir/build/tofu"
+  tar -C "$dir/build" -czf "$dir/serve/$TOFU_ARCHIVE" tofu
+  ( cd "$dir/serve" && sha256sum ./* | sed 's|\./||' ) > "$dir/repo/scripts/toolchain.sha256"
+  grep -E '^[0-9a-f]' "$HERE/toolchain.sha256" \
+    | grep -vF -f <(cd "$dir/serve" && ls) >> "$dir/repo/scripts/toolchain.sha256"
+  set +e
+  out=$(cd "$dir/repo" && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install tofu 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] || [ -e "$dir/prefix/bin/tofu" ]; then
+    fail=$((fail + 1)); echo "FAIL  a bad tofu archive installs nothing: it did" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  # ⚠️ AND FOR THE RIGHT REASON. Reading only the exit status, a typo in the
+  # tar member name also refuses -- so this case printed ok while proving
+  # nothing about the version check it exists for.
+  case "$out" in
+    *"nothing was installed"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a bad tofu archive installs nothing: wrong reason" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  pass=$((pass + 1)); echo "ok    a bad tofu archive installs nothing (refuse)"
+}
+
+wrong_version_tofu
+
+# ⚠️ THE ONE SIGNAL NO TRAP CAN ANSWER IS SIGKILL, and what it leaves is a
+# part file with nobody to remove it -- up to 60MB each against a cache
+# budgeted at 100. The sweep asks whether the process named in the file is
+# still alive, so a dead run's leftovers go and a concurrent install's do not.
+# Both halves matter: sweeping the pattern outright would delete what another
+# install is fetching right now.
+sweeps_dead_owners_only() {
+  local dir="$tmp/$RANDOM$RANDOM" out
+  mkdir -p "$dir/bin" "$dir/prefix" "$dir/cache"
+  { echo '#!/bin/sh'
+    echo 'out=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; esac; shift; done'
+    echo 'printf notjq > "$out"'
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+
+  # ⚠️ A PID THE KERNEL CANNOT HAVE ISSUED, not a big number. 999999 is a
+  # perfectly valid pid where pid_max is 4194304, which is this machine -- so
+  # that fixture went red whenever it happened to be live. One past pid_max
+  # can never be running.
+  local impossible
+  impossible=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+  : > "$dir/cache/$JQ_BINARY.part.$impossible"
+  : > "$dir/cache/$JQ_BINARY.part.$$"
+
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install jq 2>&1)
+  set -e
+
+  if [ -e "$dir/cache/$JQ_BINARY.part.$impossible" ]; then
+    fail=$((fail + 1))
+    echo "FAIL  a dead run's part file is swept: it is still there" >&2
+    return
+  fi
+  if [ ! -e "$dir/cache/$JQ_BINARY.part.$$" ]; then
+    fail=$((fail + 1))
+    echo "FAIL  a dead run's part file is swept: it took a live one with it" >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    a dead run's part file is swept, a live one is not"
+}
+
+sweeps_dead_owners_only
+
+# ⚠️ AND A PROCESS THIS USER CANNOT SIGNAL IS STILL A PROCESS. `kill -0` fails
+# with EPERM as readily as with ESRCH, so with it the sweep deleted a part
+# file another user's install was writing -- and the victim then reported that
+# its own archive did not match the pinned checksum. pid 1 is the reachable
+# example of a live process this user cannot signal.
+sweep_respects_a_process_it_cannot_signal() {
+  local dir="$tmp/$RANDOM$RANDOM"
+  mkdir -p "$dir/bin" "$dir/prefix" "$dir/cache"
+  { echo '#!/bin/sh'
+    echo 'out=""'
+    echo 'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; esac; shift; done'
+    echo 'printf notjq > "$out"'
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+  # ⚠️ COUNTED, NOT SILENT. As root every process is signallable, so this
+  # case cannot be built -- and returning quietly made a green summary that
+  # had not run it. A skip that is invisible is a pass that was never earned.
+  if kill -0 1 2>/dev/null; then
+    skip=$((skip + 1))
+    echo "skip  the sweep respects a process it cannot signal (running as root?)"
+    return
+  fi
+  # ⚠️ AND THIS FIXTURE IS THE ONE COMBINATION sweep_cache SAYS IT CANNOT
+  # JUDGE: a file WE own named for ANOTHER user's pid. Production never has
+  # that pairing -- our own processes are always visible to us -- but under
+  # hidepid=2 or ProtectProc=invisible /proc/1 is not there, the sweep reads
+  # pid 1 as gone, and this case fails on a correct tree. Skipped where the
+  # question cannot be asked.
+  if [ ! -e /proc/1 ]; then
+    skip=$((skip + 1))
+    echo "skip  the sweep respects a process it cannot signal (/proc/1 not visible)"
+    return
+  fi
+  : > "$dir/cache/$JQ_BINARY.part.1"
+  set +e
+  ( cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install jq >/dev/null 2>&1 )
+  set -e
+  if [ ! -e "$dir/cache/$JQ_BINARY.part.1" ]; then
+    fail=$((fail + 1))
+    echo "FAIL  the sweep respects a process it cannot signal: it deleted pid 1's file" >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    the sweep respects a process it cannot signal"
+}
+
+sweep_respects_a_process_it_cannot_signal
+
+# ⚠️ A SWEEP MUST NOT STOP AN INSTALL. Under `set -e` a part file that cannot
+# be removed -- a read-only or sticky shared cache holding somebody else's
+# leftovers -- ended the run with a bare "Permission denied" and no message of
+# ours, and since the sweep runs before the loop it did that even to a pass
+# with nothing to do.
+sweep_failure_does_not_stop_the_run() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin" "$dir/prefix/bin" "$dir/cache"
+  printf '#!/bin/sh\necho jq-1.7.1\n' > "$dir/prefix/bin/jq"
+  chmod +x "$dir/prefix/bin/jq"
+  local impossible
+  impossible=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+  : > "$dir/cache/$JQ_BINARY.part.$impossible"
+  chmod 0555 "$dir/cache"
+  set +e
+  out=$(cd "$HERE/.." && TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" \
+    TRUSS_TOOLCHAIN_CACHE="$dir/cache" ./scripts/toolchain install jq 2>&1); rc=$?
+  set -e
+  chmod 0755 "$dir/cache"
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail + 1))
+    echo "FAIL  a sweep it cannot finish does not stop the run: exit $rc" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"already installed"*) pass=$((pass + 1))
+      echo "ok    a sweep it cannot finish does not stop the run" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a sweep it cannot finish does not stop the run: wrong output" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
+}
+
+sweep_failure_does_not_stop_the_run
+
+# ⚠️ A REFUSAL MUST NOT SAY IT DELETED SOMETHING IT DID NOT. On a read-only or
+# shared cache the removal fails, and the refusal announced the deletion
+# anyway -- so every later run refuses identically, which is the no-clue state
+# deleting it exists to prevent.
+refusal_says_whether_it_removed_it() {
+  local dir="$tmp/$RANDOM$RANDOM" out
+  # ⚠️ COUNTED, NOT SILENT, AND NOT A HARD FAILURE EITHER. chmod cannot stop
+  # uid 0, so as root the removal succeeds and the other sentence is correct:
+  # the case cannot be built, exactly like the pid-1 one above. A container
+  # RUN layer is a root shell, and docs/toolchain.md endorses running this
+  # there.
+  if [ "$(id -u)" = 0 ]; then
+    skip=$((skip + 1))
+    echo "skip  a refusal says whether it removed the archive (running as root)"
+    return
+  fi
+  mkdir -p "$dir/bin" "$dir/prefix" "$dir/cache"
+  printf '#!/bin/sh\nexit 1\n' > "$dir/bin/curl"
+  chmod +x "$dir/bin/curl"
+  printf notjq > "$dir/cache/$JQ_BINARY"
+  chmod 0555 "$dir/cache"
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install jq 2>&1)
+  set -e
+  chmod 0755 "$dir/cache"
+  case "$out" in
+    *"could NOT be removed"*) ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a refusal says whether it removed the archive: it did not" >&2
+       echo "$out" | sed 's/^/      /' >&2
+       return ;;
+  esac
+  if [ ! -e "$dir/cache/$JQ_BINARY" ]; then
+    fail=$((fail + 1))
+    echo "FAIL  a refusal says whether it removed the archive: the fixture removed it" >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    a refusal says whether it removed the archive"
+}
+
+refusal_says_whether_it_removed_it
+
+# ⚠️ UNWATCHED: THE OWNERSHIP FILTER. `[ -O "$stale" ] || continue` is what
+# keeps the sweep away from another user's download on a shared cache, and
+# deleting it leaves this suite green -- because a fixture for it needs a file
+# owned by somebody else, which needs a second uid, which needs root to
+# arrange. The pid-1 case covers the neighbouring half (a live process we
+# cannot signal) and not this one. docs/work-items.md records it.
+
+# ⚠️ NOTHING HERE INTERRUPTS A DOWNLOAD, so the four traps fetch installs are
+# not watched. Attempted and deliberately removed: driving it means signalling
+# a process GROUP -- the traps live in the command substitution fetch runs in,
+# so a signal to the script's pid alone does not reach them -- and a harness
+# that sends group signals took this suite down twice while being written. A
+# test that can kill the run is worse than the gap it closes.
+# docs/work-items.md records what it would take.
+
+# ⚠️ `check` ANSWERS "WILL THE CHECKS RUN AGAINST THE PINNED TOOLS", so a tool
+# earlier on PATH than the prefix is a failure even though the prefix holds
+# exactly the right version. This asked only whether the prefix was on PATH
+# somewhere, and passed while scripts/check built with another Go.
+shadowed() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc tool
+  mkdir -p "$dir/prefix/bin" "$dir/shadow"
+  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/prefix/bin/go"
+  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/prefix/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/prefix/bin/tofu"
+  chmod +x "$dir/prefix/bin"/*
+  # An older go, earlier on PATH.
+  printf '#!/bin/sh\necho "go version go1.21.0 linux/amd64"\n' > "$dir/shadow/go"
+  chmod +x "$dir/shadow/go"
+
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/shadow:$dir/prefix/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" ./scripts/toolchain check 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a shadowed tool is reported: check passed anyway" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  case "$out" in
+    *"shadows"*) pass=$((pass + 1)); echo "ok    a shadowed tool is reported (refuse)" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  a shadowed tool is reported: wrong reason" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
+}
+
+shadowed
+
+# ⚠️ AND "NOT INSTALLED" IS NOT "SHADOWED". With an empty prefix every row
+# printed "shadows" against a file that does not exist -- the exit status was
+# right and the reason was not.
+missing_is_not_shadowed() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/prefix/bin" "$dir/shadow"
+  printf '#!/bin/sh\necho "go version go1.21.0 linux/amd64"\n' > "$dir/shadow/go"
+  chmod +x "$dir/shadow/go"
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/shadow:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" ./scripts/toolchain check 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  an empty prefix is not shadowed: check passed" >&2; return
+  fi
+  case "$out" in
+    *shadows*) fail=$((fail + 1))
+       echo "FAIL  an empty prefix is not shadowed: it claimed something was shadowed" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+    *) pass=$((pass + 1)); echo "ok    an empty prefix is not shadowed (refuse)" ;;
+  esac
+}
+
+missing_is_not_shadowed
+
+# ⚠️ A PREFIX WITH A TRAILING SLASH IS THE SAME PREFIX. do_check compares
+# `command -v`'s answer to "$PREFIX/bin/$tool" as a string, so one given with
+# a slash reported that a path shadowed itself, and failed on a machine that
+# was entirely correct.
+trailing_slash() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/prefix/bin"
+  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/prefix/bin/go"
+  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/prefix/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/prefix/bin/tofu"
+  chmod +x "$dir/prefix/bin"/*
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/prefix/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix/" ./scripts/toolchain check 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a prefix with a trailing slash is the same prefix: exit $rc" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    a prefix with a trailing slash is the same prefix (clean)"
+}
+
+trailing_slash
+
+# ⚠️ AND THE SAME PREFIX REACHED BY ANOTHER NAME. Through a symlink, or with a
+# doubled slash, a string compare called a correct machine shadowed --
+# stripping trailing slashes covered only one spelling of the same file.
+same_file_by_another_name() {
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/real/bin"
+  ln -s "$dir/real" "$dir/link"
+  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/real/bin/go"
+  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/real/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/real/bin/tofu"
+  chmod +x "$dir/real/bin"/*
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/real/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/link" ./scripts/toolchain check 2>&1); rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  a prefix reached by another name is not shadowed: exit $rc" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  pass=$((pass + 1)); echo "ok    a prefix reached by another name is not shadowed (clean)"
+}
+
+same_file_by_another_name
+
+# ⚠️ tofu-versions IS A LIST. release.yml reads it line by line, one image per
+# supported version, and reading it as a scalar made two supported versions
+# into one nonsense string that killed every invocation.
+consistency "a second supported tofu version is fine" \
+  "" "printf '1.13.0\n' >> tofu-versions" allow
+
+# ⚠️ THE HOST CHECK, WHICH MUST FIRE BEFORE ANYTHING IS FETCHED. Without it an
+# unsupported machine downloaded and unpacked a Go distribution before failing
+# with a message about a version mismatch.
+unsupported_host() { # name uname_m uname_s want_msg
+  local name="$1" m="$2" sys="$3" want_msg="$4"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin" "$dir/prefix"
+  { echo '#!/bin/sh'
+    printf 'case "$1" in -s) echo %s ;; -m) echo %s ;; esac\n' "$sys" "$m"
+  } > "$dir/bin/uname"
+  printf '#!/bin/sh\necho "toolchain-test: curl must not run" >&2\nexit 99\n' > "$dir/bin/curl"
+  chmod +x "$dir/bin/uname" "$dir/bin/curl"
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" ./scripts/toolchain install 2>&1); rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: it went ahead" >&2; return
+  fi
+  case "$out" in
+    *"must not run"*) fail=$((fail + 1))
+       echo "FAIL  $name: it started downloading before refusing" >&2; return ;;
+  esac
+  case "$out" in
+    *"$want_msg"*) pass=$((pass + 1)); echo "ok    $name (refuse)" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  $name: wrong reason, wanted \"$want_msg\"" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
+}
+
+# ⚠️ THE ARCHITECTURE IS SELECTED, NOT ASSUMED, AND ONLY A FIXTURE FOR THE
+# OTHER ONE PROVES IT. Hardcoding the manifest to amd64 passes every other
+# case here, because the machine this runs on is amd64 -- and the repository
+# ships arm64 binaries. The fake curl records the URL it was asked for and
+# then fails, so nothing is downloaded and the question is only which archive
+# was chosen.
+arch_selects() { # name uname_m want_in_url
+  local name="$1" m="$2" want="$3"
+  local dir="$tmp/$RANDOM$RANDOM" out
+  mkdir -p "$dir/bin" "$dir/prefix"
+  { echo '#!/bin/sh'
+    printf 'case "$1" in -s) echo Linux ;; -m) echo %s ;; esac\n' "$m"
+  } > "$dir/bin/uname"
+  { echo '#!/bin/sh'
+    echo 'for a in "$@"; do case "$a" in http*) echo "$a" >&2 ;; esac; done'
+    echo 'exit 1'
+  } > "$dir/bin/curl"
+  chmod +x "$dir/bin/uname" "$dir/bin/curl"
+  set +e
+  out=$(cd "$HERE/.." && PATH="$dir/bin:$PATH" \
+    TRUSS_TOOLCHAIN_PREFIX="$dir/prefix" TRUSS_TOOLCHAIN_CACHE="$dir/cache" \
+    ./scripts/toolchain install go 2>&1)
+  set -e
+  case "$out" in
+    *"$want"*) pass=$((pass + 1)); echo "ok    $name" ;;
+    *) fail=$((fail + 1))
+       echo "FAIL  $name: no request for an archive containing \"$want\"" >&2
+       echo "$out" | sed 's/^/      /' >&2 ;;
+  esac
+}
+
+arch_selects "an arm64 host fetches the arm64 archive" aarch64 linux-arm64
+arch_selects "an amd64 host fetches the amd64 archive" x86_64 linux-amd64
+
+unsupported_host "an unsupported cpu refuses before downloading" riscv64 Linux "is not supported"
+unsupported_host "a non-Linux host refuses before downloading" x86_64 Darwin "installs Linux builds"
+
+echo
+if [ "$skip" -gt 0 ]; then
+  echo "toolchain-test: $pass passed, $fail failed, $skip skipped"
+else
+  echo "toolchain-test: $pass passed, $fail failed"
+fi
+[ "$fail" -eq 0 ]

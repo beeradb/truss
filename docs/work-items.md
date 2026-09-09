@@ -221,6 +221,123 @@ before building `skip`; the reason for it may be gone.
 apply still rewrites `failed/<sha>` every pass, so the retention blocker below
 stands.
 
+## leakscan's older exemptions excuse a whole line, not a string
+
+Every exemption in `scripts/leakscan` drops the entire `file:line:content` hit
+that matched, so one written as a bare substring also excuses whatever else
+shares that line. A real bucket URI on the same line as, say, the OpenTofu
+release URL or the 1Password package host would go unreported.
+
+The two exemptions added for `scripts/toolchain` on 2026-09-09 are anchored to
+the whole manifest record instead — the line must be that record and nothing
+else — so anything extra on it breaks the shape and is refused again.
+`scripts/leakscan-test` has the case that proves it.
+
+⚠️ **The broadest one is not an exemption at all**: `scripts/leakscan:36`
+drops every hit whose line contains the word `leakscan`, so that the scanner
+does not refuse its own patterns. Any line anywhere in the repository that
+happens to mention it is exempt from every scan — and this file's own tests
+live at a path containing it, so a fixture there is unexamined by
+construction. `scripts/leakscan-test` generates its checksum-shaped strings
+rather than writing real ones, so its cases no longer lean on this.
+
+⚠️ **The obvious narrow fix does not work as written.** Replacing the word
+match with `^scripts/leakscan[a-z-]*:` makes the scanner refuse the tree at
+`cmd/truss/git_token_test.go`, where a line reading `token: scripts/leakscan`
+is exactly the credential shape — so a file that is not the scanner's own also
+depends on the hole today. Both have to move together: rename or reshape that
+fixture line first, then narrow the match, with the pair of cases added
+before either.
+
+⚠️ **A second axis, and it is closed.** Every exemption here is a substring
+match that drops the whole line, so a permitted address with `/../..` after it
+walked out of the project it named while the line stayed exempt — measured
+2026-09-09 against the release downloads, this repository's own module path,
+and the provider registry, all of which scanned clean with a traversal
+appended. Anchoring each exemption was tried first and closed exactly one of
+them: the traversal simply moves further along the URL. What closed it is one
+rule applied after every exemption — a line carrying a `..` path segment is
+refused whatever else permitted it — because an address that walks upwards has
+no legitimate use here. It covers the exemptions written later as well as the
+ones written already.
+
+**Not yet done for the older ones**: the module path, the SVG namespace, the
+vendor API roots, the provider registry, the OpenTofu and 1Password
+downloads, govulncheck, and — the one that matters most — the store-URI
+placeholder, which permits a bucket named by a shell variable or an
+angle-bracket placeholder. That exemption guards the highest-value class the
+scanner has, and because it excuses the whole line, a line naming a bucket
+through a variable AND naming a real one beside it passes clean. Measured
+against the real scanner, 2026-09-09.
+
+⚠️ **Writing that example out here is itself refused**, which is the scanner
+working: the schemes cannot be named in prose except in the permitted shapes.
+The measurement was made in a throwaway repository, not in this file.
+
+Each of those needs the same treatment — an anchor to the line shape it is
+written for — plus a refusing case pairing it with a real identifier, and they
+should be converted one at a time with the pair added first. Deferred rather
+than done because the conversion is mechanical and the window is narrow: it
+needs a leak to land on the same line as a permitted string, in a repository
+where the whole point is that nothing identifying a deployment is written
+down at all.
+
+## The toolchain's download cleanup is not watched
+
+`scripts/toolchain`'s `fetch` installs four traps — EXIT, HUP, INT, TERM — so
+an interrupted download does not leave a `.part.<pid>` file in the cache
+forever. Nothing in `scripts/toolchain-test` fires them, so that cleanup is a
+claim.
+
+(The signal no trap can answer, SIGKILL, is covered by a different mechanism
+that *is* watched: `install` sweeps part files whose owning process is gone
+before it fetches anything, and `scripts/toolchain-test` proves it removes a
+dead run's, leaves a live one's alone, and leaves alone one owned by a
+process this user cannot signal — which `kill -0` could not tell from a dead
+one, and deleted. That last case cannot be built as root, where everything is
+signallable, and the suite counts it as skipped rather than passing it
+silently.)
+
+⚠️ **One half of that sweep is unwatched**: the ownership filter that keeps it
+away from another user's part file on a shared cache. Deleting it leaves the
+suite green, because a fixture needs a file owned by a second uid and that
+needs root to arrange. What would close it is a case that runs only where a
+second uid is available and is counted as skipped everywhere else, the way the
+pid-1 case already is.
+
+⚠️ **Attempted 2026-09-09 and removed.** The traps are installed inside the
+command substitution `fetch` runs in, which is a different process from the
+script, so only a signal delivered to the process GROUP reaches them — which
+is what a Ctrl-C or a closed terminal does, and what a signal aimed at the
+script's pid alone does not. Driving that from a test means the harness sends
+group signals, and while writing it the harness twice killed the suite it was
+part of, leaving a truncated run and no summary. A test that can kill the run
+is worse than the gap.
+
+**What would make it safe**: a session of its own that the harness can name
+without guessing — `setsid`, with the installer's pid read back from the part
+file it writes rather than from `ps`, and a refusal to signal any group that
+is not the one just created. That much was working when it was removed; what
+was not settled is why the suite exited 2 when the case was in it, and that
+has to be understood rather than worked around.
+
+**And two real behaviours, measured 2026-09-09 rather than reasoned about.** A
+signal aimed at the script's own pid — rather than at its process group — does
+not stop the download. With TERM or HUP the script dies at once and says so,
+while the orphaned command substitution goes on fetching and finishes the job:
+the archive lands, nothing is left behind, and work continued after whatever
+launched it was told it was over. A supervisor that signals a pid rather than
+a group, then deletes the cache directory, would be racing it. With INT the
+script does not die at all until the download finishes — non-interactive bash
+defers SIGINT while waiting on a foreground child — measured at four seconds
+against a four-second transfer.
+
+⚠️ **Two earlier versions of this entry were wrong**, both from reasoning
+about where the traps live instead of watching what happens: the first said
+such a signal leaks the part file (it does not), and the second said the
+script "dies immediately", which is true of TERM and HUP and false of INT —
+the signal the paragraph above it is about.
+
 ## The digest cannot see an import
 
 `countResourceChanges` counts an entry carrying `importing` as a change, so a

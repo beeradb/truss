@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+# Installs the tools scripts/check needs, at the versions this repository is
+# pinned to, verified against each project's own published checksum.
+#
+#   scripts/toolchain check              what is installed, what is missing
+#   scripts/toolchain install            everything
+#   scripts/toolchain install go jq      just those
+#
+# Installs under $TRUSS_TOOLCHAIN_PREFIX (default ~/.local): binaries in
+# bin/, the Go tree in lib/go. Nothing needs root, and nothing outside the
+# prefix is touched -- so the same command works on a developer's box, in a
+# container image, and from whatever provisions the machine.
+#
+# ⚠️ A CHECKSUM MISMATCH IS FATAL AND INSTALLS NOTHING. There is no second
+# URL to try and no "download it again" path: an archive that is not the one
+# this repository pinned is the supply-chain failure, not a transient one.
+#
+# ⚠️ VERSIONS ARE PINNED HERE AND NOWHERE ELSE, except where another file
+# already owns the fact: go.mod owns the Go version and tofu-versions owns
+# OpenTofu's, and this script refuses to disagree with either.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+die() { echo "toolchain: $*" >&2; exit 1; }
+
+
+PREFIX="${TRUSS_TOOLCHAIN_PREFIX:-$HOME/.local}"
+# Normalised so every path this prints is spelled one way. The comparison that
+# once depended on it -- do_check's -- asks `-ef` instead now, because a
+# trailing slash was only one of the ways two names reach the same file.
+while [ "${PREFIX%/}" != "$PREFIX" ]; do PREFIX="${PREFIX%/}"; done
+
+# ⚠️ REFUSED IN THE FIRST SECOND, NOT AFTER A 60MB DOWNLOAD. With no host
+# check an unsupported machine fetched a Go distribution, unpacked it, linked
+# it into bin/, and only then failed with "go reports  after installing
+# 1.25.0" --
+# a wrong-cause refusal on top of a broken lib/go left behind. Both
+# architectures this repository ships binaries for are supported; anything
+# else is told exactly what it is.
+case "$(uname -s)" in
+  Linux) ;;
+  *) die "$(uname -s) is not supported; this installs Linux builds" ;;
+esac
+case "$(uname -m)" in
+  x86_64)  ARCH=amd64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
+  *) die "$(uname -m) is not supported; amd64 and arm64 only" ;;
+esac
+# A cache so a re-run, a rebuild or an offline box does not re-fetch. It is
+# not a fallback: a cached file is verified against the same checksum as a
+# freshly downloaded one, and fails the same way.
+#
+# ⚠️ UNDER THE PREFIX, NOT /tmp, AND THAT IS FROM DAMAGE. Measured 2026-09-09
+# on the box this was written on: /tmp is a 1.9G tmpfs that was already mostly
+# spoken for by other things. Adding the archives and a 242MB unpacked Go tree
+# to it exhausted the filesystem, and every process that needed a temporary
+# file -- including the shell being used to run this -- began failing with
+# EDQUOT. A tool that installs a toolchain must not compete for the filesystem
+# the rest of the machine is using as scratch, whatever its size.
+CACHE="${TRUSS_TOOLCHAIN_CACHE:-$PREFIX/var/cache/truss-toolchain}"
+SUMS="scripts/toolchain.sha256"
+
+# tool|arch|version|filename|url
+#
+# ⚠️ THE VERSION IS IN THE FILENAME AND THE URL, so a bump that edits one and
+# not the other cannot download the wrong archive under the right name: the
+# checksum in scripts/toolchain.sha256 is keyed by filename and would refuse.
+all_records() {
+  cat <<'EOM'
+go|amd64|1.25.0|go1.25.0.linux-amd64.tar.gz|https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+jq|amd64|1.7.1|jq-linux-amd64|https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+tofu|amd64|1.12.6|tofu_1.12.6_linux_amd64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.tar.gz
+go|arm64|1.25.0|go1.25.0.linux-arm64.tar.gz|https://go.dev/dl/go1.25.0.linux-arm64.tar.gz
+jq|arm64|1.7.1|jq-linux-arm64|https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-arm64
+tofu|arm64|1.12.6|tofu_1.12.6_linux_arm64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_arm64.tar.gz
+EOM
+}
+
+# The records for the machine this is running on.
+manifest() { all_records | awk -F'|' -v a="$ARCH" '$2==a'; }
+
+# Column 2 is the architecture, so the callers' n counts from the version.
+field() { manifest | awk -F'|' -v t="$1" -v n="$2" '$1==t {print $(n + 1)}'; }
+
+# ⚠️ THE VERSIONS THIS REPOSITORY ALREADY STATES ELSEWHERE WIN. go.mod pins
+# the toolchain the code is built with and tofu-versions pins the OpenTofu the
+# applier runs; a table here that had drifted from either would install a
+# toolchain that passes locally and a different one in CI, which is the exact
+# shape of "cached results passed over code that did not compile".
+check_pins() {
+  local want_go declared_go want_tofu declared_tofu
+  want_go=$(field go 2)
+  declared_go=$(awk '/^go /{print $2}' go.mod)
+  # ⚠️ THE LANGUAGE MINOR, NOT THE PATCH, AND THAT IS ALL IT CAN BE. go.mod
+  # says `go 1.25`, and actions/setup-go reading go-version-file resolves that
+  # to the newest 1.25.x -- so CI's patch version moves on its own and this
+  # table's cannot follow it. What is guaranteed is that nobody bumps one
+  # minor without the other; docs/toolchain.md says so rather than claiming a
+  # tighter pin than exists.
+  case "$want_go" in
+    "$declared_go".*|"$declared_go") ;;
+    *) die "go.mod says go $declared_go and this table says $want_go" ;;
+  esac
+  # ⚠️ tofu-versions IS A LIST, NOT A SCALAR. release.yml reads it line by
+  # line -- one image per supported OpenTofu version -- so squashing the
+  # whitespace out of it ran two supported versions together into one nonsense
+  # string and killed this script on every invocation, with a message about a
+  # file the change had not touched. What must hold is that the version
+  # installed here is one the repository supports.
+  want_tofu=$(field tofu 2)
+  grep -qxF "$want_tofu" tofu-versions ||
+    die "tofu-versions does not list $want_tofu, which this table installs"
+}
+
+# Every filename in the table must have a checksum, and every checksum must
+# belong to a file in the table. An orphan on either side is a bump that got
+# half done.
+check_sums_agree() {
+  local file listed
+  # ⚠️ THE CANONICAL `sha256sum -c` SHAPE, CHECKED HERE BECAUSE fetch DEPENDS
+  # ON IT. fetch selects a line with `grep -F "  $file"` -- two spaces, the
+  # format sha256sum reads -- while this used awk's whitespace splitting and
+  # accepted one. A single-space line therefore passed the consistency gate
+  # and then made every install report "does not match its pinned checksum"
+  # and delete a perfectly good archive: a refusal naming the wrong cause, for
+  # a formatting slip.
+  local bad
+  bad=$(grep -v '^[[:space:]]*#' "$SUMS" \
+    | grep -vE '^[0-9a-f]{64}  [A-Za-z0-9._-]+$' | grep -v '^$' || true)
+  [ -z "$bad" ] || die "$SUMS has a line that is not <64 hex><two spaces><filename>: $bad"
+  # ⚠️ `|| true` BECAUSE grep EXITS 1 ON NO MATCH. A checksum file that is all
+  # comments made this die under `set -e` with no output at all, where the
+  # refusal two lines down names exactly what is wrong.
+  listed=$(grep -v '^[[:space:]]*#' "$SUMS" | awk 'NF{print $2}' | sort || true)
+  for file in $(all_records | cut -d'|' -f4 | sort); do
+    case "$listed" in
+      *"$file"*) ;;
+      *) die "$file is in the table and has no checksum in $SUMS" ;;
+    esac
+  done
+  local sum
+  for sum in $listed; do
+    all_records | cut -d'|' -f4 | grep -qxF "$sum" ||
+      die "$SUMS lists $sum, which no tool in the table installs -- remove it"
+  done
+}
+
+# ⚠️ NEVER FAILS, IT ANSWERS. A tool that is not installed makes its version
+# command exit non-zero, and under `set -e` an assignment from a command
+# substitution that fails kills the script -- so `check` died on the first
+# missing tool instead of reporting the row that says it is missing. Reporting
+# what is absent is the entire job of this subcommand.
+version_of() { # tool binary -> version, or nothing
+  case "$1" in
+    go)   "$2" version 2>/dev/null | awk '{print $3}' | sed 's/^go//' ;;
+    jq)   "$2" --version 2>/dev/null | sed 's/^jq-//' ;;
+    tofu) "$2" version 2>/dev/null | head -1 | awk '{print $2}' | sed 's/^v//' ;;
+  esac
+  return 0
+}
+
+installed_version() { version_of "$1" "$PREFIX/bin/$1"; }
+
+# ⚠️ ASKED OF THE STAGED BINARY, BEFORE ANYTHING IN PLACE IS TOUCHED. The
+# version check used to run after installing, so an archive that matched its
+# checksum and held the wrong version was already in bin/ when it was
+# refused -- and install_go had removed the working lib/go to put it there. A
+# refusal that leaves the wrong tool installed has refused nothing.
+check_staged() { # tool binary want
+  local have
+  have=$(version_of "$1" "$2")
+  [ "$have" = "$3" ] ||
+    die "$1 in the archive reports ${have:-nothing}, not $3 -- nothing was installed"
+}
+
+fetch() { # tool -> prints the verified archive path
+  local tool="$1" file url dest
+  file=$(field "$tool" 3)
+  url=$(field "$tool" 4)
+  dest="$CACHE/$file"
+  mkdir -p "$CACHE"
+
+  if [ ! -f "$dest" ]; then
+    echo "toolchain: fetching $file" >&2
+    # A part file per process, so two installs fetching at once cannot each
+    # write half of the other's archive -- and removed on the way out of this
+    # subshell, since a download killed part-way through would otherwise leave
+    # one in the cache forever, past the budget the docs give it, with nothing
+    # that ever sweeps it. Sweeping `*.part.*` on entry instead would delete
+    # whatever a concurrent install is fetching.
+    #
+    # ⚠️ EACH SIGNAL EXITS, and the EXIT trap alone did not. A handler that
+    # returns lets the script carry on where it was interrupted, so a TERM
+    # arriving during the verification below was read as a checksum failure:
+    # the archive was accused of not being the pinned one and deleted. HUP is
+    # listed because a dropped session is the ordinary way this gets killed,
+    # and it is the case the part file survived.
+    #
+    # ⚠️ THEY COVER SIGNALS DELIVERED TO THE PROCESS GROUP -- Ctrl-C, a closed
+    # terminal, a supervisor stopping the job -- because they are installed
+    # inside the command substitution fetch runs in, which is a different
+    # process from the script. SIGKILL is catchable by nothing, which is what
+    # sweep_cache is for.
+    #
+    # ⚠️ A SIGNAL AIMED AT THE SCRIPT'S PID ALONE DOES NOT STOP THE DOWNLOAD.
+    # Measured rather than reasoned about: with TERM or HUP the script dies at
+    # once and reports it, while the orphaned substitution carries on fetching
+    # and finishes the job -- so the archive lands and nothing is left behind,
+    # but work continues after the caller has been told it is over. With INT
+    # the script does not die at all until the download finishes, because
+    # non-interactive bash defers SIGINT while waiting on a foreground child:
+    # measured at four seconds against a four-second transfer. See
+    # docs/work-items.md.
+    # ⚠️ NOT local, AND NOT DECLARED AT THE TOP EITHER. fetch runs inside a
+    # command substitution, so its EXIT trap fires when that subshell exits --
+    # after the function frame is gone. Declared `local`, the name the trap
+    # reads is gone by then and the cleanup dies with "PART: unbound variable"
+    # under `set -u`, leaking the part file. Giving it an empty value at the
+    # top hides that instead of fixing it: the trap then removes "" and says
+    # nothing, and the test cannot see the difference. Assigned here, plainly,
+    # the trap reads what this set.
+    PART="$dest.part.$$"
+    trap 'rm -f "$PART"' EXIT
+    trap 'rm -f "$PART"; exit 129' HUP
+    trap 'rm -f "$PART"; exit 130' INT
+    trap 'rm -f "$PART"; exit 143' TERM
+    # ⚠️ A STALL LIMIT, NOT A TOTAL ONE. `--max-time 300` caps the whole
+    # transfer, so the 60MB Go archive is simply unfetchable below about
+    # 1.6 Mbps -- and since a failed part file is deleted and nothing resumes,
+    # every retry fails identically. These abort a connection that has gone
+    # quiet and leave a slow one alone.
+    curl -fsSL --connect-timeout 30 --speed-time 60 --speed-limit 1024 \
+      -o "$PART" "$url" || die "could not fetch $url"
+    mv "$PART" "$dest"
+  fi
+  # ⚠️ VERIFIED ON EVERY RUN, cached or freshly fetched. A cache that is
+  # trusted because it is a cache is a way to install an archive nobody
+  # checked.
+  ( cd "$CACHE" && grep -F "  $file" "$OLDPWD/$SUMS" | sha256sum -c --quiet - ) || {
+    # ⚠️ THE rm DECIDES THE SENTENCE. On a read-only or shared cache -- a mode
+    # the docs suggest for seeding one -- the removal fails and the refusal
+    # still announced the archive was deleted. It is not, so every later run
+    # refuses identically: the no-clue state that deleting it exists to
+    # prevent. Saying which of the two happened is what makes it fixable.
+    if rm -f "$dest" 2>/dev/null; then
+      die "$file does not match its pinned checksum -- refusing, and it is now deleted"
+    fi
+    die "$file does not match its pinned checksum -- refusing, and it could NOT be removed from $CACHE, so every run will refuse it until it is"
+  }
+  echo "$dest"
+}
+
+# ⚠️ STAGED BESIDE THE DESTINATION, NEVER IN $TMPDIR. `mktemp -d` lands in
+# /tmp, so unpacking here wrote a 242MB tree into a tmpfs and then copied all
+# of it across filesystems -- twice the space and twice the time, for a move that is
+# a rename when the staging directory is on the destination's own filesystem.
+#
+# ⚠️ AND CLEANED UP EXPLICITLY, NOT BY A RETURN TRAP. `trap ... RETURN` inside
+# a function outlives that function here, so it fired again on the NEXT
+# function's return -- where $tmp no longer exists -- and `set -u` killed the
+# run after the install had already succeeded. Sweeping stale staging
+# directories at the start covers the case a failed run leaves one behind.
+# ⚠️ ONE STAGING DIRECTORY PER TOOL, not one swept clean on every call. The
+# blanket `rm -rf .toolchain.*` deleted whatever a concurrently running
+# install was unpacking. Per tool, two tools installing at once no longer
+# collide, a crashed run leaves exactly one directory that the next install of
+# that tool clears, and two installs of the SAME tool into the same prefix
+# remain what they are: one job, run twice.
+stage() { # tool
+  local dir="$PREFIX/lib/.toolchain.$1"
+  mkdir -p "$PREFIX/lib"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  echo "$dir"
+}
+
+install_go() { # archive want
+  local tmp; tmp=$(stage go)
+  tar -C "$tmp" -xzf "$1"
+  check_staged go "$tmp/go/bin/go" "$2"
+  rm -rf "$PREFIX/lib/go"
+  mkdir -p "$PREFIX/bin"
+  mv "$tmp/go" "$PREFIX/lib/go"
+  ln -sf "$PREFIX/lib/go/bin/go" "$PREFIX/bin/go"
+  ln -sf "$PREFIX/lib/go/bin/gofmt" "$PREFIX/bin/gofmt"
+  rm -rf "$tmp"
+}
+
+install_jq() { # archive want
+  local tmp; tmp=$(stage jq)
+  install -m 0755 "$1" "$tmp/jq"
+  check_staged jq "$tmp/jq" "$2"
+  mkdir -p "$PREFIX/bin"
+  mv "$tmp/jq" "$PREFIX/bin/jq"
+  rm -rf "$tmp"
+}
+
+install_tofu() { # archive want
+  local tmp; tmp=$(stage tofu)
+  tar -C "$tmp" -xzf "$1" tofu
+  chmod 0755 "$tmp/tofu"
+  check_staged tofu "$tmp/tofu" "$2"
+  mkdir -p "$PREFIX/bin"
+  mv "$tmp/tofu" "$PREFIX/bin/tofu"
+  rm -rf "$tmp"
+}
+
+do_check() {
+  local tool want have status=0
+  printf '%-6s %-10s %-10s %s\n' TOOL WANT HAVE WHERE
+  for tool in $(manifest | cut -d'|' -f1); do
+    want=$(field "$tool" 2)
+    have=$(installed_version "$tool") || have=""
+    [ -n "$have" ] || have="-"
+    [ "$have" = "$want" ] || status=1
+    printf '%-6s %-10s %-10s %s\n' "$tool" "$want" "$have" "$PREFIX/bin/$tool"
+  done
+  # ⚠️ ON PATH IS NOT THE SAME AS THE ONE THAT RUNS, and this asked the
+  # weaker question: with an older go earlier on PATH, every row read the
+  # pinned version -- because the rows probe $PREFIX/bin directly -- while
+  # scripts/check built with the other one. What this subcommand is for is
+  # answering "will the checks run against what this repository pinned", so
+  # it resolves each tool the way the shell will.
+  for tool in $(manifest | cut -d'|' -f1); do
+    local found
+    found=$(command -v "$tool" 2>/dev/null) || found=""
+    if [ -z "$found" ]; then
+      echo "toolchain: $tool is not on PATH; add $PREFIX/bin to it" >&2
+      status=1
+    elif [ "$found" -ef "$PREFIX/bin/$tool" ]; then
+      # ⚠️ THE SAME FILE, NOT THE SAME STRING. A string compare called a
+      # correct machine shadowed whenever the prefix reached the same place by
+      # another name -- through a symlink, or with a doubled slash in it --
+      # and stripping trailing slashes only covered one of those.
+      :
+    elif [ -e "$PREFIX/bin/$tool" ]; then
+      echo "toolchain: $found shadows $PREFIX/bin/$tool on PATH" >&2
+      status=1
+    else
+      # Nothing in the prefix to shadow: the row above already says it is not
+      # installed, and calling that "shadowed" names the wrong problem.
+      status=1
+    fi
+  done
+  return $status
+}
+
+# ⚠️ SWEPT BY OWNER, NOT BY PATTERN AND NOT BY AGE. SIGKILL is catchable by
+# nothing, so the one signal fetch's traps cannot answer leaves a part file
+# with nobody to remove it -- and each is up to 60MB against a cache budgeted
+# at 100. A part file is named for the process writing it, so asking whether
+# that process still exists tells a dead run's leftovers from what a
+# concurrent install is fetching right now. Removing the pattern outright
+# would delete the latter.
+#
+# ⚠️ /proc, NOT `kill -0`, AND THE DIFFERENCE IS A DELETED DOWNLOAD. kill -0
+# fails with EPERM as readily as with ESRCH, so a part file being written by
+# ANOTHER USER's install into a shared cache read as dead and was swept --
+# exactly the case this is here to protect. The victim then failed its own
+# `mv` and reported that its archive did not match the pinned checksum: a
+# supply-chain accusation for a file a peer deleted. This script refuses to
+# run anywhere but Linux, so /proc is always there and answers existence
+# without needing permission over the process.
+#
+# A recycled pid can make a dead run's file look alive; it is swept by the
+# next install that runs while that pid is not.
+sweep_cache() {
+  local stale pid
+  [ -d "$CACHE" ] || return 0
+  for stale in "$CACHE"/*.part.*; do
+    [ -e "$stale" ] || continue
+    # ⚠️ OURS ONLY, AND THAT SETTLES TWO PROBLEMS AT ONCE. A part file
+    # belonging to another user is another user's business: we probably
+    # cannot delete it in a shared cache anyway, and -- the reason this is a
+    # rule rather than an optimisation -- /proc cannot be trusted about their
+    # processes. Under hidepid=2 or ProtectProc=invisible another user's
+    # /proc/<pid> is simply absent, so a live peer's download would read as
+    # dead and be swept. Our own processes are always visible to us.
+    [ -O "$stale" ] || continue
+    pid=${stale##*.part.}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    # ⚠️ BEST EFFORT, BECAUSE A SWEEP MUST NOT STOP AN INSTALL. Under `set -e`
+    # a failing rm ended the run with no message of ours at all -- and since
+    # this now runs before the loop, it did that even to a pass with nothing
+    # to do. A leftover that cannot be removed is a leftover, not a failure.
+    [ -e "/proc/$pid" ] || rm -f "$stale" 2>/dev/null || true
+  done
+}
+
+do_install() { # tool...
+  local tool want archive
+  # ⚠️ ONCE, BEFORE THE LOOP, AND NOT INSIDE fetch. do_install skips fetch
+  # entirely for a tool already at the pinned version, so a sweep living
+  # there stopped running the moment the toolchain was complete -- and a
+  # 60MB leftover could then sit in the cache until the next version bump.
+  sweep_cache
+  for tool in "$@"; do
+    field "$tool" 2 | grep -q . || die "no such tool: $tool"
+    want=$(field "$tool" 2)
+    if [ "$(installed_version "$tool")" = "$want" ]; then
+      echo "toolchain: $tool $want already installed"
+      continue
+    fi
+    archive=$(fetch "$tool")
+    "install_$tool" "$archive" "$want"
+    [ "$(installed_version "$tool")" = "$want" ] ||
+      die "$tool reports $(installed_version "$tool") after installing $want"
+    echo "toolchain: $tool $want installed to $PREFIX/bin/$tool"
+  done
+}
+
+check_pins
+check_sums_agree
+
+case "${1:-}" in
+  # ⚠️ ONE DEFINITION OF THE MAPPING, EXPOSED. scripts/toolchain-test needs to
+  # name the archives for the machine it is on, and a second copy of this
+  # mapping there would make the suite refuse a machine the installer
+  # supports the first time a third architecture is added. Anything
+  # provisioning a host can ask the same way.
+  arch) echo "$ARCH" ;;
+  check) shift; do_check ;;
+  install)
+    shift
+    if [ "$#" -eq 0 ]; then set -- $(manifest | cut -d'|' -f1); fi
+    do_install "$@"
+    ;;
+  *) echo "usage: $0 arch | check | install [tool...]" >&2; exit 2 ;;
+esac
