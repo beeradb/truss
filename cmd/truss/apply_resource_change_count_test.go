@@ -131,10 +131,20 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 			wantErr:   "not a plan document",
 		},
 		{
-			name:      "an errored true plan with the changes key omitted counts zero",
+			// errored:true with the changes key omitted otherwise reads as a
+			// valid plan that changes nothing, which skips the digest gate.
+			// It is the one value of that field meaning the plan is not
+			// applyable.
+			name:      "an errored plan is refused, not read as zero changes",
 			planJSON:  `{"errored":true}`,
 			wantCount: 0,
-			wantErr:   "",
+			wantErr:   "reports errored",
+		},
+		{
+			name:      "an errored plan with changes in it is refused too",
+			planJSON:  `{"errored":true,"resource_changes":[{"address":"a","change":{"actions":["update"]}}]}`,
+			wantCount: 0,
+			wantErr:   "reports errored",
 		},
 		{
 			name:      "a null resource_changes on a real plan counts zero",

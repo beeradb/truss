@@ -1110,6 +1110,16 @@ func countResourceChanges(planJSON []byte) (int, error) {
 	if !hasErrored && !hasChanges {
 		return 0, errors.New("it carries neither errored nor resource_changes, so it is not a plan document")
 	}
+	// ⚠️ AND errored:true IS NOT ZERO CHANGES. It is the one value of that
+	// field meaning "this plan is not applyable", and with resource_changes
+	// omitted alongside it the document otherwise reads as a valid plan that
+	// changes nothing -- which skips the digest gate. Unreachable today,
+	// because Runner.Plan returns early on a non-zero tofu exit and ShowJSON
+	// is never called; refused anyway, because it costs nothing and no plan
+	// worth applying carries it.
+	if string(errored) == "true" {
+		return 0, errors.New("the plan itself reports errored")
+	}
 	if !hasChanges {
 		return 0, nil
 	}
