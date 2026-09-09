@@ -376,15 +376,42 @@ the dead man's switch firing on a stale timestamp, which is the one behaviour
 this whole file is built around. Pushing a current, healthy state returned
 every one of them to inactive.
 
-**The dashboards.** All three load into Grafana with no provisioning error:
-60 panels across `stat`, `timeseries`, `state-timeline`, `table` and `text`,
-every one accepted. All 58 panel queries were run against real data: **0
-errored**, 37 returned data, and every empty one is a `vault_*` series (no
-Vault in that lab) or a family truss only emits when there is something to
-report — no drifted root, no expiring credential, no failed root. A query
-driven through Grafana's own datasource path returned
+**The dashboards.** All four load into Grafana with no provisioning error:
+71 panels across `stat`, `timeseries`, `state-timeline`, `table`, `logs` and
+`text`, every one accepted. All 58 PromQL panel queries were run against real
+data: **0 errored**, 37 returned data, and every empty one is a `vault_*`
+series (no Vault in that lab) or a family truss only emits when there is
+something to report — no drifted root, no expiring credential, no failed root.
+A query driven through Grafana's own datasource path returned
 `truss_pass_commits_applied{pass="frequent"} 1` and `{pass="drift"} 0`, which
 is exactly what those two passes did.
+
+**The logs half.** Loki v3.4.2 was loaded with lines shaped the way the
+collector produces them and all **8 LogQL panel queries ran against it: 0
+errored, every one returned data.** Two results are worth stating because they
+are the design, not the plumbing:
+
+- *Full narration* returned every stream including the level-less `tofu`
+  prose. A pipeline that dropped what it could not parse would have lost the
+  plan output that explains a failure, and this is the query that would have
+  shown it.
+- *Every error and warning line* returned exactly the `warn` and `error`
+  streams and nothing else — `level` as an index lookup, which is what the
+  collector promoting it buys.
+
+Driven through Grafana's own datasource path, the same query returned truss's
+actual narration:
+
+    time=09:32:15 level=warn  msg="telegram send failed (non-fatal): i/o timeout"
+    time=09:33:01 level=error msg="could not file rotation-…: permission denied"
+
+**The collector config.** Passes `alloy fmt`, `alloy validate` and a real
+`alloy run` against Alloy v1.10.0 — the only errors from the last being "not
+running in a cluster". `alloy validate` does **not** catch a dangling
+component reference; loading it does, and both were checked. And `kustomize
+build` refused an earlier version of the manifests outright, because the
+applier overlay's `namespace: infra` had silently rewritten a `vault`-namespace
+Role.
 
 **What still has not been run.** The `vault_*` half of `dashboards/vault.json`
 has never met a Vault — those metric names come from Vault's documentation,
