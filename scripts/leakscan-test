@@ -151,6 +151,14 @@ check 'our bucket in a url'  refuse n.go 'const u = "https://storage.googleapis.
 # three lines and there is no go.sum (port-plan.md §7.1) -- so a golang.org/x
 # path in a tracked file is a dependency being added or a doc claiming one, and
 # leakscan refusing it is the guard on that rule too.
+# ⚠️ A STORE URI NAMED BY A VARIABLE OR A PLACEHOLDER, AND THE CONCRETE ONE
+# THAT MUST STILL BITE. scripts/ledger-retention reads its bucket from the
+# environment so this repository never writes one down; the refusing case is
+# what keeps that exemption from becoming "gs:// is fine".
+check 'bucket from a variable'   clean  d.sh 'gcloud storage buckets describe "gs://$BUCKET"'
+check 'bucket as a placeholder'  clean  d.sh 'gcloud storage buckets create gs://<scratch>'
+check 'a real bucket still bites' refuse d.sh 'gcloud storage buckets describe gs://some-real-tfstate'
+
 check 'govulncheck is exempt'  clean  d.go 'go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...'
 check 'other x/ still bites'   refuse d.go 'import "golang.org/x/mod/sumdb/note"'
 

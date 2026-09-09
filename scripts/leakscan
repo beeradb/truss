@@ -112,6 +112,14 @@ scan() { # pattern description
   # added or a doc claiming one, and having leakscan say so is worth more than
   # the convenience of a wildcard. leakscan-test asserts both halves.
   hits=$(echo "$hits" | grep -vE 'golang\.org/x/vuln/cmd/govulncheck' || true)
+  # ⚠️ A STORE URI WHOSE NAME IS A SHELL VARIABLE OR A PLACEHOLDER NAMES
+  # NOTHING. `gs://$BUCKET`, `gs://${BUCKET}` and `gs://<scratch>` are the
+  # shapes an operator RUNS or READS, not a bucket -- scripts/ledger-retention
+  # takes the name from the environment precisely so this repository never
+  # writes one down. A concrete `gs://some-real-tfstate` still refuses, which
+  # is the whole rule; only the variable and the angle-bracket placeholder are
+  # exempt, and only immediately after the scheme.
+  hits=$(echo "$hits" | grep -vE '(gs|s3)://(\$\{?[A-Za-z_]|<[a-z-]+>)' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }
