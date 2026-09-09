@@ -1,0 +1,317 @@
+# Prometheus alerting rules for truss.
+#
+# ⚠️ READ THIS FIRST, BECAUSE EVERY RULE BELOW DEPENDS ON IT. Truss is a
+# CronJob and pushes to a Pushgateway; the gateway serves the last thing it
+# was given, forever. An applier that has STOPPED RUNNING ENTIRELY -- the
+# image will not pull, the CronJob was suspended, the node is gone -- keeps
+# answering `truss_pass_success 1` for as long as the gateway is up. Any
+# alerting built only on the outcome series reports a dead applier as a
+# healthy one, which is the fail-open-with-a-receipt shape truss refuses by
+# construction.
+#
+# So the first two rules are the load-bearing ones and the rest are detail.
+# `time() - truss_pass_timestamp_seconds` is the only expression here that
+# goes bad on its own when nothing pushes.
+#
+# ⚠️ THE SCRAPE JOB MUST SET honor_labels: true. Without it Prometheus
+# overwrites the `job="truss"` the gateway derived from the push path with
+# `job="pushgateway"`, and every selector below matches nothing -- silently.
+# See observability/README.md.
+groups:
+  - name: truss-liveness
+    rules:
+      # The dead man's switch. The frequent pass runs every five minutes;
+      # this fires after three consecutive misses, which is long enough to
+      # ride out a node restart and short enough that a suspended CronJob is
+      # noticed the same morning.
+      - alert: TrussApplierStopped
+        expr: time() - truss_pass_timestamp_seconds{pass="frequent"} > 900
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The truss applier has not completed a pass in 15 minutes
+          description: >-
+            Nothing is applying reviewed commits. Every other truss metric is
+            the last healthy pass's opinion and is not evidence of anything.
+            Check the CronJob, then the most recent Job's pod logs.
+
+      # The daily pass is the only one that rotates credentials, publishes the
+      # minted value and sweeps expiries. Silence here is slower to hurt and
+      # hurts more: a rotation that stops happening is invisible until a token
+      # dies.
+      - alert: TrussDriftPassStopped
+        expr: time() - truss_pass_timestamp_seconds{pass="drift"} > 108000
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: The daily truss pass has not run in 30 hours
+          description: >-
+            Rotation, the publisher handoff and the credential expiry sweep
+            all run on this pass and none of them have. truss_expiry_sweep_ok
+            and truss_credential_days_left are stale and must not be trusted.
+
+      # absent() covers the case the staleness rules cannot: a gateway that
+      # has never seen truss at all, or one that was restarted and lost
+      # everything it held. Both look identical to a missing series.
+      - alert: TrussIsNotReporting
+        expr: absent(truss_pass_timestamp_seconds{pass="frequent"})
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: No truss metrics exist at all
+          description: >-
+            Either truss has never pushed, or the Pushgateway was restarted
+            and holds nothing. A Pushgateway keeps its state in memory unless
+            it was started with --persistence.file.
+
+  - name: truss-refusals
+    rules:
+      # ⚠️ THE ALERT THIS PROJECT EXISTS TO SEND. The plan truss re-planned
+      # did not hash to the plan a human approved: the world moved between
+      # review and apply, or somebody moved it. It repeats every pass until
+      # somebody resolves it -- HEAD does not advance past a refused commit --
+      # so this alert stays firing rather than flapping once and resolving.
+      - alert: TrussPlanDigestRefused
+        expr: truss_digest_refusals > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: A plan did not hash to the one that was approved
+          description: >-
+            Truss refused to apply a root because its own re-plan of the
+            approved commit does not match the digest CI filed for it. Read
+            the alert text or the failed/<sha> ledger object for which root
+            and which commit. Do not re-run until you know why they differ.
+
+      # A commit reached main without getting there the way it must have:
+      # exactly one merged pull request, approved at that precise head sha,
+      # merge commit signed by the forge.
+      - alert: TrussCommitGateRefused
+        expr: truss_pass_failure{class="commit"} == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: A commit on main did not pass the commit gate
+          description: >-
+            Truss will not apply this commit and will not advance past it.
+            An approval given to an earlier push does not count, so a
+            re-approval at the current head is one legitimate cause.
+
+      # Turning protection off does not weaken the applier, it stops it --
+      # and this is how you find out you did it, rather than by noticing that
+      # nothing has applied all afternoon.
+      - alert: TrussProtectionNoLongerMeetsTheBar
+        expr: truss_gate_ok == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The {{ $labels.gate }} gate does not meet the bar'
+          description: >-
+            Truss re-reads branch protection and rulesets from the forge every
+            pass and refuses to run at all when either falls short. It is
+            refusing every commit right now. If this is the documented escape
+            hatch, turn it back on in the same sitting.
+
+  - name: truss-failures
+    rules:
+      # The operational classes, separate from the gate classes above because
+      # they want a different person. `tofu apply` returning non-zero is not
+      # the same event as a plan that did not match its approval.
+      - alert: TrussApplyFailed
+        expr: truss_pass_failure{class=~"plan|apply|credentials|repo|forge|config"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A truss pass failed with class {{ $labels.class }}'
+          description: >-
+            The queue does not advance past a failed commit, so this repeats
+            every pass until it is fixed. Five minutes of `for:` is one missed
+            pass, which is enough to ride out a transient forge error.
+
+      # ⚠️ A LOST DURABLE RECORD, WHICH IS WHY THIS IS NOT FOLDED INTO THE
+      # RULE ABOVE. The heartbeat, applied/<sha>, failed/<sha> and the HEAD
+      # pointer are the only record of what this applier has done. A pass that
+      # applied correctly and could not say so is a pass nobody can audit.
+      - alert: TrussLedgerWriteFailed
+        expr: truss_pass_ledger_errors > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Truss could not write a ledger object
+          description: >-
+            Something that should be on record is not. Check the object store
+            credentials and the bucket's own health before reading any other
+            truss metric as evidence of anything.
+
+      - alert: TrussPassLoggedAnError
+        expr: truss_pass_log_events{level="error"} > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: The last truss pass logged an error
+          description: >-
+            An error-level line means something was lost rather than merely
+            noticed. Read the pass's pod log; the lines are logfmt and carry
+            level=error.
+
+      - alert: TrussPassIsSlow
+        expr: truss_pass_duration_seconds{pass="frequent"} > 240
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The frequent truss pass is taking longer than its own cadence
+          description: >-
+            The CronJob fires every five minutes with concurrencyPolicy
+            Forbid, so a pass that takes longer than that suppresses the next
+            one. truss_root_duration_seconds says which root and which step.
+
+  - name: truss-credentials
+    rules:
+      # ⚠️ READ truss_expiry_sweep_ok BEFORE ANY OF THE FINDINGS BELOW. A
+      # sweep that could not run reports no findings, which is exactly what a
+      # clean sweep looks like. The sweep refuses to claim a clean bill it did
+      # not earn, and so must anything reading it.
+      - alert: TrussExpirySweepCouldNotRun
+        expr: truss_expiry_sweep_ok{pass="drift"} == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: The credential expiry sweep did not complete
+          description: >-
+            No credential expiry information from this pass is trustworthy.
+            An empty findings list here means "we could not look", not
+            "nothing is expiring".
+
+      - alert: TrussCredentialExpired
+        expr: truss_credential_days_left < 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: '{{ $labels.credential }} has expired'
+          description: >-
+            A root credential is hand-made because no API can mint it, so this
+            does not fix itself. If it is one the applier uses, the applier is
+            already down or about to be.
+
+      - alert: TrussCredentialExpiringSoon
+        expr: truss_credential_days_left >= 0 and truss_credential_days_left <= 14
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.credential }} expires in {{ $value }} days'
+          description: >-
+            Minted credentials re-mint themselves on the 45-day clock and
+            should never reach this rule; one that does is a rotation that is
+            not happening. A root credential reaching it needs a human.
+
+      - alert: TrussCredentialHasNoRecordedExpiry
+        expr: truss_credential_expiry_unrecorded == 1
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.credential }} records no expiry at all'
+          description: >-
+            Not the same fact as "does not expire": `never` is a recorded
+            value and does not appear here. Nothing is watching this
+            credential's lifetime, so its lapse will be discovered by an
+            outage.
+
+  - name: truss-rotation
+    rules:
+      - alert: TrussRotationFailed
+        expr: truss_pass_failure{class="rotation"} == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Credential rotation failed
+          description: >-
+            Rotation is applying the credentials root, and it runs once a day.
+            A failure means the next generation was not minted; there is one
+            full period of slack before anything dies, and it is not
+            unlimited.
+
+      # ⚠️ ROTATION MINTS, THE PUBLISHER WRITES. A rotation that succeeded and
+      # a publish that failed leaves the vault holding the PREVIOUS value
+      # while the new one exists only in tofu state. The next daily pass
+      # republishes, so this is urgent-tomorrow rather than urgent-now.
+      - alert: TrussPublishFailed
+        expr: truss_pass_failure{class="publish"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: The publisher did not confirm the write
+          description: >-
+            A freshly minted credential was not written where its consumer
+            reads it. The vault still holds the previous value and the next
+            daily pass republishes.
+
+      # ⚠️ ROTATION NOT RUNNING IS SILENT, WHICH IS WHY IT IS ITS OWN RULE.
+      # A rotation that FAILS alerts above. A rotation that is skipped -- the
+      # credentials root is not there, the state lock was held elsewhere --
+      # reports no failure at all, and the applier looks entirely healthy
+      # while the 45-day clock keeps running. 26 hours is two consecutive
+      # daily passes.
+      #
+      # ⚠️ NOT WRITTEN AS max_over_time(truss_rotation_changes[90d]) == 0,
+      # WHICH IS THE OBVIOUS VERSION AND IS WRONG. Rotation's plan is empty on
+      # every day but the one that crosses a generation boundary, so "nothing
+      # changed" is the normal state; that expression only means anything with
+      # more than 90 days of retention behind it, and under a shorter one it
+      # fires constantly while looking like it is checking something.
+      - alert: TrussRotationIsNotRunning
+        expr: truss_rotation_ran{pass="drift"} == 0
+        for: 26h
+        labels:
+          severity: warning
+        annotations:
+          summary: The daily pass has not rotated credentials in over a day
+          description: >-
+            Rotation was skipped rather than attempted, so nothing failed and
+            nothing happened. Applying the credentials root IS the rotation,
+            and every minted credential is on a 45-day clock that is still
+            running.
+
+  - name: truss-drift
+    rules:
+      # ⚠️ DRIFT IS REPORTED, NEVER RECONCILED. Undoing a change somebody made
+      # mid-incident is its own outage. This alert asks a human to look, and
+      # nothing acts on it.
+      - alert: TrussRootDrifted
+        expr: truss_root_drifted == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.root }} no longer matches its configuration'
+          description: >-
+            Somebody changed live infrastructure outside the reviewed path, or
+            a provider changed something under it. Truss will not undo it.
+
+      # "We looked and could not tell" is a different claim from "this
+      # drifted", and it is the one that hides a broken credential.
+      - alert: TrussDriftCouldNotBeChecked
+        expr: truss_root_drift_errored == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The drift pass could not plan {{ $labels.root }}'
+          description: >-
+            This root's drift status is unknown, not clean. A missing or
+            expired provider credential is the usual cause.

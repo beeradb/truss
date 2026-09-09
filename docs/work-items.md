@@ -468,6 +468,14 @@ carries only refusals, drift and expiries. Liveness stays provable and the
 channel becomes worth reading. ⚠️ This adds a dependency whose *absence* is
 the alarm, which is the one kind of dependency that fails safe.
 
+⚠️ **The pushed-metric half of that parenthesis now exists.** Every pass
+pushes `truss_pass_timestamp_seconds`, and the first rule in
+`observability/alerts/truss.rules.yml` is the staleness check on it.
+`HEARTBEAT_PING_URL` stays the mechanism for a deployment with no Prometheus
+of its own, and the two are NOT a fallback for each other: one answers "is it
+still running" to somebody else's monitor, the other to yours, and neither is
+consulted when the other is absent.
+
 **Per-root change counts in the alert.** The counts are already computed.
 `platform: +0/~2/-1` per root reads better than one aggregate number, and
 costs the breakdown rather than a new mechanism.
@@ -476,6 +484,13 @@ costs the breakdown rather than a new mechanism.
 commits behind an unresolved failure until somebody goes looking. "Report the
 counter that moves" argues for it directly, and until the local CLI exists
 the heartbeat is the only place it could show up.
+
+⚠️ **Metrics did NOT solve this, and the shape of the gap is now clearer.**
+`truss_pass_commits_applied` says how many commits a pass got through, which
+is the numerator; nothing anywhere counts how many are waiting. A refused
+commit is visible as a refusal repeating pass after pass, and a queue growing
+behind it is still invisible. `runCommitLoop` knows `len(commits)` before it
+starts and would only have to say so.
 
 **Plan-comment length.** Atlantis chunks its PR comment fence-aware because
 GitHub truncates. A `platform` plan touching hundreds of resources is the
@@ -498,9 +513,19 @@ To verify an artifact, run: `gh attestation verify <artifact> --repo <owner>/<re
 `ci.yml`. It reports only reachable vulnerabilities, so it does not bring the
 noise a scanner would.
 
-**`log/slog`.** The pass logs with `d.logf`. Structured attributes (commit,
-root, duration) make a CronJob's logs greppable across passes, which is the
-state every incident in `docs/` started from.
+**`log/slog`.** PARTLY DONE, and the remaining half is the half this entry
+was about. The pass now narrates in logfmt with a level -- `time=… level=warn
+msg="…"` -- so "every warning this week" is a field selector instead of a grep
+for whichever words a message happened to use, and the counts reach
+`truss_pass_log_events{level=…}` so the error and warning panels work with no
+log pipeline at all.
+
+⚠️ **The structured ATTRIBUTES are still not there.** The message remains one
+quoted prose value; `commit=`, `root=` and `duration=` per call site are what
+this entry asked for and are not what landed. The duration part has a partial
+answer elsewhere -- `truss_root_duration_seconds{root,phase}` times every step
+of every root -- which weakens the case for `duration=` on a log line but not
+for the other two.
 
 ## `ci.yml` runs `go test ./...` without `-count=1`
 
@@ -542,7 +567,16 @@ Recorded so the next survey does not re-derive them.
   solve a multi-team or multi-repo problem this does not have, or contradict
   a stated line.
 - **OpenTelemetry.** No collector here, no context to propagate across
-  services, and a short-lived process is the case it serves worst.
+  services, and a short-lived process is the case it serves worst. Still true
+  after metrics landed: what shipped is a Prometheus exposition written by
+  hand into a Pushgateway (`internal/metrics`, no dependency), because a batch
+  job that exits before any scrape reaches it is exactly the case the
+  Pushgateway exists for and exactly the case a tracing SDK serves worst.
+  ⚠️ The cost of that choice is written down where it bites: a gateway serves
+  the last push forever, so an applier that has stopped reports its final
+  healthy state indefinitely, and every alert is anchored on
+  `time() - truss_pass_timestamp_seconds` for that reason. See
+  `observability/README.md`.
 - **A notification abstraction (`shoutrrr`, `notify`).** One transport is
   one way to do things. Revisit only if a second is actually wanted.
 
