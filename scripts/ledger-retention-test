@@ -38,14 +38,16 @@ trap 'rm -rf "$tmp"' EXIT
 # ⚠️ want_msg MUST BE UNIQUE TO ITS BRANCH. "cannot answer" appears in two of
 # them and the unconditional header carries the words DO NOT LOCK, so those
 # substrings passed under mutations that skipped the logic entirely.
-check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
+check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay] [describe_exit] [describe_stderr]
   local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6" said="${7:-}" want_relay="${8:-}"
+  local describe_exit="${9:-0}" describe_said="${10:-}"
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin"
   {
     echo '#!/bin/sh'
     echo 'case "$*" in'
-    printf "  *describe*) printf '%%s\\\\n' '%s' ;;\n" "$versioning"
+    printf "  *describe*) printf '%%s\\\\n' '%s'; printf '%s' >&2; exit %s ;;\n" \
+      "$versioning" "$describe_said" "$describe_exit"
     printf "  *ls*) printf '%s'; printf '%s' >&2; exit %s ;;\n" "$listing" "$said" "$ls_exit"
     echo 'esac'
   } > "$dir/bin/gcloud"
@@ -138,6 +140,12 @@ check "a notice on stderr is not an object" refuse True '' 0 "listed no objects"
 check "a warning repeated on stderr is not a rewrite" clean True \
   'gs://<bucket>/applied/sha1#1\ngs://<bucket>/HEAD#5\n' 0 "none: every object" \
   'WARNING: retrying request\nWARNING: retrying request\n'
+
+# ⚠️ THE PROBE'S OWN FAILURE IS NOT "VERSIONING IS OFF". It once swallowed
+# gcloud's exit code and stderr, so a 403 or a misspelled bucket was reported
+# as that one specific and wrong cause with the evidence discarded.
+check "a describe that fails is not a versioning answer" refuse '' '' 0 "could not be described" \
+  '' "HTTPError 403" 1 'ERROR: (gcloud.storage.buckets.describe) HTTPError 403\n'
 
 echo
 echo "ledger-retention-test: $pass passed, $fail failed"

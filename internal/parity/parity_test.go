@@ -154,6 +154,7 @@ func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure",
 			Bash: "projects/recipes: does not match the one approved at headsha1", Truss: ""},
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "0", Truss: "1"},
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "sha1"},
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "sha1"},
 	}
 	for _, d := range accepted {
@@ -172,6 +173,10 @@ func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "1", Truss: "0"},
 		// A failure that does not name the digest gate.
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
+		// The watermark moved to a sha that is not the commit this story is
+		// about is the regression this key exists to catch.
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "someothersha"},
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "<absent>"},
 		// truss recording no last_sha at all, or the WRONG one, is not "the
 		// queue advanced past the commit the bash refused".
 		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "<absent>"},

@@ -123,8 +123,24 @@ case "$1" in
     # Versioning must be on for this to be able to see anything; if it is
     # off, say so rather than printing nothing and reading as a pass. A
     # check that cannot fail is a claim, not a check.
+    #
+    # ⚠️ AND ITS OWN FAILURE IS NOT "VERSIONING IS OFF". `2>/dev/null || true`
+    # turned a 403, an expired credential and a misspelled bucket into that
+    # one specific and wrong sentence, with the evidence thrown away -- the
+    # same wrong-cause defect the listing half of this subcommand was
+    # rewritten to fix.
+    said=$(mktemp)
+    trap 'rm -f "$said"' EXIT
+    set +e
     versioning=$(gcloud storage buckets describe "gs://$BUCKET" \
-      --format='value(versioning.enabled)' 2>/dev/null || true)
+      --format='value(versioning.enabled)' 2>"$said"); asked=$?
+    set -e
+    if [ "$asked" -ne 0 ]; then
+      echo "  cannot answer: gs://$BUCKET could not be described (gcloud exit $asked)," >&2
+      echo "  so nothing here has been measured. gcloud said:" >&2
+      sed 's/^/    /' "$said" >&2
+      exit 1
+    fi
     if [ "$versioning" != "True" ]; then
       echo "  cannot answer: versioning is not enabled on gs://$BUCKET, so overwritten" >&2
       echo "  generations were discarded and there is nothing left to count. Enable it" >&2
@@ -154,8 +170,6 @@ case "$1" in
     # an irreversible lock -- and a warning repeated twice came back from
     # `uniq -d` as a rewritten object. Parse stdout; keep stderr for the
     # human.
-    said=$(mktemp)
-    trap 'rm -f "$said"' EXIT
     set +e
     listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>"$said"); listed=$?
     set -e

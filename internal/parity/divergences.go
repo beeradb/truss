@@ -618,8 +618,14 @@ func emptyPlanIsNotGated(d Diff) bool {
 		// applied/<sha>, which the bash never reaches.
 		return strings.HasPrefix(d.Key, "applied/")
 	case "value":
+		// The ledger watermark itself: the bash leaves it, truss advances
+		// it. Pinned to the corpus's own two values, measured the same way
+		// and for the same reason as /last_sha below -- accepting any
+		// difference here forgives a regression writing the WRONG sha to the
+		// key that decides where the next pass resumes, which is the most
+		// consequential value in the ledger.
 		if d.Key == "applied/HEAD" {
-			return true
+			return d.Bash == "base" && d.Truss == "sha1"
 		}
 		if !strings.HasPrefix(d.Key, "heartbeat") {
 			return false

@@ -272,7 +272,7 @@ func TestAPlanThatChangesNothingIsNotGated(t *testing.T) {
 	})
 
 	// ⚠️ THE HALF THAT KEEPS THE OTHER HALF HONEST. countResourceChanges
-	// returns (0, false) for a plan it cannot read, and if that were treated
+	// returns an error for a plan it cannot read, and if that were treated
 	// as "no changes" the gate would be skipped on exactly the input nobody
 	// understands -- absent reading as compliant, the bug internal/gates
 	// exists to keep out. An unreadable plan is refused.
