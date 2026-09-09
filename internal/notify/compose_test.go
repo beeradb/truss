@@ -1,6 +1,9 @@
 package notify
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func intp(n int) *int { return &n }
 
@@ -142,4 +145,66 @@ func strings200(n int) string {
 
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+// TestSilentAgreesWithComposeOnEveryField holds Silent and Compose together:
+// silent must mean "Compose wrote the idle headline and nothing after it",
+// field by field.
+//
+// ⚠️ REFLECTION RATHER THAN A LIST, because the list is what went wrong. The
+// caller asked the narrower question -- did anything apply -- and every daily
+// drift pass answers no while carrying DRIFT, EXPIRING and EXPIRY NOT CHECKED
+// clauses, so the one report worth reading was discarded while the monitor
+// stayed green. A clause added to Compose with no matching term in Silent
+// fails here now, and a field added with no sample fails too rather than
+// passing unexamined.
+func TestSilentAgreesWithComposeOnEveryField(t *testing.T) {
+	// DriftRun is set here because DriftSkipped only speaks on a drift pass;
+	// it is a pair, and the pair is exercised through DriftSkipped below.
+	idle := Report{Subject: "platform applier", LastSHA: "abc1234", DriftRun: true}
+	idleText := Compose(idle)
+	if idleText != "platform applier: nothing to apply" {
+		t.Fatalf("idle headline changed: %q", idleText)
+	}
+	if !idle.Silent() {
+		t.Fatalf("a report with nothing in it is not silent")
+	}
+
+	days := 3
+	samples := map[string]any{
+		"Applied":           1,
+		"Noop":              1,
+		"Failure":           "tofu apply exploded",
+		"DriftSkipped":      "the protection gate failed",
+		"Drifted":           []string{"projects/paperless"},
+		"Errored":           []string{"projects/immich"},
+		"RotatedChanges":    2,
+		"Expiring":          []Expiring{{Name: "cf-token-mint", DaysLeft: &days}},
+		"ExpiryUnavailable": "vault said no",
+	}
+
+	rt := reflect.TypeOf(Report{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		switch name {
+		case "Subject", "LastSHA", "DriftRun":
+			// Not clauses: two render the headline, one gates another field.
+			continue
+		}
+		sample, ok := samples[name]
+		if !ok {
+			t.Fatalf("Report.%s has no sample here: add one, and a term in Silent if it adds a clause", name)
+		}
+		r := idle
+		reflect.ValueOf(&r).Elem().FieldByName(name).Set(reflect.ValueOf(sample))
+
+		text := Compose(r)
+		if text == idleText {
+			t.Errorf("Report.%s = %v changed nothing in Compose; the sample does not exercise it", name, sample)
+			continue
+		}
+		if r.Silent() {
+			t.Errorf("Report.%s = %v makes Compose say %q, and Silent still reports nothing to say", name, sample, text)
+		}
+	}
 }

@@ -143,3 +143,39 @@ func inList(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory is the negative half of the
+// EMPTY-PLAN-IS-NOT-GATED entry. Its heartbeat case once ended in
+// `default: return true`, so any unrelated heartbeat difference in its two
+// scenarios was forgiven under a divergence that claims to be pinned to one
+// story -- a divergence list that accepts everything says nothing.
+func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
+	accepted := []Diff{
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure",
+			Bash: "projects/recipes: does not match the one approved at headsha1", Truss: ""},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "0", Truss: "1"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "sha0", Truss: "sha1"},
+	}
+	for _, d := range accepted {
+		if !emptyPlanIsNotGated(d) {
+			t.Errorf("%s %s is part of this story and was refused", d.Key, d.Path)
+		}
+	}
+
+	refused := []Diff{
+		// An unrelated field on the same object: exactly what the old
+		// default waved through.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/noop", Bash: "0", Truss: "7"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/expiring", Bash: "[]", Truss: `["cf-token-mint"]`},
+		// The right path, the wrong direction: truss refusing where the
+		// bash applied is not this divergence.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "1", Truss: "0"},
+		// A failure that does not name the digest gate.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
+	}
+	for _, d := range refused {
+		if emptyPlanIsNotGated(d) {
+			t.Errorf("%s %s = (%q, %q) is not this story and was accepted", d.Key, d.Path, d.Bash, d.Truss)
+		}
+	}
+}

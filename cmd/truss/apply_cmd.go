@@ -536,12 +536,18 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	}
 	text := notify.Compose(report)
 
-	// idlePass is exactly notify.Compose's own idle case -- no failure,
-	// nothing applied, nothing noop, the branch that produces "<subject>:
-	// nothing to apply" -- recomputed here rather than sniffed out of text
-	// because matching a rendered string is exactly the mistake AGENTS.md
-	// already warns against ("gate on the field, never rendered text").
-	idlePass := failure == "" && appliedCount == 0 && noopCount == 0
+	// silent asks notify itself whether Compose has anything at all to say --
+	// no failure, nothing applied or no-opped, and not one of the appended
+	// clauses. Asked of the Report rather than recomputed here, and never
+	// sniffed out of the rendered text, which is the mistake AGENTS.md warns
+	// against ("gate on the field, never rendered text").
+	//
+	// ⚠️ IT WAS "DID ANYTHING APPLY", AND THAT DISCARDED THE DAILY REPORT. A
+	// drift pass applies nothing by definition, so with a ping URL configured
+	// every DRIFT, EXPIRING and EXPIRY NOT CHECKED clause went in the bin
+	// while the monitor stayed green -- the exact shape of failure this
+	// repository calls worse than none, since it reports success.
+	silent := report.Silent()
 
 	// The dead-man's-switch ping: every completed pass reaches this tail
 	// exactly once (same guarantee as the heartbeat and the alert below), so
@@ -566,12 +572,13 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		pinged = true
 	}
 
-	// The one-sentence rule: when a dead-man's-switch is configured, an idle
-	// pass pings it instead of messaging. Every other pass -- a failure, or
-	// one that applied or no-opped something -- still messages exactly as it
-	// does today, and a pass with no HeartbeatPingURL configured always
-	// messages, unconditionally, which is the regression guard for every
-	// deployment that has not opted in.
+	// The one-sentence rule: when a dead-man's-switch is configured, a pass
+	// with nothing to report pings it instead of messaging. Every other pass
+	// -- a failure, one that applied or no-opped something, or one carrying a
+	// drift, rotation or expiry clause -- still messages exactly as it does
+	// today, and a pass with no HeartbeatPingURL configured always messages,
+	// unconditionally, which is the regression guard for every deployment
+	// that has not opted in.
 	//
 	// ⚠️ A FAILED PING STILL SUPPRESSES THE IDLE MESSAGE, AND THAT IS NOT AN
 	// OVERSIGHT. `pinged` means the ping was ATTEMPTED, not that it landed.
@@ -582,7 +589,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// dead-man's-switch exists to alert on. The silence IS the signal, and
 	// re-routing it to the channel the switch was adopted to quieten would
 	// undo the reason for adopting it.
-	if !(pinged && idlePass) {
+	if !(pinged && silent) {
 		// ⚠️ NON-FATAL, BUT NOT SILENT -- and this line used to be both, under a
 		// comment claiming a parity with the bash that it did not have.
 		// apply.sh:447 ends its curl with
@@ -1042,18 +1049,50 @@ func rootDeclaresCloudflare(workdir, root string) (bool, error) {
 
 func countResourceChanges(planJSON []byte) (int, bool) {
 	var parsed struct {
-		ResourceChanges []struct {
+		// ⚠️ A POINTER, SO AN ABSENT KEY IS NOT AN EMPTY PLAN. `{}` and
+		// `null` unmarshal without error into a nil slice, so a value slice
+		// reported (0, true) -- "parsed fine, nothing to change" -- for a
+		// document that is not a plan at all. The one caller skips the
+		// digest gate on exactly that answer, so a ShowJSON that came back
+		// with anything JSON-shaped turned a fail-closed refusal into a
+		// silent apply. Absent is not compliant; it is unreadable, and
+		// unreadable is gated.
+		//
+		// A real no-change plan is unaffected: OpenTofu emits a
+		// resource_changes entry for EVERY resource in the plan, no-ops
+		// included (see plan.theFilter's own evidence), so the key is
+		// present and full. A root whose plan holds no resources at all
+		// gets gated instead of skipped, and gating it is harmless -- both
+		// sides hash the same empty list.
+		ResourceChanges *[]struct {
 			Change struct {
 				Actions []string `json:"actions"`
+				// ⚠️ AN IMPORT IS RENDERED AS A no-op AND STILL MUTATES
+				// STATE. OpenTofu reports an import block whose resource
+				// already matches configuration with actions ["no-op"] and
+				// `importing` set, and applying it writes the resource into
+				// state. Counting it as a change is what keeps it gated.
+				//
+				// Not verified against a real `tofu show -json` here -- this
+				// environment has no tofu binary -- which is acceptable only
+				// because the direction is safe: if the field never appears,
+				// this is inert; if it does, the plan is gated rather than
+				// skipped. A shape depended on to fail OPEN would need the
+				// measurement first.
+				Importing json.RawMessage `json:"importing"`
 			} `json:"change"`
 		} `json:"resource_changes"`
 	}
 	if err := json.Unmarshal(planJSON, &parsed); err != nil {
 		return 0, false
 	}
+	if parsed.ResourceChanges == nil {
+		return 0, false
+	}
 	count := 0
-	for _, rc := range parsed.ResourceChanges {
-		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" {
+	for _, rc := range *parsed.ResourceChanges {
+		importing := len(rc.Change.Importing) > 0 && !bytes.Equal(rc.Change.Importing, []byte("null"))
+		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" && !importing {
 			continue
 		}
 		count++

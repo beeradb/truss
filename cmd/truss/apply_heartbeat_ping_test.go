@@ -9,34 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/beeradb/truss/internal/gates"
 )
-
-// protectionCompliantForNow builds a gates.Protection that clears every bar
-// CheckProtection currently checks, built directly against that function
-// rather than reused from testsupport_test.go's compliantGatesProtection.
-// internal/gates is under concurrent work elsewhere in this tree (AGENTS.md:
-// "other agents are editing internal/gates") that has added fields
-// (AllowDeletions, RequireLastPushApproval) the shared fixture has not yet
-// been updated to satisfy; these ping tests exist to prove the ping feature,
-// not to referee that convergence, so they build their own compliant value.
-func protectionCompliantForNow() gates.Protection {
-	one := 1
-	yes := true
-	no := false
-	return gates.Protection{
-		RequiredApprovals:       &one,
-		RequireCodeOwners:       &yes,
-		DismissStaleReviews:     &yes,
-		EnforceAdmins:           &yes,
-		AllowForcePushes:        &no,
-		AllowDeletions:          &no,
-		RequireUpToDateBranch:   &yes,
-		RequireLastPushApproval: &yes,
-		StatusChecks:            []string{"plan"},
-	}
-}
 
 // pingRecorder stands in for an external dead-man's-switch monitor
 // (Healthchecks.io, Cronitor, ...), recording how many times it was hit.
@@ -74,7 +47,7 @@ func (p *pingRecorder) count() int {
 // apply".
 func idlePassDeps(t *testing.T) (applyDeps, *fakeTelegram) {
 	t.Helper()
-	forgeFake := &fakeForge{ProtectionResult: protectionCompliantForNow()}
+	forgeFake := &fakeForge{ProtectionResult: compliantGatesProtection()}
 	git := &fakeGit{
 		CommitsList: nil,
 		HasDirFn:    func(string) bool { return false },
@@ -103,16 +76,6 @@ func failingPassDeps(t *testing.T) (applyDeps, *fakeTelegram) {
 func successPassDeps(t *testing.T, sha string) (applyDeps, *fakeTelegram) {
 	t.Helper()
 	deps, fl, ft, _ := gateDeps(t, sha, sha)
-	// gateDeps wires its forgeFake's ProtectionResult from
-	// testsupport_test.go's compliantGatesProtection, which -- mid
-	// concurrent work on internal/gates elsewhere in this tree -- does not
-	// yet set every field the current CheckProtection bar checks (see
-	// protectionCompliantForNow's own doc). Overriding the same *fakeForge
-	// gateDeps already built keeps these tests independent of that
-	// fixture's convergence without editing a shared test helper.
-	if ff, ok := deps.Forge.(*fakeForge); ok {
-		ff.ProtectionResult = protectionCompliantForNow()
-	}
 	fl.put("digests/"+sha+"/"+gateSlug+".digest", []byte(ourDigest(t)))
 	return deps, ft
 }
@@ -272,4 +235,35 @@ func TestAFailingMonitorDoesNotFailThePass(t *testing.T) {
 			t.Fatalf("stderr leaks the monitor URL: %q", stderr.String())
 		}
 	})
+}
+
+// TestAPassWithSomethingToReportStillMessagesEvenThoughItPinged is the
+// counterweight to TestIdlePassWithPingURLSendsNoTelegramMessage, and it is
+// the case that was wrong: the daily drift pass applies nothing, so a
+// suppression asking "did anything apply" threw away the DRIFT, EXPIRING and
+// EXPIRY NOT CHECKED clauses -- the entire reason that pass exists -- while
+// the monitor went on being pinged and stayed green.
+func TestAPassWithSomethingToReportStillMessagesEvenThoughItPinged(t *testing.T) {
+	ping := newPingRecorder(t, http.StatusOK)
+	deps, telegram := idlePassDeps(t)
+	deps.Cfg.HeartbeatPingURL = ping.srv.URL
+	deps.Cfg.DriftOnly = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, "headsha1")
+
+	if got := ping.count(); got != 1 {
+		t.Fatalf("monitor was hit %d times, want exactly 1", got)
+	}
+	sent := telegram.lastText()
+	if sent == "" {
+		t.Fatalf("a pass reporting %q sent no message; the drift pass is the one that looks idle and is not", result.notifyText)
+	}
+	if sent == "platform applier: nothing to apply" {
+		t.Fatalf("message carried no clause: %q -- the fixture is not exercising the case", sent)
+	}
+	if !strings.Contains(sent, "EXPIRY NOT CHECKED") && !strings.Contains(sent, "DRIFT") && !strings.Contains(sent, "EXPIRING") {
+		t.Fatalf("message names none of the daily clauses: %q", sent)
+	}
 }

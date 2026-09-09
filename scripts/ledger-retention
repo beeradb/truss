@@ -132,9 +132,22 @@ case "$1" in
       echo "  applier run before trusting this." >&2
       exit 1
     fi
-    gcloud storage ls -a "gs://$BUCKET/**" |
+    # ⚠️ THE ANSWER IS THE EXIT CODE, NOT THE PRINTOUT. This ended at
+    # `uniq -d`, which exits 0 whether or not it printed anything -- so the
+    # gate before an irreversible lock reported success while listing the
+    # objects that forbid it, and only the lesser "versioning is off" case
+    # ever refused. A check whose failure looks exactly like its pass is the
+    # shape this repository calls worse than no check.
+    rewritten=$(gcloud storage ls -a "gs://$BUCKET/**" |
       sed 's/#[0-9]*$//' |
-      sort | uniq -d
+      sort | uniq -d)
+    if [ -n "$rewritten" ]; then
+      echo "$rewritten"
+      echo "retention: DO NOT LOCK -- the objects above were written more than" >&2
+      echo "  once, and a locked policy refuses a replace as well as a delete." >&2
+      exit 1
+    fi
+    echo "  none: every object has exactly one generation"
     ;;
 
   *) usage ;;

@@ -619,11 +619,26 @@ func emptyPlanIsNotGated(d Diff) bool {
 		if !strings.HasPrefix(d.Key, "heartbeat") {
 			return false
 		}
+		// ⚠️ EVERY PATH NAMED, AND THE DEFAULT REFUSES. This read
+		// `default: return true`, which accepted any heartbeat difference
+		// at all in these two scenarios -- an entry that says it is pinned
+		// to one story, forgiving everything. The three below are the whole
+		// structural consequence of the queue advancing instead of
+		// stopping, measured by refusing everything and reading what came
+		// back.
 		switch d.Path {
 		case "/failure":
 			return namesTheGate(d.Bash)
+		case "/applied":
+			// The bash refuses the root and applies nothing; truss finishes
+			// the commit.
+			return d.Bash == "0" && d.Truss == "1"
+		case "/last_sha":
+			// The bash leaves HEAD where it was; truss advances it to the
+			// commit it applied.
+			return d.Bash != d.Truss
 		default:
-			return true
+			return false
 		}
 	}
 	return false

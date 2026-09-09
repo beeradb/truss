@@ -84,6 +84,43 @@ func TestCountResourceChangesExcludesNoOps(t *testing.T) {
 			wantCount: 1,
 			wantOK:    true,
 		},
+		{
+			// ⚠️ THE CALLER SKIPS THE DIGEST GATE ON (0, true), so a
+			// document with no resource_changes key at all must NOT report
+			// it. `{}` unmarshals happily, and reading that as "nothing to
+			// change" turned every fail-closed refusal into a silent apply
+			// for any ShowJSON that came back JSON-shaped but not a plan.
+			name:      "a document with no resource_changes key is unreadable, not empty",
+			planJSON:  `{}`,
+			wantCount: 0,
+			wantOK:    false,
+		},
+		{
+			name:      "a null resource_changes is unreadable, not empty",
+			planJSON:  `{"resource_changes":null}`,
+			wantCount: 0,
+			wantOK:    false,
+		},
+		{
+			// An import block whose resource already matches configuration
+			// is rendered as a no-op with `importing` set, and applying it
+			// still writes the resource into state. It is a change, so it
+			// is counted -- which is what keeps the plan gated.
+			name: "a no-op carrying an import is counted, not skipped",
+			planJSON: `{"resource_changes":[
+				{"address":"a","change":{"actions":["no-op"],"importing":{"id":"abc"}}}
+			]}`,
+			wantCount: 1,
+			wantOK:    true,
+		},
+		{
+			name: "a no-op with a null importing is still a no-op",
+			planJSON: `{"resource_changes":[
+				{"address":"a","change":{"actions":["no-op"],"importing":null}}
+			]}`,
+			wantCount: 0,
+			wantOK:    true,
+		},
 	}
 
 	for _, tc := range cases {
