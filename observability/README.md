@@ -309,21 +309,51 @@ reject the **whole file**, silently disarming every other rule beside it.
 
 ### What has actually been run against real components
 
-Not asserted — measured, on 2026-09-09:
+Not asserted — measured on 2026-09-09, against real Pushgateway v1.11.1,
+Prometheus v3.5.0 and Grafana v11.6.1, with truss pushing real passes:
 
-- The exposition parses with `prometheus/common/expfmt`, the parser
-  Prometheus itself uses. 29 families, 43 series, escaping round-trips.
-- Two passes pushed to a **real Pushgateway** (v1.11.1), which accepted both
-  and re-exposed 78 series under `job="truss"` with `pass="frequent"` and
-  `pass="drift"` intact and NOT overwriting each other — which is the whole
-  reason the grouping key carries the pass.
-- `PUT` was watched replacing a group: a family the second push stopped
-  emitting was gone from the gateway afterwards. That is the claim
-  `internal/metrics/push.go` makes about POST-versus-PUT, and it is now one
-  somebody has seen happen.
-- All 19 rules and all 58 panel queries parse with `promtool`, and both
-  halves were watched failing on a deliberately broken expression.
+**The exposition.** Parses with `prometheus/common/expfmt`, the parser
+Prometheus itself uses: 29 families, 43 series, escaping round-trips exactly.
+A real Pushgateway accepted two passes and re-exposed 78 series under
+`job="truss"` with `pass="frequent"` and `pass="drift"` intact and **not**
+overwriting each other — which is the whole reason the grouping key carries
+the pass.
 
-What has NOT been run: nothing here has been rendered in a Grafana, and the
-Vault half of `dashboards/vault.json` has never met a Vault. Those want
-somebody with access to the deployment.
+**`PUT` versus `POST`.** Watched: a family the second push stopped emitting
+was gone from the gateway afterwards. That was a claim in
+`internal/metrics/push.go`; it is now something somebody has seen happen.
+
+**Why `Render` always writes `# TYPE`.** Found the hard way, pushing a
+hand-written body without them: the gateway answered *"is not a GAUGE"* and
+**rejected the entire push** — four families discarded for one omission. That
+is the "one 400 for the WHOLE push" this file warns about, observed rather
+than reasoned about.
+
+**`honor_labels: true`.** Scraped through a real Prometheus with it set, and
+the series arrive as `{job="truss", pass="drift"}`. This is the setting whose
+absence breaks every selector here while looking like nothing.
+
+**The alerting rules.** All 19 load into Prometheus across all 6 groups, and
+all 19 evaluate against real data with no `lastError`. Better: they were
+watched going **red and then green**. The test fixture's clock runs behind
+real time, so the first push left `TrussApplierStopped`, `TrussDriftPassStopped`,
+`TrussRotationIsNotRunning` and `TrussExpirySweepCouldNotRun` all pending —
+the dead man's switch firing on a stale timestamp, which is the one behaviour
+this whole file is built around. Pushing a current, healthy state returned
+every one of them to inactive.
+
+**The dashboards.** All three load into Grafana with no provisioning error:
+60 panels across `stat`, `timeseries`, `state-timeline`, `table` and `text`,
+every one accepted. All 58 panel queries were run against real data: **0
+errored**, 37 returned data, and every empty one is a `vault_*` series (no
+Vault in that lab) or a family truss only emits when there is something to
+report — no drifted root, no expiring credential, no failed root. A query
+driven through Grafana's own datasource path returned
+`truss_pass_commits_applied{pass="frequent"} 1` and `{pass="drift"} 0`, which
+is exactly what those two passes did.
+
+**What still has not been run.** The `vault_*` half of `dashboards/vault.json`
+has never met a Vault — those metric names come from Vault's documentation,
+and the one `curl` that settles them is in that dashboard's own first panel.
+Nothing here has touched the deployment: no manifest applied, no tailnet tag
+claimed, no scrape against your Prometheus.
