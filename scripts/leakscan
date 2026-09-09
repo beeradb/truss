@@ -102,6 +102,16 @@ scan() { # pattern description
   # NAME is already permitted (see the note above `op://`); this is its
   # published package host, not a reference into a store.
   hits=$(echo "$hits" | grep -vE 'https://downloads\.1password\.com/linux/' || true)
+  # ⚠️ ONE MODULE PATH, NOT THE golang.org/x NAMESPACE, AND THE NARROWNESS IS
+  # LOAD-BEARING. govulncheck is fetched by `go run` in ci.yml; it is published,
+  # identical for every user, and identifies no deployment. Exempting the whole
+  # namespace would also have exempted `golang.org/x/mod`, `golang.org/x/net`
+  # and everything else -- and this repository has NO dependencies (go.mod is
+  # three lines, there is no go.sum, port-plan.md §7.1). So any OTHER
+  # golang.org/x path appearing in a tracked file is either a dependency being
+  # added or a doc claiming one, and having leakscan say so is worth more than
+  # the convenience of a wildcard. leakscan-test asserts both halves.
+  hits=$(echo "$hits" | grep -vE 'golang\.org/x/vuln/cmd/govulncheck' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
   [ -z "$hits" ] || { note "$2"; echo "$hits" | head -5 >&2; }
 }

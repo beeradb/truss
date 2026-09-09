@@ -140,6 +140,20 @@ check 'telegram api root'    clean  n.go 'const ep = "https://api.telegram.org/b
 check 'github api root'      clean  n.go 'const ep = "https://api.github.com/repos/%s/pulls"'
 check 'our bucket in a url'  refuse n.go 'const u = "https://storage.googleapis.com/some-real-tfstate/key"'
 
+# ⚠️ THE govulncheck EXEMPTION, AND THE PAIR THAT KEEPS IT NARROW. AGENTS.md
+# requires a passing AND a refusing case for every exemption, and here the
+# refusing one carries most of the weight: the exempted string is ONE module
+# path, not the golang.org/x namespace, so a DIFFERENT golang.org/x path must
+# still bite. Widen the pattern to `golang\.org/x/` and this goes green, which
+# is how the widening gets caught.
+#
+# That guards more than leaks. This repository has no dependencies -- go.mod is
+# three lines and there is no go.sum (port-plan.md §7.1) -- so a golang.org/x
+# path in a tracked file is a dependency being added or a doc claiming one, and
+# leakscan refusing it is the guard on that rule too.
+check 'govulncheck is exempt'  clean  d.go 'go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...'
+check 'other x/ still bites'   refuse d.go 'import "golang.org/x/mod/sumdb/note"'
+
 # ⚠️ THE UPSTREAM DOWNLOAD EXEMPTIONS, AND THE PAIR THAT KEEPS THEM HONEST.
 # The image fetches the two binaries it runs, so their release URLs must pass.
 # The refusing cases are the point: `github.com/<owner>/<repo>` is exactly the
