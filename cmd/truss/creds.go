@@ -61,6 +61,13 @@ const (
 	// is why it is read optionally.
 	itemGitHubRepoAdmin  = "github-repo-admin"
 	fieldGitHubRepoToken = "password"
+
+	// The tailnet policy file, for a consumer that manages it as code. Same
+	// optional shape as the repo-admin token: a consumer with no tailnet
+	// never mounts it.
+	itemTailscale     = "tailscale-api-key"
+	fieldTailscaleKey = "password"
+	fieldTailscaleNet = "tailnet"
 )
 
 // loadLedgerConfig builds a ledger.Config from the gcs-ledger item and the

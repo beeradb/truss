@@ -896,6 +896,33 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 	if ok {
 		env = append(env, "TF_VAR_github_repo_admin_token="+token)
 	}
+
+	// ⚠️ THE TAILSCALE PROVIDER READS THESE TWO NAMES FROM THE ENVIRONMENT,
+	// which is why they are exported rather than passed as TF_VAR_. That is
+	// the opposite of the choice made for the repo-admin PAT above, and the
+	// difference is real: there is exactly one tailscale provider in a root,
+	// so an environment variable cannot silently re-authenticate a second
+	// one. The github provider has two -- the App and the PAT -- and
+	// GITHUB_TOKEN would capture both.
+	//
+	// Optional for the same reason as the token above: a consumer with no
+	// tailnet mounts neither, and requiring them would stop it on upgrade.
+	tsKey, ok, err := d.Dir.FieldIfPresent(itemTailscale, fieldTailscaleKey)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		env = append(env, "TAILSCALE_API_KEY="+tsKey)
+		// ⚠️ STATED, NOT INFERRED. With no tailnet the provider falls back to
+		// "the tailnet that owns the credential" -- correct today, and
+		// silently a different answer the first time a credential from
+		// another tailnet is used.
+		if net, ok, err := d.Dir.FieldIfPresent(itemTailscale, fieldTailscaleNet); err != nil {
+			return nil, err
+		} else if ok {
+			env = append(env, "TAILSCALE_TAILNET="+net)
+		}
+	}
 	return env, nil
 }
 
