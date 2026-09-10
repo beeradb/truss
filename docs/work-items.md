@@ -1670,3 +1670,19 @@ skipping an unreachable host turned both unreachable cases red, and making
 a non-2xx return an empty slice instead of an error turned the status and
 credential-hygiene tests red -- but that proves the two functions do what
 they claim, not that anything downstream depends on them yet.
+
+## ci.yml and release.yml state the same fact twice
+
+`release.yml` had no tofu install, so every release after #12 failed on
+`internal/plan`'s declaration tests -- and nothing noticed, because nothing was
+tagged in between. v0.1.4 found it.
+
+⚠️ THE FIX WAS TO COPY THE TWO LINES, WHICH IS THE SAME BUG DEFERRED. ci.yml
+runs `scripts/check` precisely so that one definition serves both a developer
+and CI; release.yml restates the steps instead. The next test dependency added
+to one will be missing from the other in exactly this way.
+
+release.yml should run `scripts/check` too. It cannot simply call it today:
+the release job needs `TRUSS_REQUIRE_JQ` set the same way, and it runs
+`go vet`/`go test` before a matrix that builds per tofu version, so the order
+is not identical. Worth one pass to make it so.
