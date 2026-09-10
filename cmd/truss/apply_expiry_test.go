@@ -320,3 +320,81 @@ func TestTheRepoAdminTokenIsOptionalAndReachesTofuAsAVariable(t *testing.T) {
 		}
 	})
 }
+
+// TestTheTailscaleCredentialIsOptionalAndUsesTheProvidersOwnNames covers the
+// credential a consumer needs only if it manages its tailnet policy as code.
+//
+// ⚠️ EXPORTED AS TAILSCALE_API_KEY, NOT AS A TF_VAR_, and that is the
+// OPPOSITE of the choice made for the repo-admin PAT beside it. The
+// difference is not style: a root has exactly one tailscale provider, so an
+// environment variable cannot silently re-authenticate a second one -- while
+// the github provider has two (the App and the PAT) and GITHUB_TOKEN would
+// capture both. Reading the provider's own names is simpler where it is safe
+// and wrong where it is not.
+func TestTheTailscaleCredentialIsOptionalAndUsesTheProvidersOwnNames(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("an unmounted tailscale key was fatal: %v", err)
+		}
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "TAILSCALE_") {
+				t.Fatalf("a tailnet nobody configured reached tofu: %s", strings.SplitN(kv, "=", 2)[0])
+			}
+		}
+	})
+
+	t.Run("present", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+		write("tailscale-api-key", "password", "tskey-api-fixture")
+		write("tailscale-api-key", "tailnet", "example.ts.net")
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("buildBaseEnv: %v", err)
+		}
+		seen := map[string]string{}
+		for _, kv := range env {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				seen[k] = v
+			}
+		}
+		if seen["TAILSCALE_API_KEY"] != "tskey-api-fixture" {
+			t.Errorf("TAILSCALE_API_KEY = %q, want the mounted value", seen["TAILSCALE_API_KEY"])
+		}
+		if seen["TAILSCALE_TAILNET"] != "example.ts.net" {
+			t.Errorf("TAILSCALE_TAILNET = %q, want the mounted value", seen["TAILSCALE_TAILNET"])
+		}
+	})
+
+	// ⚠️ THE TAILNET IS OPTIONAL WITHIN THE OPTIONAL CREDENTIAL. An item that
+	// records a key but no tailnet must still authenticate -- the provider
+	// falls back to the tailnet owning the credential, which is right until
+	// somebody uses a credential from a second tailnet. Requiring it here
+	// would break every consumer that has not written the field.
+	t.Run("key without tailnet", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+		write("tailscale-api-key", "password", "tskey-api-fixture")
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("a key without a tailnet was fatal: %v", err)
+		}
+		var key, net bool
+		for _, kv := range env {
+			key = key || strings.HasPrefix(kv, "TAILSCALE_API_KEY=")
+			net = net || strings.HasPrefix(kv, "TAILSCALE_TAILNET=")
+		}
+		if !key || net {
+			t.Fatalf("key=%v tailnet=%v, want key present and tailnet absent", key, net)
+		}
+	})
+}
