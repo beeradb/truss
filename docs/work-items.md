@@ -710,6 +710,56 @@ smaller and does not change what is refused.
 
 ## The delivery ref is not built, and the reason is the gate rather than the push
 
+Measured 2026-09-10, which narrows this from "unverified" to one specific
+unanswered question.
+
+**The rule vocabulary is known.** `rules[].type` is one of `creation`,
+`update`, `deletion`, `required_linear_history`, `merge_queue`,
+`required_deployments`, `required_signatures`, `pull_request`,
+`required_status_checks`, `non_fast_forward`, and a set of pattern and
+file rules. `bypass_actors[].actor_type` is one of `Integration`,
+`OrganizationAdmin`, `RepositoryRole`, `Team`, `DeployKey`, `User`;
+`bypass_mode` is `always`, `pull_request` or `exempt`. `internal/forge`
+now carries the per-ref rule types through to `gates.Ruleset.Rules`, so
+the fact a gate would need is available.
+
+**⚠️ NEITHER REPOSITORY USES RULESETS AT ALL.** `GET /rulesets` returns an
+empty list for both this repository and the one the applier applies; both
+are governed by classic branch protection. So `gates.CheckRulesets` is
+today a gate over an empty set — it refuses nothing, not because it is
+wrong but because the control it guards is unused. That was written to
+close a hole somebody could open, and nobody had measured that the hole
+is currently shut by disuse. Worth knowing before reading a green pass as
+evidence that rulesets were checked.
+
+**What is still unanswered, and it is the whole blocker.** Blocking force
+pushes and deletion is expressible and checkable, but it does not stop
+somebody with write access from pushing to the ref — and a ref a
+reconciler applies from is a path to production. What would stop them is
+an `update` rule whose only bypass actor is the applier's App. Whether
+that combination has exactly that effect could not be confirmed here: it
+needs a ruleset that exists, and creating one to read its live shape was
+refused by this environment as a write to repository configuration.
+
+⚠️ **Being wrong here is not symmetric, which is why it is not shipped on
+a best guess.** Demanding a ruleset that turns out to be unnecessary
+costs friction: the applier refuses to advance the ref until somebody
+reads the message. Accepting one that turns out not to restrict pushes
+costs the property — the ref advances while unprotected, silently, and
+the reconciler applies whatever reached it. A gate that can fail open on
+a path to production is the thing this project refuses by construction.
+
+Closing it needs one of: a live ruleset to read back, so the effect of
+`update` plus an `Integration` bypass actor is measured rather than
+assumed; or a decision that the delivery ref does not need
+push-exclusivity because repository write access is already equivalent to
+it in this deployment -- which may well be true here, and is the owner's
+call rather than an engine default.
+
+### Original entry
+
+
+
 The applier renders every delivery unit a commit touches and refuses unless the
 bytes match what CI filed. What it does **not** do yet is publish the result: a
 reconciler still has nothing to track, so the render gate today refuses bad

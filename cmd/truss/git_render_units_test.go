@@ -72,8 +72,14 @@ func TestExecGitTreeRenderUnitsAgainstARealRepo(t *testing.T) {
 	// that rule exists to prevent.
 	commit := exec.Command("git", "-C", dir, "commit", "--quiet", "-m", "fixture")
 	commit.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=truss-test", "GIT_AUTHOR_EMAIL=truss-test@truss-test.invalid",
-		"GIT_COMMITTER_NAME=truss-test", "GIT_COMMITTER_EMAIL=truss-test@truss-test.invalid",
+		"GIT_AUTHOR_NAME=truss-test", "GIT_AUTHOR_EMAIL=truss-test",
+		// ⚠️ NO @ IN THE ADDRESS. git accepts an identity that is not a
+		// well-formed address (measured: the commit lands and %ae reads it
+		// back verbatim), and scripts/leakscan refuses anything shaped like
+		// an email anywhere in this repository -- it cannot tell a fixture's
+		// address from a real one, which is the point of scanning classes
+		// rather than keeping a list of the real ones.
+		"GIT_COMMITTER_NAME=truss-test", "GIT_COMMITTER_EMAIL=truss-test",
 	)
 	if out, err := commit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v\n%s", err, out)
