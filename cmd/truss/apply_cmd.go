@@ -799,6 +799,28 @@ func toLedgerExpiring(in []secrets.Expiring) []ledger.Expiring {
 	return out
 }
 
+// tofuUnitsFor derives the credentials/tofu roots a commit touches, the
+// sibling of renderUnitsFor (render_unit.go) reading the other half of the
+// same repo.TouchedUnits call.
+//
+// ⚠️ treeUnits HERE IS THE CREDENTIALS/TOFU UNITS OF THE TREE, NOT EVERY
+// UNIT -- fed from gitDriver.TreeTofuUnits, which never lists "ansible/plays"
+// or a render unit, the same way TreeRenderUnits never lists a tofu one. The
+// shared-input branch of TouchedUnits returns everything in whichever tree
+// it was handed, so this one returns exactly the credentials/tofu units that
+// exist and renderUnitsFor returns exactly the render ones -- the two calls
+// partition TouchedUnits' output by construction, never by filtering a
+// shared listing after the fact.
+func tofuUnitsFor(changedFiles, treeUnits []string) []string {
+	var out []string
+	for _, u := range repo.TouchedUnits(changedFiles, treeUnits) {
+		if u.Kind == repo.KindCredentials || u.Kind == repo.KindTofu {
+			out = append(out, u.Path)
+		}
+	}
+	return out
+}
+
 // runCommitLoop walks every commit from last (exclusive) to origin/main
 // (inclusive), applying each one's touched roots in order. It returns the
 // new HEAD, the applied/noop counts, a failure reason (if the pass must
@@ -894,18 +916,31 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			d.Obs.failed(classRepo)
 			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), false
 		}
-		treeRoots, err := d.Git.TreeRoots(ctx, sha)
+		// ⚠️ roots COMES FROM repo.TouchedUnits, NOT repo.TouchedRoots.
+		// TouchedRoots only ever names credentials, platform and
+		// projects/<name> -- it reproduces derive_touched_roots exactly and
+		// internal/parity compares it against recordings of that bash
+		// function, so it is never widened. But repo.KindOf has classified
+		// clusters/<name> and hosts/<name> as KindTofu since the kind layer
+		// was added, with no second reader for them: a commit touching only
+		// clusters/beta/main.tf produced no roots from TouchedRoots and was
+		// filed as a noop with HEAD advanced past it. tofuUnitsFor
+		// (render_unit.go's sibling, below) reads the credentials+tofu half
+		// of TouchedUnits instead, which does know about them -- see
+		// TestTouchedUnitsTofuHalfMatchesTouchedRoots (internal/repo) for why
+		// this is a safe swap: for every commit shape the parity corpus
+		// covers, the two produce the identical set.
+		treeTofuUnits, err := d.Git.TreeTofuUnits(ctx, sha)
 		if err != nil {
 			d.Obs.failed(classRepo)
 			return last, applied, noop, fmt.Sprintf("could not read the tree for %s: %v", sha, err), false
 		}
-		roots := repo.TouchedRoots(changedFiles, treeRoots)
+		roots := tofuUnitsFor(changedFiles, treeTofuUnits)
 
-		// The render units are derived separately, from their own tree
-		// listing, because TouchedRoots reproduces the bash's
-		// derive_touched_roots exactly and internal/parity compares it
-		// against recordings of that function. Widening it would change what
-		// the pass plans for commits the corpus already has answers for.
+		// The render units are derived from their own tree listing
+		// (gitDriver.TreeRenderUnits), the tofu half's sibling -- both read
+		// repo.TouchedUnits and neither touches repo.TouchedRoots, which
+		// stays reserved for internal/parity's comparison against the bash.
 		treeRenderUnits, err := d.Git.TreeRenderUnits(ctx, sha)
 		if err != nil {
 			return last, applied, noop, fmt.Sprintf("could not read the render units for %s: %v", sha, err), false

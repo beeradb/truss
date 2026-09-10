@@ -761,6 +761,14 @@ type fakeGit struct {
 	// TreeRoots reproduces the bash's exact ls-tree and must not widen.
 	TreeRenderUnitsByCommit map[string][]string
 
+	// TreeTofuUnitsByCommit is the credentials/tofu-unit listing runCommitLoop
+	// now feeds repo.TouchedUnits from, in place of TreeRootsByCommit --
+	// separate for the same reason TreeRenderUnitsByCommit is: TreeRoots
+	// itself must not widen. Most fixtures leave this nil (an empty tree),
+	// which is correct whenever the scenario names its unit directly in
+	// ChangedByCommit rather than relying on the shared-input branch.
+	TreeTofuUnitsByCommit map[string][]string
+
 	// TreeFSBySha is the tree a commit exposes to inventory.Load. An absent
 	// entry is an EMPTY filesystem rather than an error, which is what a
 	// deployment that has not adopted the inventory looks like -- the pass
@@ -863,6 +871,10 @@ func (g *fakeGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 
 func (g *fakeGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
 	return g.TreeRenderUnitsByCommit[sha], nil
+}
+
+func (g *fakeGit) TreeTofuUnits(ctx context.Context, sha string) ([]string, error) {
+	return g.TreeTofuUnitsByCommit[sha], nil
 }
 
 func (g *fakeGit) TreeFS(ctx context.Context, sha string) (fs.FS, error) {

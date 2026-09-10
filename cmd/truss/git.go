@@ -70,6 +70,15 @@ type gitDriver interface {
 	// corpus already has answers for.
 	TreeRenderUnits(ctx context.Context, sha string) ([]string, error)
 
+	// TreeTofuUnits lists every credentials/tofu unit present in a commit's
+	// tree: "credentials", "platform", and every clusters/<name>,
+	// hosts/<name> and projects/<name> directory. It is separate from
+	// TreeRoots for the same reason TreeRenderUnits is: TreeRoots reproduces
+	// the bash's exact listing and internal/parity compares it against
+	// recordings of that; this is the tree half of repo.TouchedUnits, which
+	// runCommitLoop now derives tofu work from instead of repo.TouchedRoots.
+	TreeTofuUnits(ctx context.Context, sha string) ([]string, error)
+
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
 
@@ -245,6 +254,44 @@ func (g execGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, err
 	var units []string
 	for _, line := range splitLines(out) {
 		if kind, ok := repo.KindOf(line); ok && kind == repo.KindRender {
+			units = append(units, line)
+		}
+	}
+	return units, nil
+}
+
+// TreeTofuUnits lists the tofu units present in sha's own tree: every
+// clusters/<name>, hosts/<name>, platform and projects/<name> directory.
+//
+// ⚠️ "credentials" IS DELIBERATELY NOT LISTED HERE, THE SAME AS TreeRoots.
+// Both repo.TouchedRoots and repo.TouchedUnits add "credentials" only when a
+// changed file matches credentials/ -- never from its presence in the tree
+// -- so listing it here would replan it on every shared-input commit
+// (modules/, providers.allow, .opentofu-version) that TouchedRoots would
+// not, breaking the equivalence internal/parity and TestTouchedUnitsTofu-
+// HalfMatchesTouchedRoots (internal/repo) both hold it to.
+//
+// ⚠️ IT IS -r, THE SAME REASON TreeRenderUnits IS -- NOT BECAUSE THE
+// EXISTING TWO PREFIXES NEEDED IT (plain -d already lists "platform" and
+// "projects/<name>" correctly, which is why TreeRoots gets away without it),
+// BUT BECAUSE "platform" MATCHES ITSELF DIRECTLY WHILE THE OTHER THREE
+// PREFIXES NEED ONE LEVEL OF CHILDREN, and a future unit kind nested one
+// level deeper would be silently dropped by a non-recursive listing rather
+// than caught. Recursing and asking repo.KindOf about each line keeps the
+// depth question in one place -- the same function the commit diff is
+// matched against -- rather than encoded twice, once in a pathspec and once
+// in KindOf's regexes, where they could disagree.
+func (g execGit) TreeTofuUnits(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "-r", "--name-only", sha, "--", "clusters", "hosts", "platform", "projects"})
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree -d -r %s: %w", sha, err)
+	}
+	var units []string
+	for _, line := range splitLines(out) {
+		if kind, ok := repo.KindOf(line); ok && (kind == repo.KindCredentials || kind == repo.KindTofu) {
 			units = append(units, line)
 		}
 	}

@@ -150,3 +150,82 @@ func TestAFileDirectlyUnderAUnitPrefixIsNotAUnit(t *testing.T) {
 		}
 	}
 }
+
+// TestTouchedUnitsTofuHalfMatchesTouchedRoots is the property that makes
+// runCommitLoop's swap from repo.TouchedRoots to the credentials+tofu half
+// of repo.TouchedUnits safe: for a commit whose changed files and tree
+// contain no clusters/<name>, no hosts/<name>, and nothing that matches
+// unitSharedInput but not sharedInput (inventory/, .kustomize-version,
+// .ansible-version -- the three patterns unitSharedInput has and
+// sharedInput does not), the two functions must return the identical root
+// set, in the identical order.
+//
+// This is what internal/parity's 43 recorded scenarios have always been, so
+// pinning it here is what lets the swap happen without widening what the
+// bash-parity corpus already answers for. Widening unitSharedInput later
+// without touching this test would be the failure mode this guards against.
+func TestTouchedUnitsTofuHalfMatchesTouchedRoots(t *testing.T) {
+	cases := []struct {
+		name    string
+		changed []string
+		tree    []string // fed to both TouchedRoots and TouchedUnits verbatim
+	}{
+		{
+			name:    "a single project root",
+			changed: []string{"projects/recipes/main.tf"},
+		},
+		{
+			name:    "platform and a project together",
+			changed: []string{"platform/main.tf", "projects/recipes/main.tf"},
+		},
+		{
+			name:    "credentials alone",
+			changed: []string{"credentials/cloudflare.tf"},
+		},
+		{
+			name:    "credentials with a project",
+			changed: []string{"credentials/cloudflare.tf", "projects/recipes/main.tf"},
+		},
+		{
+			name:    "a shared tofu input plans the whole tree",
+			changed: []string{"modules/vpc/main.tf"},
+			tree:    []string{"platform", "projects/alpha", "projects/beta"},
+		},
+		{
+			name:    "the provider allowlist is a shared input",
+			changed: []string{"providers.allow"},
+			tree:    []string{"platform"},
+		},
+		{
+			name:    "the pinned opentofu version is a shared input",
+			changed: []string{".opentofu-version"},
+			tree:    []string{"projects/alpha"},
+		},
+		{
+			name:    "a shared input alongside credentials",
+			changed: []string{"modules/vpc/main.tf", "credentials/cloudflare.tf"},
+			tree:    []string{"platform"},
+		},
+		{
+			name:    "a path outside every root or unit",
+			changed: []string{"docs/README.md"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantRoots := TouchedRoots(c.changed, c.tree)
+
+			var got []string
+			for _, u := range TouchedUnits(c.changed, c.tree) {
+				if u.Kind == KindCredentials || u.Kind == KindTofu {
+					got = append(got, u.Path)
+				}
+			}
+
+			if !reflect.DeepEqual(got, wantRoots) {
+				t.Fatalf("credentials+tofu half of TouchedUnits(%v, %v) = %v, want TouchedRoots' answer %v", c.changed, c.tree, got, wantRoots)
+			}
+		})
+	}
+}

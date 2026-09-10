@@ -904,31 +904,76 @@ gap is here. Closing it means decoding `rules[].type` in
 `internal/forge/rulesets.go` and adding the sibling of `CheckRulesets` for a
 non-branch ref, verified against a repository that actually has the ruleset.
 
-## The kind layer classifies directories the pass never executes
+## ~~The kind layer classifies directories the pass never executes~~ (closed for tofu)
 
 `internal/repo/units.go` defines `KindTofu` for `clusters/<name>` and
 `hosts/<name>`, and `KindAnsible` for `ansible/plays/<name>`, and its own
 doc says a kind is "how the applier treats it: what binary renders or plans
-it". `runCommitLoop` reads only `KindRender` out of `TouchedUnits`
-(`renderUnitsFor`, `cmd/truss/render_unit.go`); tofu work still comes from
+it". `runCommitLoop` used to read only `KindRender` out of `TouchedUnits`
+(`renderUnitsFor`, `cmd/truss/render_unit.go`); tofu work came from
 `TouchedRoots` alone, which only ever names `credentials`, `platform` and
-`projects/<name>`. So a commit touching only `clusters/beta/main.tf` is
-recorded as a noop and HEAD advances past it, while this repository's own
-kind layer says that path is an OpenTofu root that should have been planned
-and applied.
+`projects/<name>`. So a commit touching only `clusters/beta/main.tf` was
+recorded as a noop and HEAD advanced past it, while the kind layer said that
+path was an OpenTofu root that should have been planned and applied.
 
-⚠️ **The behaviour is unchanged from before the kind layer existed — what is
-new is a comment claiming otherwise.** `KindTofu` covering clusters and hosts
-was added to `KindOf` without the pass gaining a second reader for it, so the
-doc comment now describes a capability the code does not have.
+⚠️ **The behaviour was unchanged from before the kind layer existed — what
+was new was a comment claiming otherwise.** `KindTofu` covering clusters and
+hosts was added to `KindOf` without the pass gaining a second reader for it,
+so the doc comment described a capability the code did not have.
 
-`TouchedRoots` cannot simply be widened to cover them: `internal/parity`
-compares it, byte for byte, against recordings of the bash it ports, and
-widening it changes what the pass plans for commits the corpus already has
-answers for. Closing this needs a second consumer of `TouchedUnits`'s
-`KindTofu` entries — planning and applying clusters and hosts the way
-`applyOneRoot` already does for `TouchedRoots`'s entries — not a change to
-`TouchedRoots` itself.
+**What closed it.** `TouchedRoots` was not widened — `internal/parity`
+compares it, byte for byte, against recordings of the bash it ports, so it
+stays exactly as it was. Instead `runCommitLoop` (`cmd/truss/apply_cmd.go`)
+now derives tofu work from `tofuUnitsFor`, the credentials+tofu half of
+`repo.TouchedUnits` — the same function `renderUnitsFor` already read the
+render half of — fed from the new `gitDriver.TreeTofuUnits`
+(`cmd/truss/git.go`, `execGit`'s sibling of `TreeRenderUnits`) rather than
+`TreeRoots`. A commit touching only `clusters/beta/main.tf` or
+`hosts/dev-beta/main.tf` is now planned and applied like any other root.
+
+The swap is safe because, for every commit shape `internal/parity`'s 43
+recorded scenarios cover, the credentials+tofu half of `TouchedUnits` and
+`TouchedRoots` return the identical set in the identical order: none of the
+scenarios carry a `clusters/` or `hosts/` directory, and none touch a path
+that is a shared input for units (`inventory/`, `.kustomize-version`,
+`.ansible-version`) but not for roots.
+`TestTouchedUnitsTofuHalfMatchesTouchedRoots`
+(`internal/repo/units_test.go`) pins that equivalence directly.
+
+`internal/parity` did go red once while building this, but not from the two
+functions disagreeing: `internal/parity/fakebin`'s `git ls-tree` shim read
+the sha at a fixed offset from the `ls-tree` argument, a position that
+happens to be correct for `TreeRoots`' two-flag shape (`-d --name-only`) and
+wrong for the three-flag shape `TreeRenderUnits` already used and
+`TreeTofuUnits` now also uses (`-d -r --name-only`). The wrong sha missed
+the scenario's declared tree and fell back to the shim's hard-coded default,
+which happened to still satisfy every scenario that only exercised render
+units (filtered to `KindRender` the wrong answer and the right one were both
+empty) — until the scenario named for exactly this case, whose declared
+tree carries a third tofu root the default does not, made the wrong answer
+visibly wrong. Per AGENTS.md, the fixture was the bug: fixed in the shim by
+finding the sha relative to the `--` pathspec separator instead of a fixed
+offset, which is correct for all three shapes.
+No entry in `internal/parity/divergences.go` was needed for `TouchedRoots`
+vs. `TouchedUnits` itself — the 43 recorded scenarios agree with both
+functions once the shim answers the right question.
+
+`TestAClustersRootIsPlannedAndApplied` and `TestAHostsRootIsPlannedAndApplied`
+(`cmd/truss/apply_clusters_hosts_test.go`) reproduce the original defect —
+both failed with `tofu applied []` against the unfixed code — and pin the
+fix, alongside a multi-root ordering test, a shared-input test, and a noop
+regression test. `TestExecGitTreeTofuUnitsAgainstARealRepo`
+(`cmd/truss/git_tofu_units_test.go`) is the direct test of the new tree
+listing against a real git binary.
+
+⚠️ **`KindAnsible` is still an unwidened gap.** `runCommitLoop` has no
+reader for `ansible/plays/<name>` at all — nothing plans or applies an
+ansible unit, so the kind layer's own claim ("how the applier treats it:
+what binary renders or plans it") is still false for that one kind.
+`KindAnsible`'s own doc comment gives the reason it cannot simply reuse
+`applyOneRoot`: ansible has no plan digest, because CI cannot reach the
+hosts a play would run against, so whatever closes this needs a different
+gate shape than the digest gate tofu and render both use.
 
 ## ~~The two sides of the render digest do not share a derivation~~ (closed)
 

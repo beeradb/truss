@@ -146,9 +146,31 @@ func git(f fixtures, args []string) int {
 		}
 		return 0
 	case has(args, "ls-tree"):
-		// `ls-tree -d --name-only <sha> -- platform projects/`
-		i := index(args, "ls-tree")
-		sha := args[i+3]
+		// The sha sits immediately before the "--" pathspec separator,
+		// whatever the flag count -- execGit shapes this call three
+		// different ways (TreeRoots: `-d --name-only`; TreeRenderUnits and
+		// TreeTofuUnits: `-d -r --name-only`, cmd/truss/git.go), and a fixed
+		// offset from "ls-tree" read the flag itself as the sha the moment a
+		// second one (`-r`) was added.
+		//
+		// ⚠️ THIS WAS WRONG FOR TreeRenderUnits TOO, AND NOTHING CAUGHT IT.
+		// The wrong "sha" missed f.Tree and fell back to the hard-coded
+		// default (platform, projects/recipes) -- which, filtered to
+		// KindRender, is empty, so no recorded scenario that only exercised
+		// render ever disagreed. Filtered to KindTofu (TreeTofuUnits) both
+		// default entries pass the filter, so the wrong answer looked like a
+		// plausible one instead of an empty one: it took a scenario whose
+		// declared tree carried a THIRD tofu root to surface it, because
+		// only then did the default and the real answer disagree in a way
+		// downstream filtering could not hide. Found by
+		// test_shared_input_change_plans_and_applies_every_root_in_the_tree
+		// going red the moment TreeTofuUnits started asking `-r` questions.
+		sep := index(args, "--")
+		if sep < 1 {
+			fmt.Fprintln(os.Stderr, "fakebin: ls-tree call carries no -- pathspec separator")
+			return 1
+		}
+		sha := args[sep-1]
 		roots, ok := f.Tree[sha]
 		if !ok {
 			// The roots the harness creates on disk, matching the
