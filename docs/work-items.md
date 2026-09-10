@@ -999,9 +999,8 @@ about the fleet; and a **frozen** host is skipped and named where a
 **decommissioned** one is invisible — absent on purpose is the one absence
 that must not appear on the daily list, or the list stops being read.
 
-**Still open:** `ansible-playbook` is not in the applier's image (below),
-and `truss_ansible_changed_tasks` / `truss_ansible_unconverged` are logged
-rather than pushed as metrics.
+**Still open:** `truss_ansible_changed_tasks` /
+`truss_ansible_unconverged` are logged rather than pushed as metrics.
 
 **Built 2026-09-10, wired the same day:** `internal/ansible.Runner`
 drives `ansible-playbook` — `Check` in check mode, `Apply` for real — the
@@ -1027,17 +1026,34 @@ exists. `internal/gates`' own import allowlist (`fmt`, `strings`, `time` —
 no `sort`) is unchanged; the gate builds its lists in the order its caller
 hands them rather than sorting.
 
-**What wiring still needs:**
+✅ **`ansible-playbook` is in the applier's image since 2026-09-10** —
+`ansible-core` pinned by the root `ansible-version` file, collections pinned
+one per line in `ansible-collections`, both required build-args in
+`release.yml` the same way `KUSTOMIZE_VERSION` is. `ansibleBin` reads
+`ANSIBLE_BIN` and defaults to `/usr/local/bin/ansible-playbook`, which is now
+a real symlink into the venv.
 
-- **`ansible-playbook` in the applier's image.** Nothing installs it today;
-  `internal/ansible.Runner.Bin` has no default for the same reason
-  `render.Runner.Bin` does not — a version the two sides of a comparison
-  might disagree about has to be pinned in the image, not resolved from
-  whatever is first on `PATH`, though here there is no second side to agree
-  with, only the reviewed diff. `ansibleBin` reads `ANSIBLE_BIN` and
-  defaults to `/usr/local/bin/ansible-playbook`, which nothing puts there
-  yet — so a deployment that commits a play today gets an exec failure,
-  which is fail-closed and honest but not yet installable.
+⚠️ **The pin is weaker than tofu's and kustomize's, said plainly in the
+Dockerfile rather than implied.** Those two are checksum-verified because a
+digest gate has two sides that must agree about the tool; a play has no
+second side, so what the pin buys here is a reproducible image, not agreement
+between two parties. `pip` still resolves ansible-core's transitive
+dependencies unpinned; closing that needs a `--require-hashes` requirements
+file per architecture, because `cryptography` ships arch-specific wheels.
+
+⚠️ **`openssh-client` is installed and it is not optional.** Ansible's default
+connection plugin execs the local `ssh` binary rather than speaking SSH
+itself, so without it every play fails at the first host with an error naming
+no cause anyone can act on.
+
+⚠️ **A platform-side `.ansible-version` would be a claim nothing enforces.**
+`internal/repo`'s `unitSharedInput` lists it, so touching it re-plans every
+unit — but the ansible the applier runs comes from its own image, pinned in
+this repository. If a consumer writes that file expecting it to select a
+version, nothing reads it. Either the applier grows a check that its image's
+version matches, or the file should not exist; today neither is true.
+
+**What wiring still needs:**
 - **The applier holding a tailnet identity.** Reaching a host to configure
   it needs network access to that host, which the applier does not have
   today — it reaches a forge and a ledger bucket, not a private network.

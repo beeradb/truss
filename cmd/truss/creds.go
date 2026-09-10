@@ -69,6 +69,26 @@ const (
 	itemTailscale     = "tailscale-api-key"
 	fieldTailscaleKey = "password"
 	fieldTailscaleNet = "tailnet"
+
+	// ⚠️ A ROOT CREDENTIAL, NOT A MINTED ONE, AND THE TEST THAT DECIDES
+	// THAT IS docs/credentials.md's: a credential is a root when no API can
+	// mint it. Hetzner Cloud issues project API tokens from the console
+	// only -- there is no endpoint that creates one -- so this cannot be
+	// rotated by anything truss runs, and it belongs in the consumer's
+	// expiry table with a real date beside it like every other root.
+	//
+	// Optional, the same shape as the two above: a consumer with no Hetzner
+	// project mounts nothing, and requiring it would stop every other
+	// deployment on upgrade.
+	//
+	// ⚠️ HCLOUD_TOKEN IS THE NAME THE PROVIDER READS FROM THE ENVIRONMENT,
+	// which is why it is exported rather than passed as a TF_VAR_. Same
+	// reasoning as the tailscale pair: there is one hcloud provider in a
+	// root, so an environment variable cannot silently re-authenticate a
+	// second one. Where the github provider has two -- the App and the PAT
+	// -- and GITHUB_TOKEN would capture both.
+	itemHetzner       = "hetzner-api"
+	fieldHetznerToken = "credential"
 )
 
 // loadLedgerConfig builds a ledger.Config from the gcs-ledger item and the

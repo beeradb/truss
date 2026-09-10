@@ -398,3 +398,58 @@ func TestTheTailscaleCredentialIsOptionalAndUsesTheProvidersOwnNames(t *testing.
 		}
 	})
 }
+
+// TestTheHetznerCredentialIsOptionalAndUsesTheProvidersOwnName is the
+// tailscale test's sibling for the machines themselves, and it exists for
+// the same two reasons: the credential must be OPTIONAL, so a deployment
+// with no Hetzner project is not stopped on upgrade by a credential it will
+// never mount, and it must reach tofu under the provider's own environment
+// name rather than as a TF_VAR_, which is safe here for the identical reason
+// -- one hcloud provider per root, so an environment variable cannot
+// silently re-authenticate a second one.
+//
+// ⚠️ THIS ONE IS A ROOT CREDENTIAL, WHICH THE TWO BESIDE IT ARE NOT.
+// docs/credentials.md's test is whether an API can mint it, and Hetzner
+// Cloud issues project tokens from the console only. So nothing truss runs
+// can rotate this, and it belongs in the consumer's expiry table with a real
+// date. Nothing in this test can check that -- the table is the consumer's
+// data -- which is exactly why it is written down here beside the code that
+// reads the item.
+func TestTheHetznerCredentialIsOptionalAndUsesTheProvidersOwnName(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("an unmounted hetzner token was fatal: %v", err)
+		}
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "HCLOUD_") {
+				t.Fatalf("a Hetzner project nobody configured reached tofu: %s", strings.SplitN(kv, "=", 2)[0])
+			}
+		}
+	})
+
+	t.Run("present", func(t *testing.T) {
+		dir, write := testSecretsDir(t)
+		writeGitHubAppSecret(t, write)
+		write("hetzner-api", "credential", "hcloud-fixture-token")
+
+		d := applyDeps{Dir: dir, PATH: "/usr/bin", HOME: "/root", Token: "gh-fixture"}
+		env, err := buildBaseEnv(d, d.Token)
+		if err != nil {
+			t.Fatalf("buildBaseEnv: %v", err)
+		}
+		var got string
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, "HCLOUD_TOKEN="); ok {
+				got = v
+			}
+		}
+		if got != "hcloud-fixture-token" {
+			t.Fatalf("HCLOUD_TOKEN = %q, want the mounted value", got)
+		}
+	})
+}
