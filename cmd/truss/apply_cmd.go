@@ -199,7 +199,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	tg, err := loadTelegram(dir)
+	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -554,7 +554,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	}
 
 	report := notify.Report{
-		Subject:           "platform applier",
+		Subject:           defaultAlertSubject,
 		LastSHA:           last,
 		Applied:           appliedCount,
 		Noop:              noopCount,

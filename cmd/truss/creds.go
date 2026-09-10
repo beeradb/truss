@@ -138,7 +138,7 @@ func loadForgeConfig(dir secrets.Dir, repo, baseURL string) (forge.Config, error
 // panics on the first Send. That is not hypothetical: this constructor
 // shipped without it, and every alert would have panicked in production, on
 // the one path whose job is saying something went wrong.
-func loadTelegram(dir secrets.Dir) (notify.Telegram, error) {
+func loadTelegram(dir secrets.Dir, baseURL string) (notify.Telegram, error) {
 	token, err := dir.Field(itemTelegram, fieldTelegramBotToken)
 	if err != nil {
 		return notify.Telegram{}, err
@@ -154,6 +154,7 @@ func loadTelegram(dir secrets.Dir) (notify.Telegram, error) {
 	return notify.Telegram{
 		BotToken: token,
 		ChatID:   chatID,
+		BaseURL:  baseURL,
 		HTTP:     &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }

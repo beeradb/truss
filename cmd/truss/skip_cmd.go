@@ -9,6 +9,7 @@ import (
 
 	"github.com/beeradb/truss/internal/config"
 	"github.com/beeradb/truss/internal/ledger"
+	"github.com/beeradb/truss/internal/secrets"
 )
 
 // envSkipConfirm is the confirm-by-naming environment variable, following
@@ -104,6 +105,36 @@ func cmdSkip(ctx context.Context, args []string, getenv func(string) string, std
 	// leaves an explained commit behind (applied/<sha> already says
 	// skipped) rather than an unexplained jump (HEAD past a commit with no
 	// record of why at all).
+	// ⚠️ THE ANNOUNCEMENT COMES BEFORE THE SKIP, AND A SKIP THAT CANNOT BE
+	// ANNOUNCED DOES NOT HAPPEN.
+	//
+	// docs/threat-model.md says of the one existing escape hatch that an
+	// operator "can never do it quietly, which is the other point", and
+	// docs/operations.md calls it the only one. This command is a second
+	// escape hatch and a narrower one -- it is aimed at a single commit,
+	// where turning protection off is all-or-nothing -- so the quietness
+	// property has to be earned rather than inherited.
+	//
+	// Sending first is what earns it. If the alert goes out and the skip
+	// then fails, somebody investigates a skip that did not happen, which
+	// costs a minute. If the skip were performed first and the alert failed,
+	// a commit the applier refused would have been walked past with nothing
+	// anywhere saying so -- and the ledger record alone does not count,
+	// because nothing reads it unless a person already suspects something.
+	dir := secrets.Dir{Root: cfg.SecretsDir}
+	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
+	if err != nil {
+		fmt.Fprintf(stderr, "skip: could not load the alert credentials: %v\n", err)
+		return 2
+	}
+	announce := fmt.Sprintf("%s: SKIPPED %s by hand -- %s", defaultAlertSubject, sha, trimmedReason)
+	if err := tg.Send(ctx, announce); err != nil {
+		fmt.Fprintf(stderr, "skip: refusing -- could not announce the skip (%v). "+
+			"A skip nobody is told about is the one thing this command must not be, so nothing has been written. "+
+			"Fix the alert transport and run it again.\n", err)
+		return 1
+	}
+
 	if err := journal.PutSkipped(ctx, sha, trimmedReason); err != nil {
 		fmt.Fprintf(stderr, "skip: could not write the skipped record for %s: %v\n", sha, err)
 		return 2

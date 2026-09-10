@@ -11,7 +11,7 @@ import (
 // present and HEAD parked somewhere else -- the state every guard test
 // below starts from, so each test can violate exactly one guard and leave
 // every other guard satisfied.
-func skipFixture(t *testing.T, sha string) (*fakeLedger, func(overrides map[string]string) func(string) string) {
+func skipFixture(t *testing.T, sha string) (*fakeLedger, *fakeTelegram, func(overrides map[string]string) func(string) string) {
 	t.Helper()
 	dir, write := testSecretsDir(t)
 	fl := newFakeLedger(t, "state-bucket")
@@ -19,16 +19,28 @@ func skipFixture(t *testing.T, sha string) (*fakeLedger, func(overrides map[stri
 	fl.put("failed/"+sha, []byte(`{"reason":"tofu apply failed for platform","at":"2026-09-08T12:30:45Z"}`))
 	fl.put("head", []byte("someotherhead"))
 
+	// skip announces before it acts, so the fixture needs somewhere for the
+	// announcement to land. Without the base-URL override this suite would
+	// post to the real Telegram on every run -- the exact bug the Cloudflare
+	// probe had before it grew one.
+	write(itemTelegram, fieldTelegramBotToken, "fake-bot-token")
+	write(itemTelegram, fieldTelegramChatID, "-100200300")
+	ft := newFakeTelegram(t)
+
 	workdir := t.TempDir()
 	envFn := func(overrides map[string]string) func(string) string {
-		return testFullEnv(dir.Root, workdir, overrides)
+		all := map[string]string{"TELEGRAM_API_BASE_URL": ft.srv.URL}
+		for k, v := range overrides {
+			all[k] = v
+		}
+		return testFullEnv(dir.Root, workdir, all)
 	}
-	return fl, envFn
+	return fl, ft, envFn
 }
 
 func TestSkipHappyPathAdvancesHeadAndWritesRecord(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": sha})
 
 	var stdout, stderr bytes.Buffer
@@ -57,7 +69,7 @@ func TestSkipHappyPathAdvancesHeadAndWritesRecord(t *testing.T) {
 
 func TestSkipRefusesMissingReason(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": sha})
 
 	var stdout, stderr bytes.Buffer
@@ -67,7 +79,7 @@ func TestSkipRefusesMissingReason(t *testing.T) {
 
 func TestSkipRefusesWhitespaceOnlyReason(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": sha})
 
 	var stdout, stderr bytes.Buffer
@@ -114,7 +126,7 @@ func TestSkipRefusesWhenShaIsAlreadyHead(t *testing.T) {
 
 func TestSkipRefusesWithoutTheConfirmationEnvVar(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	env := envFn(nil) // TRUSS_SKIP_I_UNDERSTAND absent
 
 	var stdout, stderr bytes.Buffer
@@ -124,7 +136,7 @@ func TestSkipRefusesWithoutTheConfirmationEnvVar(t *testing.T) {
 
 func TestSkipRefusesWhenConfirmationEnvVarNamesTheWrongSha(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": "someothersha"})
 
 	var stdout, stderr bytes.Buffer
@@ -138,7 +150,7 @@ func TestSkipRefusesWhenConfirmationEnvVarNamesTheWrongSha(t *testing.T) {
 // behind, never an unexplained jump.
 func TestSkipWritesTheRecordBeforeAdvancingHead(t *testing.T) {
 	sha := "deadbeef"
-	fl, envFn := skipFixture(t, sha)
+	fl, _, envFn := skipFixture(t, sha)
 	fl.failPutOn("head")
 	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": sha})
 
@@ -174,5 +186,63 @@ func assertGuardRefused(t *testing.T, fl *fakeLedger, sha string, code int, stde
 	}
 	if head, _ := fl.get("head"); string(head) != "someotherhead" {
 		t.Errorf("head = %q, want it unchanged at %q", head, "someotherhead")
+	}
+}
+
+// TestSkipAnnouncesBeforeItActs pins the order, not just the fact. The
+// announcement is what makes this command survivable: threat-model.md says of
+// the existing escape hatch that an operator "can never do it quietly", and
+// skip is a second, narrower hatch aimed at one commit.
+func TestSkipAnnouncesBeforeItActs(t *testing.T) {
+	sha := "deadbeef"
+	fl, ft, envFn := skipFixture(t, sha)
+	env := envFn(map[string]string{"TRUSS_SKIP_I_UNDERSTAND": sha})
+
+	var stdout, stderr bytes.Buffer
+	code := runEnv(context.Background(), []string{"skip", sha, "--reason", "plan can never apply"}, env, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	}
+	ft.mu.Lock()
+	sent := ft.last
+	ft.mu.Unlock()
+	if sent == "" {
+		t.Fatal("nothing was announced; a skip nobody is told about is the one thing this command must not be")
+	}
+	for _, want := range []string{sha, "SKIPPED", "plan can never apply"} {
+		if !strings.Contains(sent, want) {
+			t.Errorf("announcement = %q, want it to contain %q", sent, want)
+		}
+	}
+	if _, ok := fl.get("applied/" + sha); !ok {
+		t.Error("the skip was announced but not recorded")
+	}
+}
+
+// TestSkipRefusesWhenItCannotAnnounce is the half that makes the ordering
+// mean something. If the alert cannot be sent, nothing is written and HEAD
+// does not move: a skip that could not be announced did not happen.
+func TestSkipRefusesWhenItCannotAnnounce(t *testing.T) {
+	sha := "deadbeef"
+	fl, _, envFn := skipFixture(t, sha)
+	// A host that cannot resolve, so Send fails at connect. A reserved
+	// .invalid name rather than a loopback address: scripts/leakscan refuses
+	// an IP literal anywhere in this repository, and cannot tell a test's
+	// black hole from somebody's real cluster.
+	env := envFn(map[string]string{
+		"TRUSS_SKIP_I_UNDERSTAND": sha,
+		"TELEGRAM_API_BASE_URL":   "http://truss-skip-test-unreachable.invalid:1",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runEnv(context.Background(), []string{"skip", sha, "--reason", "plan can never apply"}, env, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr.String())
+	}
+	if _, ok := fl.get("applied/" + sha); ok {
+		t.Error("a record was written even though the skip could not be announced")
+	}
+	if head, _ := fl.get("head"); string(head) != "someotherhead" {
+		t.Errorf("head = %q, want it unmoved", head)
 	}
 }
