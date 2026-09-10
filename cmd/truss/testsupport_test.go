@@ -769,6 +769,13 @@ type fakeGit struct {
 	// ChangedByCommit rather than relying on the shared-input branch.
 	TreeTofuUnitsByCommit map[string][]string
 
+	// TreeAnsibleUnitsByCommit is the play listing, the third of the three
+	// tree listings the driver keeps apart. Nil in almost every fixture,
+	// which is what a tree with no ansible/plays/ directory looks like --
+	// and that is the state every scenario predating the ansible kind is in,
+	// so leaving it nil must keep those scenarios byte-identical.
+	TreeAnsibleUnitsByCommit map[string][]string
+
 	// TreeFSBySha is the tree a commit exposes to inventory.Load. An absent
 	// entry is an EMPTY filesystem rather than an error, which is what a
 	// deployment that has not adopted the inventory looks like -- the pass
@@ -875,6 +882,10 @@ func (g *fakeGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, er
 
 func (g *fakeGit) TreeTofuUnits(ctx context.Context, sha string) ([]string, error) {
 	return g.TreeTofuUnitsByCommit[sha], nil
+}
+
+func (g *fakeGit) TreeAnsibleUnits(ctx context.Context, sha string) ([]string, error) {
+	return g.TreeAnsibleUnitsByCommit[sha], nil
 }
 
 func (g *fakeGit) TreeFS(ctx context.Context, sha string) (fs.FS, error) {

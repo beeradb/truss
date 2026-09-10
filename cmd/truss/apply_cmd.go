@@ -71,7 +71,19 @@ type applyDeps struct {
 	// from NewTofu because the two kinds are different executors with
 	// different environments -- a render gets no credentials at all, since
 	// rendering reads nothing but the tree.
-	NewRender   renderFactory
+	NewRender renderFactory
+	// NewAnsible builds the ansible-playbook runner for a play. Separate
+	// from NewRender and NewTofu for the same reason those are separate
+	// from each other: three kinds, three executors, three environments --
+	// and this one's is the narrowest, because a play's tasks run on
+	// somebody else's machine (see ansibleEnv).
+	NewAnsible ansibleFactory
+	// Tailnet lists the devices on the tailnet, the live evidence half of
+	// the ansible target gate. Nil means no tailscale credential is
+	// mounted, which runAnsibleUnits refuses on rather than treating as
+	// "no unknown devices" -- a gate with no evidence is a gate that
+	// passes.
+	Tailnet     tailnetLister
 	Now         func() time.Time
 	Stderr      io.Writer
 	VaultConfig secrets.KVConfig
@@ -282,6 +294,19 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		return 1
 	}
 
+	// ⚠️ A MISSING TAILSCALE CREDENTIAL IS NOT AN ERROR HERE, AND IS ALSO
+	// NOT FORGIVEN LATER. Most deployments have no tailnet and no plays, and
+	// demanding the credential at startup would stop them on upgrade for a
+	// feature they never asked for. So the client is nil, and
+	// runAnsibleUnits refuses on nil the moment a play exists -- the refusal
+	// lands on the commit that introduces a play rather than on every pass
+	// of every deployment, which is where it is both correct and actionable.
+	tsClient, err := loadTailnetClient(dir, getenv("TAILSCALE_API_BASE_URL"))
+	if err != nil {
+		fmt.Fprintf(stderr, "refusing to start: %v\n", err)
+		return 1
+	}
+
 	deps := applyDeps{
 		Cfg:      cfg,
 		Dir:      dir,
@@ -293,6 +318,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: stderr, Env: env}
 		},
 		NewRender:         newRenderFactory(getenv, stderr),
+		NewAnsible:        newAnsibleFactory(getenv, stderr),
 		Now:               time.Now,
 		Stderr:            stderr,
 		VaultConfig:       vcfg,
@@ -301,6 +327,15 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		HOME:              getenv("HOME"),
 		HandoffSocket:     handoffSocket,
 		Handoff:           handoff.Send,
+	}
+	// Assigned separately rather than in the literal: a nil *tailnet.Client
+	// stored in a non-nil interface is not nil, and runAnsibleUnits' whole
+	// refusal turns on `d.Tailnet == nil`. Writing `Tailnet: tsClient` with
+	// tsClient a typed nil pointer would sail past that check and then
+	// panic, or worse, return an empty device list that reads as "no
+	// unknown devices".
+	if tsClient != nil {
+		deps.Tailnet = tsClient
 	}
 
 	result := runApplyPass(ctx, deps, last)
@@ -937,6 +972,17 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		}
 		roots := tofuUnitsFor(changedFiles, treeTofuUnits)
 
+		// The plays are derived from their own tree listing, the third
+		// sibling of the same pattern -- see ansibleUnitsFor on why the
+		// three listings partition repo.TouchedUnits rather than filtering
+		// one combined set.
+		treeAnsibleUnits, err := d.Git.TreeAnsibleUnits(ctx, sha)
+		if err != nil {
+			d.Obs.failed(classRepo)
+			return last, applied, noop, fmt.Sprintf("could not read the plays at %s: %v", sha, err), false
+		}
+		plays := ansibleUnitsFor(changedFiles, treeAnsibleUnits)
+
 		// The render units are derived from their own tree listing
 		// (gitDriver.TreeRenderUnits), the tofu half's sibling -- both read
 		// repo.TouchedUnits and neither touches repo.TouchedRoots, which
@@ -947,7 +993,17 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		}
 		renderUnits := renderUnitsFor(changedFiles, treeRenderUnits)
 
-		if len(roots) == 0 && len(renderUnits) == 0 {
+		// ⚠️ plays IS COUNTED HERE, AND FORGETTING IT WAS THE WHOLE DEFECT
+		// THIS KIND EXISTS TO CLOSE. repo.KindOf classified ansible/plays/
+		// <name> as KindAnsible from the day the kind layer landed, with no
+		// executor reading it: a commit touching only ansible/plays/dev-vm/
+		// produced no roots and no render units, was logged as "touches no
+		// root", and had HEAD advanced past it -- so the machine it was
+		// meant to configure was never configured, and nothing said so.
+		// Same shape as the clusters/ and hosts/ gap above it, and the same
+		// shape as the commit-gate ordering defect before that: a kind the
+		// tree understands and the pass does not.
+		if len(roots) == 0 && len(renderUnits) == 0 && len(plays) == 0 {
 			d.logf("noop: %s touches no root", sha)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
 				d.Obs.ledgerError()
@@ -995,6 +1051,25 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				d.Obs.rootChanged(root, *summary.ResourceChanges)
 			}
 			summaries[root] = summary
+		}
+
+		// ⚠️ PLAYS RUN AFTER EVERY ROOT AND BEFORE EVERY RENDER. The order
+		// between kinds is fixed and compiled in -- credentials, tofu,
+		// ansible, render -- and it is the natural one rather than an
+		// invented one: infrastructure makes the machine, configuration
+		// configures it, delivery ships onto it. Running a play before its
+		// root would configure a host whose cloud resources, DNS record or
+		// tailnet auth key this same commit has not created yet.
+		if len(plays) > 0 {
+			if reason := runAnsibleUnits(ctx, d, d.NewAnsible(ansibleEnv(d)), headSHA, plays); reason != "" {
+				d.Obs.failed(classApply)
+				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+					d.Obs.ledgerError()
+					d.Obs.failed(classLedger)
+					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+				}
+				return last, applied, noop, reason, false
+			}
 		}
 
 		// ⚠️ RENDERS RUN AFTER EVERY ROOT AND BEFORE THE COMMIT IS RECORDED.

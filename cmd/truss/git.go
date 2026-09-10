@@ -79,6 +79,15 @@ type gitDriver interface {
 	// runCommitLoop now derives tofu work from instead of repo.TouchedRoots.
 	TreeTofuUnits(ctx context.Context, sha string) ([]string, error)
 
+	// TreeAnsibleUnits lists every Ansible play present in a commit's tree:
+	// every ansible/plays/<name> directory. Separate from the other two for
+	// the same reason they are separate from TreeRoots -- TreeRoots
+	// reproduces the bash's exact listing and internal/parity compares it
+	// against recordings of that -- and separate from TreeTofuUnits because
+	// the two feed different halves of one repo.TouchedUnits call, so
+	// neither half can ever contain a unit of the other's kind.
+	TreeAnsibleUnits(ctx context.Context, sha string) ([]string, error)
+
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
 
@@ -292,6 +301,33 @@ func (g execGit) TreeTofuUnits(ctx context.Context, sha string) ([]string, error
 	var units []string
 	for _, line := range splitLines(out) {
 		if kind, ok := repo.KindOf(line); ok && (kind == repo.KindCredentials || kind == repo.KindTofu) {
+			units = append(units, line)
+		}
+	}
+	return units, nil
+}
+
+// TreeAnsibleUnits lists the plays present in sha's own tree: every
+// ansible/plays/<name> directory.
+//
+// ⚠️ IT IS -r FOR THE REASON TreeTofuUnits RECORDS, AND HERE IT IS NOT
+// OPTIONAL: "ansible/plays" is two levels above the unit, so a non-recursive
+// listing would return the single line "ansible/plays" -- which repo.KindOf
+// rejects, because a play is ansible/plays/<name>/ and not the directory
+// holding them. The result would be an empty set for every commit, and an
+// empty set here reads as "this commit configures no machine", which is the
+// silent-noop shape this listing exists to close.
+func (g execGit) TreeAnsibleUnits(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "-r", "--name-only", sha, "--", "ansible/plays"})
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree -d -r %s: %w", sha, err)
+	}
+	var units []string
+	for _, line := range splitLines(out) {
+		if kind, ok := repo.KindOf(line); ok && kind == repo.KindAnsible {
 			units = append(units, line)
 		}
 	}

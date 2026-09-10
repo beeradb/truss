@@ -966,15 +966,44 @@ regression test. `TestExecGitTreeTofuUnitsAgainstARealRepo`
 (`cmd/truss/git_tofu_units_test.go`) is the direct test of the new tree
 listing against a real git binary.
 
-⚠️ **`KindAnsible` is still an unwidened gap, and now the gate shape it needs
-exists without being wired to anything.** `runCommitLoop` still has no
-reader for `ansible/plays/<name>` at all — nothing plans or applies an
-ansible unit, so the kind layer's own claim ("how the applier treats it:
-what binary renders or plans it") is still false for that one kind. An
-unwired kind is a claim, not a capability, and it stays one until something
-in `cmd/truss` actually calls the two packages below.
+✅ **`KindAnsible` was wired on 2026-09-10** — `cmd/truss/ansible_unit.go`,
+fed by `gitDriver.TreeAnsibleUnits`, the third of the three tree listings
+that partition `repo.TouchedUnits` by kind. Until then `runCommitLoop` had
+no reader for `ansible/plays/<name>` at all: such a commit derived no roots
+and no render units, was logged as "touches no root", and had HEAD advanced
+past it, so the machine it was meant to configure was never configured and
+the ledger recorded the commit as uneventful. Same defect class as the
+`clusters/` and `hosts/` gap above and the commit-gate ordering defect
+before that — a kind the tree understands and the pass does not.
+`TestACommitTouchingOnlyAPlayIsRunNotNooped` is the reproduction; it was
+watched red with the `len(plays) == 0` term removed from the noop check.
 
-**Built 2026-09-10, deliberately not wired:** `internal/ansible.Runner`
+What the wiring does, per commit: derive the plays, refuse outright if no
+tailscale credential is mounted (no evidence means no gate, and this kind
+has no digest to fall back on), load the head's inventory through
+`gitDriver.TreeFS`, invert `Host.Config` into each play's declared hosts,
+compare the whole managed set against the live device list with
+`tailnet.Reconcile`, then per play: `gates.CheckAnsibleTargets`, a
+`--check` pre-run whose failure refuses before any machine is touched, the
+real run, and a second `--check` whose findings are **named, never
+refused** — a non-idempotent task is a defect in the play, but the run
+already succeeded and the machine is already configured, so failing there
+would wedge the queue behind a change that worked.
+
+Three decisions worth keeping: every play is handed the whole pass's
+`UnknownTagged`, which is what makes "one unknown device refuses every
+play" true by construction rather than by a caller's discipline;
+`Unreachable` is narrowed to each play's own hosts, because an offline host
+is a fact about that host while an undeclared tagged machine is a fact
+about the fleet; and a **frozen** host is skipped and named where a
+**decommissioned** one is invisible — absent on purpose is the one absence
+that must not appear on the daily list, or the list stops being read.
+
+**Still open:** `ansible-playbook` is not in the applier's image (below),
+and `truss_ansible_changed_tasks` / `truss_ansible_unconverged` are logged
+rather than pushed as metrics.
+
+**Built 2026-09-10, wired the same day:** `internal/ansible.Runner`
 drives `ansible-playbook` — `Check` in check mode, `Apply` for real — the
 same shape `render.Runner` and `plan.Runner` use: `Bin` required with no
 default, `Env` the exact child environment (nil means empty, never
@@ -998,20 +1027,17 @@ exists. `internal/gates`' own import allowlist (`fmt`, `strings`, `time` —
 no `sort`) is unchanged; the gate builds its lists in the order its caller
 hands them rather than sorting.
 
-**What wiring needs, none of it started:**
+**What wiring still needs:**
 
-- **A play-to-host mapping**, read from `inventory.Host.Config` (the field
-  is already there — "an ansible unit path, or explicit null" — but nothing
-  inverts it into "this play's declared hosts are every host naming it").
-- **The tailnet sweep's findings**, fed into `AnsibleTargets.Unknown` and
-  `.Unreachable` from `tailnet.Reconcile`'s own `Findings.UnknownTagged` and
-  `.Unreachable` — built, unwired, the same as this.
 - **`ansible-playbook` in the applier's image.** Nothing installs it today;
   `internal/ansible.Runner.Bin` has no default for the same reason
   `render.Runner.Bin` does not — a version the two sides of a comparison
   might disagree about has to be pinned in the image, not resolved from
   whatever is first on `PATH`, though here there is no second side to agree
-  with, only the reviewed diff.
+  with, only the reviewed diff. `ansibleBin` reads `ANSIBLE_BIN` and
+  defaults to `/usr/local/bin/ansible-playbook`, which nothing puts there
+  yet — so a deployment that commits a play today gets an exec failure,
+  which is fail-closed and honest but not yet installable.
 - **The applier holding a tailnet identity.** Reaching a host to configure
   it needs network access to that host, which the applier does not have
   today — it reaches a forge and a ledger bucket, not a private network.
@@ -1024,7 +1050,7 @@ hands them rather than sorting.
 hosts a play would run against, so review is the diff itself
 (`docs/credentials.md`'s precedent for the credentials root) plus the
 target check above — a different gate shape than the digest gate tofu and
-render both use, and now built.
+render both use, and now built and wired.
 
 ## ~~The two sides of the render digest do not share a derivation~~ (closed)
 
