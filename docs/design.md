@@ -224,6 +224,24 @@ Two consequences follow from the same fact:
   applied, and refusing here would make retiring a workload impossible; see
   the threat-model row for deleting a delivery unit.
 
+**Digest-gate exemptions, stated together so "every apply is digest-gated"
+cannot quietly go false one kind at a time:**
+
+| Kind | Digest gate | What is reviewed instead | Why |
+| --- | --- | --- | --- |
+| `credentials` (a `tofu` root) | exempt from the plan digest | the code diff itself | CI cannot plan this root — its state *is* the tokens, so there is nothing CI could read to file a digest against (`docs/credentials.md`) |
+| every other `tofu` root | plan digest | CI's plan hash vs. the applier's own re-plan | a plan is a function of the tree *and* live infrastructure, so an independent re-plan is the only thing that proves nothing moved between review and apply |
+| `render` (a delivery unit) | render digest, no exemption | CI's render hash vs. the applier's own re-render | a render is a function of the tree alone, so any unit CI could not render is a unit that will not render for the applier either |
+| `ansible` (a play) | **no digest at all** | the code diff itself, plus `gates.CheckAnsibleTargets` | CI cannot reach the hosts a play would run against, by the same design that keeps it out of the plan and render tiers — so anything CI could file would be a function of the commit alone, and the commit is already pinned by the merge-provenance gate. A digest here would be a check that cannot fail. What a digest cannot give is supplied by a different gate instead: declared hosts must be non-empty, every declared host must be reachable on the tailnet, and no device may carry the managed tag without an inventory record — refusing the whole pass if one does |
+
+The `ansible` row is the same precedent `credentials` already sets —
+`docs/credentials.md`: *"what a human reviews here is the code diff itself,
+not a plan"* — applied a second time, for a structurally identical reason
+rather than a copy of the same one: both roots have state (tokens; a
+machine's configuration) that CI is not allowed to read or reach. `internal/
+ansible` and `internal/gates.CheckAnsibleTargets` exist; neither is called
+from the pass yet — see `docs/work-items.md`.
+
 Only one of the three ways Helm could get in is actually enforced; the other
 two are a rule the deployment keeps, not a check the applier makes.
 `--enable-helm` is never passed, so a kustomization carrying a `helmCharts`
