@@ -33,9 +33,23 @@ step "go vet";       go vet ./...
 # results -- by default, so a pull request that does not touch go.mod can
 # restore stale results and pass against broken code.
 #
-# TRUSS_REQUIRE_JQ=1 turns the digest differential test's skip into a failure.
-# CI sets it; locally the test skips when jq is absent, which is why CI also
-# runs `jq --version` before this.
+# ⚠️ TRUSS_REQUIRE_JQ=1 IS SET HERE, NOT ONLY IN CI, AND THE DIFFERENCE USED TO
+# MATTER. Without it the digest differential test SKIPS when jq is absent, so a
+# local run made one fewer check than CI -- and it is the check that keeps
+# internal/plan/digest.go byte-identical to the consumer's jq pipeline, the
+# drift that once refused every apply until both sides were changed together.
+# A skip that reads as a pass is the exact shape this project has a standing
+# rule against, and the run before a commit is the worst place to have one.
+#
+# jq is refused rather than worked around: `scripts/toolchain install` puts the
+# pinned 1.7.1 on PATH, so the fix is one command and the alternative is a
+# guard nobody watched.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "check: jq is not on PATH, and the plan-digest differential test cannot run without it." >&2
+  echo "check: run scripts/toolchain install (it pins jq 1.7.1, the version CI uses)." >&2
+  exit 1
+fi
+export TRUSS_REQUIRE_JQ=1
 step "go test";      go test -count=1 ./...
 
 # ⚠️ IT IS THE STANDARD LIBRARY THIS SCANS, NOT DEPENDENCIES -- there are none
