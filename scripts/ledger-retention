@@ -78,8 +78,28 @@ case "$1" in
     # Refuse to lock a bucket with no policy: `lock` on an unset policy is
     # either a no-op or a surprise, and neither is what somebody typing this
     # word wants.
+    #
+    # ⚠️ AND "I COULD NOT ASK" IS NOT "THERE IS NO POLICY". `2>/dev/null ||
+    # true` reported a 403 or a misspelled bucket as "has no retention policy
+    # to lock. Run `set` first" -- advice that would then create a policy on
+    # whatever bucket the name really points at. It fails safe either way, but
+    # the sentence in front of somebody about to open a one-way door has to be
+    # the true one.
+    said=$(mktemp)
+    trap 'rm -f "$said"' EXIT
+    set +e
     period=$(gcloud storage buckets describe "gs://$BUCKET" \
-      --format='value(retention_policy.retention_period)' 2>/dev/null || true)
+      --format='value(retention_policy.retention_period)' 2>"$said"); asked=$?
+    set -e
+    if [ "$asked" -ne 0 ]; then
+      echo "refusing: gs://$BUCKET could not be described (gcloud exit $asked), so whether it" >&2
+      echo "          carries a retention policy is unknown." >&2
+      if [ -s "$said" ]; then
+        echo "          gcloud said:" >&2
+        sed 's/^/            /' "$said" >&2
+      fi
+      exit 1
+    fi
     [ -n "$period" ] || {
       echo "refusing: gs://$BUCKET has no retention policy to lock. Run \`$0 set\` first," >&2
       echo "          then leave it unlocked until check-writes has passed for long enough" >&2
@@ -119,12 +139,31 @@ case "$1" in
   # answer means DO NOT LOCK.
   check-writes)
     need_bucket
-    echo "objects with more than one generation in gs://$BUCKET (any output means DO NOT LOCK):"
+    echo "objects with more than one generation in gs://$BUCKET (a non-zero exit means DO NOT LOCK):"
     # Versioning must be on for this to be able to see anything; if it is
     # off, say so rather than printing nothing and reading as a pass. A
     # check that cannot fail is a claim, not a check.
+    #
+    # ⚠️ AND ITS OWN FAILURE IS NOT "VERSIONING IS OFF". `2>/dev/null || true`
+    # turned a 403, an expired credential and a misspelled bucket into that
+    # one specific and wrong sentence, with the evidence thrown away -- the
+    # same wrong-cause defect the listing half of this subcommand was
+    # rewritten to fix.
+    said=$(mktemp)
+    trap 'rm -f "$said"' EXIT
+    set +e
     versioning=$(gcloud storage buckets describe "gs://$BUCKET" \
-      --format='value(versioning.enabled)' 2>/dev/null || true)
+      --format='value(versioning.enabled)' 2>"$said"); asked=$?
+    set -e
+    if [ "$asked" -ne 0 ]; then
+      echo "  cannot answer: gs://$BUCKET could not be described (gcloud exit $asked)," >&2
+      echo "  so nothing here has been measured." >&2
+      if [ -s "$said" ]; then
+        echo "  gcloud said:" >&2
+        sed 's/^/    /' "$said" >&2
+      fi
+      exit 1
+    fi
     if [ "$versioning" != "True" ]; then
       echo "  cannot answer: versioning is not enabled on gs://$BUCKET, so overwritten" >&2
       echo "  generations were discarded and there is nothing left to count. Enable it" >&2
@@ -132,9 +171,64 @@ case "$1" in
       echo "  applier run before trusting this." >&2
       exit 1
     fi
-    gcloud storage ls -a "gs://$BUCKET/**" |
+    # ⚠️ THE ANSWER IS THE EXIT CODE, NOT THE PRINTOUT. This ended at
+    # `uniq -d`, which exits 0 whether or not it printed anything -- so the
+    # gate before an irreversible lock reported success while listing the
+    # objects that forbid it, and only the lesser "versioning is off" case
+    # ever refused. A check whose failure looks exactly like its pass is the
+    # shape this repository calls worse than no check.
+    #
+    # ⚠️ AND THE LISTING'S OWN FAILURE IS ITS OWN ANSWER. `gcloud storage ls`
+    # exits non-zero when the wildcard matches nothing, so under `pipefail`
+    # an empty bucket, an expired credential and a wrong project all aborted
+    # this command mid-pipeline and surfaced as a bare exit 1 -- which reads
+    # as "objects were rewritten" and is not. "I could not ask" is a third
+    # answer and it says so. It still refuses: zero objects is not evidence
+    # that objects are written once, which is the only thing that makes a
+    # lock safe.
+    # ⚠️ STDERR IS THE MESSAGE, NEVER THE LISTING. `2>&1` here read gcloud's
+    # own chatter as object names: one routine "Updates are available" notice
+    # on an empty bucket made the listing non-empty, so this printed "every
+    # object has exactly one generation" and cleared an unmeasured bucket for
+    # an irreversible lock -- and a warning repeated twice came back from
+    # `uniq -d` as a rewritten object. Parse stdout; keep stderr for the
+    # human.
+    set +e
+    listing=$(gcloud storage ls -a "gs://$BUCKET/**" 2>"$said"); listed=$?
+    set -e
+    # ⚠️ TWO REFUSALS, NOT ONE SENTENCE FOR BOTH. A listing that dies partway
+    # has already printed objects, so "produced no objects" would be false of
+    # exactly the case the exit code is here to catch -- and a refusal naming
+    # the wrong cause is the failure this repository keeps paying for.
+    if [ "$listed" -ne 0 ] || [ -z "$listing" ]; then
+      # ⚠️ ON WHAT IT PRINTED, NOT ON THE EXIT CODE. An empty bucket exits
+      # non-zero too -- the wildcard matched nothing -- so branching on
+      # `listed` told a fresh bucket its listing was "a fragment" of
+      # something, about a listing that printed no bytes at all. The two
+      # answers differ in whether there IS a fragment.
+      if [ -n "$listing" ]; then
+        echo "  cannot answer: the listing of gs://$BUCKET did not complete (gcloud exit $listed)," >&2
+        echo "  so what it did print is a fragment and says nothing about the rest." >&2
+      else
+        echo "  cannot answer: gs://$BUCKET listed no objects (gcloud exit $listed), and zero" >&2
+        echo "  objects is not evidence that objects are written once." >&2
+      fi
+      if [ -s "$said" ]; then
+        echo "  gcloud said:" >&2
+        sed 's/^/    /' "$said" >&2
+      fi
+      exit 1
+    fi
+    rewritten=$(printf '%s\n' "$listing" |
       sed 's/#[0-9]*$//' |
-      sort | uniq -d
+      sort | uniq -d)
+    if [ -n "$rewritten" ]; then
+      echo "$rewritten"
+      echo "retention: DO NOT LOCK -- the objects above were written more than" >&2
+      echo "  once, and a locked policy refuses a replace as well as a delete." >&2
+      exit 1
+    fi
+    echo "  none: every object has exactly one generation"
     ;;
 
   *) usage ;;

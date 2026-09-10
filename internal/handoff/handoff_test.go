@@ -116,21 +116,17 @@ func TestSendFailsDistinguishablyWhenNoPublisherIsListening(t *testing.T) {
 	if !strings.Contains(msg, "no publisher listening") {
 		t.Errorf("error %q does not say no publisher was listening", msg)
 	}
-
-	// ⚠️ THE SOCKET PATH IS TAKEN OUT BEFORE SCANNING, AND WITHOUT THIS THE
-	// TEST FAILED ABOUT 1% OF RUNS FOR A REASON THAT HAD NOTHING TO DO WITH
-	// THE MESSAGE. t.TempDir() embeds a random number, and one of them was
-	// .../TestSendFailsDistinguishably...240379810/... -- which contains
-	// "403". A plain dial failure was then reported as reading "like a Vault
-	// error". Measured: 5 failures in 400 runs before this line, 0 after.
-	//
-	// The substrings below are about words this package CHOOSES to put in a
-	// message. The path is chosen by the test framework, so it is not part of
-	// what is being asserted, and leaving it in only lets the assertion fire
-	// on a coincidence.
-	scanned := strings.ReplaceAll(msg, path, "<socket>")
+	// path is t.TempDir()'s name: it embeds the test name plus an
+	// OS-chosen counter, so it can coincidentally contain digits like
+	// "403" with nothing to do with Vault. Strip it before checking for
+	// Vault-shaped text, or the test's outcome depends on that counter
+	// rather than on what Send actually wrote -- the same class of bug as
+	// a fixture passing only because a laptop had a kubectl context named
+	// "vault".
+	authored := strings.ReplaceAll(msg, path, "")
 	for _, mustNotContain := range []string{"vault", "Vault", "403", "cas"} {
-		if strings.Contains(scanned, mustNotContain) {
+		if strings.Contains(authored, mustNotContain) {
+
 			t.Errorf("error %q reads like a Vault error (contains %q), want a plain dial failure", msg, mustNotContain)
 		}
 	}

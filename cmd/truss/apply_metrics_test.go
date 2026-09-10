@@ -529,7 +529,7 @@ func TestAFailedPassAlwaysNamesAClass(t *testing.T) {
 		g := newGateway(t)
 		deps, fl, _, _ := gateDeps(t, sha, sha)
 		if ff, ok := deps.Forge.(*fakeForge); ok {
-			ff.ProtectionResult = protectionCompliantForNow()
+			ff.ProtectionResult = compliantGatesProtection()
 		}
 		fl.put("digests/"+sha+"/"+gateSlug+".digest", []byte(notOurDigest(t)))
 		deps.Cfg.MetricsPushURL = g.srv.URL

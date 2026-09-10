@@ -567,13 +567,11 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		}
 	}
 
-	// The expiry sweep runs on every pass, drift or not, gate-passed or
-	// not -- check_credential_lifetimes is unconditional in the reference
-	// (apply.sh:834-847), because a hand-held credential lapsing takes the
-	// whole applier down regardless of what else happened this run.
-	// §4.7, §2 item 16: the sweep never reports a clean bill it did not
-	// earn. Its problem is REPORTED, never swallowed as "nothing is
-	// expiring" -- but it does not set failure.
+	// The expiry sweep runs on the DAILY pass only, which is what the
+	// deployed applier does -- see the ⚠️ below for why, and for what
+	// running it every pass cost. §4.7, §2 item 16: the sweep never reports
+	// a clean bill it did not earn. Its problem is REPORTED, never
+	// swallowed as "nothing is expiring" -- but it does not set failure.
 	//
 	// ⚠️ IT USED TO SET failure, AND THAT WOULD HAVE MADE EVERY PRODUCTION
 	// PASS RED. Nothing seeds `expires` into Vault yet, so the sweep's
@@ -592,12 +590,19 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// the previous code then discarded it. That threw away the one
 	// credential whose lapse takes the applier down, exactly when the vault
 	// was misbehaving.
-	// ⚠️ THE SWEEP IS DAILY-ONLY, AND TRUSS RAN IT EVERY PASS -- outside this
-	// branching entirely, so it ran even when the branch-protection gate had
-	// already failed. The deployed applier gates it on the drift pass with a
-	// dated reason of its own: asking 288 times a day "is most of what
-	// rate-limited the service account on 2026-09-07". Running it on every
-	// pass reproduced the exact pattern that caused that outage.
+	// ⚠️ DAILY, AS THE DEPLOYED APPLIER IS: apply.sh:1110 is
+	// `[ "$DRIFT_ONLY" != "1" ] || check_credential_lifetimes`. Truss ran it
+	// every pass instead, which is the pattern that caused an outage -- the
+	// sweep lists both vaults and reads every item's `expires`, a question
+	// whose answer cannot change inside a day, and apply.sh:1081 records
+	// that asking it 288 times a day "is most of what rate-limited the
+	// service account on 2026-09-07".
+	//
+	// ⚠️ DAILY IS NOT THE SAME AS GATED. It sits outside the gate_ok
+	// branching, so it still runs on a daily pass whose branch-protection
+	// gate failed -- a gate failure and an unusable sweep appear in the same
+	// alert without either explaining the other, which
+	// TestAnUnusableExpirySweepIsReportedAndDoesNotFailThePass pins.
 	var expiring []secrets.Expiring
 	var expiryUnavailable string
 	if driftRun {
@@ -652,12 +657,18 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	}
 	text := notify.Compose(report)
 
-	// idlePass is exactly notify.Compose's own idle case -- no failure,
-	// nothing applied, nothing noop, the branch that produces "<subject>:
-	// nothing to apply" -- recomputed here rather than sniffed out of text
-	// because matching a rendered string is exactly the mistake AGENTS.md
-	// already warns against ("gate on the field, never rendered text").
-	idlePass := failure == "" && appliedCount == 0 && noopCount == 0
+	// silent asks notify itself whether Compose has anything at all to say --
+	// no failure, nothing applied or no-opped, and not one of the appended
+	// clauses. Asked of the Report rather than recomputed here, and never
+	// sniffed out of the rendered text, which is the mistake AGENTS.md warns
+	// against ("gate on the field, never rendered text").
+	//
+	// ⚠️ IT WAS "DID ANYTHING APPLY", AND THAT DISCARDED THE DAILY REPORT. A
+	// drift pass applies nothing by definition, so with a ping URL configured
+	// every DRIFT, EXPIRING and EXPIRY NOT CHECKED clause went in the bin
+	// while the monitor stayed green -- the exact shape of failure this
+	// repository calls worse than none, since it reports success.
+	silent := report.Silent()
 
 	// The dead-man's-switch ping: every completed pass reaches this tail
 	// exactly once (same guarantee as the heartbeat and the alert below), so
@@ -682,12 +693,13 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		pinged = true
 	}
 
-	// The one-sentence rule: when a dead-man's-switch is configured, an idle
-	// pass pings it instead of messaging. Every other pass -- a failure, or
-	// one that applied or no-opped something -- still messages exactly as it
-	// does today, and a pass with no HeartbeatPingURL configured always
-	// messages, unconditionally, which is the regression guard for every
-	// deployment that has not opted in.
+	// The one-sentence rule: when a dead-man's-switch is configured, a pass
+	// with nothing to report pings it instead of messaging. Every other pass
+	// -- a failure, one that applied or no-opped something, or one carrying a
+	// drift, rotation or expiry clause -- still messages exactly as it does
+	// today, and a pass with no HeartbeatPingURL configured always messages,
+	// unconditionally, which is the regression guard for every deployment
+	// that has not opted in.
 	//
 	// ⚠️ A FAILED PING STILL SUPPRESSES THE IDLE MESSAGE, AND THAT IS NOT AN
 	// OVERSIGHT. `pinged` means the ping was ATTEMPTED, not that it landed.
@@ -698,7 +710,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// dead-man's-switch exists to alert on. The silence IS the signal, and
 	// re-routing it to the channel the switch was adopted to quieten would
 	// undo the reason for adopting it.
-	if !(pinged && idlePass) {
+	if !(pinged && silent) {
 		// ⚠️ NON-FATAL, BUT NOT SILENT -- and this line used to be both, under a
 		// comment claiming a parity with the bash that it did not have.
 		// apply.sh:447 ends its curl with
@@ -1005,11 +1017,32 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(env,
+	env = append(env,
 		"GITHUB_APP_ID="+appID,
 		"GITHUB_APP_INSTALLATION_ID="+installationID,
 		"GITHUB_APP_PEM_FILE="+pem,
-	), nil
+	)
+
+	// ⚠️ OPTIONAL, AND ABSENT MUST NOT BE FATAL. Only a consumer whose roots
+	// create repositories mounts this; one that adopts existing repositories
+	// with import blocks never needs it, and making it required would stop
+	// every such deployment on an upgrade for a credential it has no use for.
+	//
+	// ⚠️ IT REACHES TOFU AS TF_VAR_, NOT AS GITHUB_TOKEN. The github provider
+	// reads GITHUB_TOKEN from the environment, so exporting it would silently
+	// re-authenticate EVERY github provider in the root -- including the
+	// default one that authenticates as the App, whose whole point is that it
+	// is not a person. A variable is passed to one aliased provider
+	// explicitly, so the PAT's reach is what the config says it is rather
+	// than whatever happens to read the environment first.
+	token, ok, err := d.Dir.FieldIfPresent(itemGitHubRepoAdmin, fieldGitHubRepoToken)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		env = append(env, "TF_VAR_github_repo_admin_token="+token)
+	}
+	return env, nil
 }
 
 // applyOneRoot runs init, plan, (for non-credentials roots) the digest
@@ -1135,14 +1168,26 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		// as approved, left an empty plan that was refused forever rather
 		// than recorded as already satisfied.
 		//
-		// ⚠️ `parsed` IS LOAD-BEARING AND MUST NOT BE DROPPED.
-		// countResourceChanges returns (0, false) for a plan it could not
-		// read, and treating that as "no changes" would skip the gate on
-		// exactly the input nobody understands -- the absent-reads-as-
-		// compliant bug that internal/gates exists to keep out of this
-		// codebase. Unreadable is gated, like everything else.
-		changes, parsed := countResourceChanges(planJSON)
-		if parsed && changes == 0 {
+		// ⚠️ THE ERROR IS LOAD-BEARING AND MUST NOT BE DROPPED.
+		// countResourceChanges refuses a document it cannot read as a plan,
+		// and treating that as "no changes" would skip the gate on exactly
+		// the input nobody understands -- the absent-reads-as-compliant bug
+		// that internal/gates exists to keep out of this codebase. A plan
+		// that legitimately changes nothing is a different answer, and the
+		// two are told apart on a field: see countResourceChanges.
+		changes, err := countResourceChanges(planJSON)
+		if err != nil {
+			// ⚠️ ITS OWN REFUSAL, CARRYING ITS OWN CAUSE. Falling through to
+			// the digest comparison would refuse too -- correct -- but under
+			// "does not match the one approved at", which blames the world
+			// for moving when what actually happened is that this plan could
+			// not be read. The reason travels with it, because "not a plan
+			// document" and "resource_changes is not a list" are different
+			// repairs.
+			return ledger.RootSummary{}, false, fmt.Sprintf(
+				"could not read our own plan for %s: %v", root, err)
+		}
+		if changes == 0 {
 			d.logf("plan for %s changes nothing; no digest to check, because there is nothing to apply", root)
 		} else {
 			mine, err := plan.Digest(planJSON)
@@ -1185,35 +1230,13 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 
 	var n *int
 	if pj, err := runner.ShowJSON(ctx, rootDir, planFile); err == nil {
-		if count, ok := countResourceChanges(pj); ok {
+		if count, err := countResourceChanges(pj); err == nil {
 			n = &count
 		}
 	}
 	return ledger.RootSummary{ResourceChanges: n}, false, ""
 }
 
-// countResourceChanges is a DELIBERATE DIVERGENCE from summary_from_plan
-// (apply.sh:598), which counts every entry in resource_changes, no-ops
-// included -- so a plan that touches nothing still reports "N changes"
-// every single night. See parity.Divergences["COUNT-EXCLUDES-NOOP"].
-//
-// OpenTofu/Terraform mark a resource the plan will not touch with
-// `"change":{"actions":["no-op"]}` (verified against a real `tofu show
-// -json`, not assumed: a genuine no-op, an in-place update and a
-// forced replace were produced from a scratch root and inspected -- the
-// replace comes back as the two-element `["delete","create"]`, one
-// resource, not two). Only an entry whose actions are exactly that single
-// element is excluded; everything else, including replace, counts as one
-// changed resource.
-//
-// An entry with a missing or empty actions array is counted as a change
-// rather than skipped: that shape is not one OpenTofu is known to emit, and
-// silently treating an unanticipated shape as "no change" is exactly the
-// kind of guess the "if we put a number somewhere, we must be sure it is
-// right" rule forbids. Fail loud by counting it, not by swallowing it.
-//
-// Returns "could not be parsed" (false, matching RootSummary.ResourceChanges'
-// own doc) rather than zero when the plan JSON itself does not parse.
 // rootDeclaresCloudflare reports whether a root's COMMITTED lockfile declares
 // the Cloudflare provider.
 //
@@ -1245,25 +1268,122 @@ func rootDeclaresCloudflare(workdir, root string) (bool, error) {
 	return bytes.Contains(b, []byte(`provider "registry.opentofu.org/cloudflare/cloudflare"`)), nil
 }
 
-func countResourceChanges(planJSON []byte) (int, bool) {
-	var parsed struct {
-		ResourceChanges []struct {
-			Change struct {
-				Actions []string `json:"actions"`
-			} `json:"change"`
-		} `json:"resource_changes"`
+// countResourceChanges is a DELIBERATE DIVERGENCE from summary_from_plan
+// (apply.sh:598), which counts every entry in resource_changes, no-ops
+// included -- so a plan that touches nothing still reports "N changes"
+// every single night. See parity.Divergences["COUNT-EXCLUDES-NOOP"].
+//
+// OpenTofu/Terraform mark a resource the plan will not touch with
+// `"change":{"actions":["no-op"]}` (verified against a real `tofu show
+// -json`, not assumed: a genuine no-op, an in-place update and a
+// forced replace were produced from a scratch root and inspected -- the
+// replace comes back as the two-element `["delete","create"]`, one
+// resource, not two). Only an entry whose actions are exactly that single
+// element is excluded; everything else, including replace, counts as one
+// changed resource.
+//
+// An entry with a missing or empty actions array is counted as a change
+// rather than skipped: that shape is not one OpenTofu is known to emit, and
+// silently treating an unanticipated shape as "no change" is exactly the
+// kind of guess the "if we put a number somewhere, we must be sure it is
+// right" rule forbids. Fail loud by counting it, not by swallowing it.
+//
+// Returns an error, never a zero count, for a document it cannot read as a
+// plan: one that does not parse, one carrying no usable `errored` and no
+// usable `resource_changes` -- usable meaning the field carries a value of
+// the type OpenTofu writes, not merely that the name is present -- or one
+// whose `resource_changes` is not a list. The caller refuses on it;
+// RootSummary.ResourceChanges is left nil.
+func countResourceChanges(planJSON []byte) (int, error) {
+	// ⚠️ MEASURED FROM OPENTOFU'S OWN STRUCT TAGS, 2026-09-09
+	// (internal/command/jsonplan, the plan representation this consumes):
+	// `resource_changes` is omitempty and `errored` is NOT. So a plan that
+	// changes nothing omits the key entirely -- refusing on its absence
+	// would wedge, forever and every pass, a root whose last resource a
+	// commit destroys -- while `errored` is written by every plan document
+	// OpenTofu emits, empty ones included.
+	//
+	// That is what tells "an empty plan" apart from "not a plan". `{}` and
+	// `null` unmarshal without error and carry neither key; reading those as
+	// "nothing to change" let the one caller skip the digest gate on exactly
+	// the input nobody understands, which is absent reading as compliant in
+	// the one place this codebase exists to prevent it.
+	//
+	// resource_changes alone also counts as a plan, because every fixture in
+	// this tree and in the recorded corpus is written that way.
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(planJSON, &doc); err != nil {
+		return 0, fmt.Errorf("the plan JSON does not parse: %v", err)
 	}
-	if err := json.Unmarshal(planJSON, &parsed); err != nil {
-		return 0, false
+	raw, hasChanges := doc["resource_changes"]
+	// ⚠️ A null VALUE IS NOT A PRESENT KEY, for the purpose of deciding
+	// whether this is a plan at all. `{"resource_changes":null}` carries the
+	// name of a plan field and nothing else, and accepting it as evidence
+	// let a document with no `errored` either be read as an empty plan and
+	// applied ungated -- the same hole one layer in.
+	if string(raw) == "null" {
+		hasChanges = false
+	}
+	// ⚠️ AND THE SAME RULE FOR errored: PRESENT IS NOT ENOUGH. OpenTofu
+	// declares it a plain bool, so a real plan document carries exactly
+	// `true` or `false`. `{"errored":null}` -- or a string, or an object --
+	// carries the name and not the fact, and accepting it as evidence is the
+	// hole this rule closes twice over.
+	errored, hasErrored := doc["errored"]
+	if hasErrored && string(errored) != "true" && string(errored) != "false" {
+		hasErrored = false
+	}
+	if !hasErrored && !hasChanges {
+		return 0, errors.New("it carries neither errored nor resource_changes, so it is not a plan document")
+	}
+	// ⚠️ AND errored:true IS NOT ZERO CHANGES. It is the one value of that
+	// field meaning "this plan is not applyable", and with resource_changes
+	// omitted alongside it the document otherwise reads as a valid plan that
+	// changes nothing -- which skips the digest gate. Unreachable today,
+	// because Runner.Plan returns early on a non-zero tofu exit and ShowJSON
+	// is never called; refused anyway, because it costs nothing and no plan
+	// worth applying carries it.
+	if string(errored) == "true" {
+		return 0, errors.New("the plan itself reports errored")
+	}
+	if !hasChanges {
+		return 0, nil
+	}
+
+	var changes []struct {
+		Change struct {
+			Actions []string `json:"actions"`
+			// ⚠️ AN IMPORT IS RENDERED AS A no-op AND STILL MUTATES STATE.
+			// OpenTofu carries `importing` on the change (measured in the
+			// same struct tags: *Importing, omitempty), and applying an
+			// import block whose resource already matches configuration
+			// writes that resource into state. It does not "change
+			// nothing", so it must not take the skip.
+			//
+			// ⚠️ WHAT THIS BUYS IS THE GATE RUNNING, NOT THE IMPORT BEING
+			// COMPARED. plan.theFilter drops every entry whose actions are
+			// exactly ["no-op"] regardless of importing, so both CI and the
+			// applier hash it away and a matching digest says nothing about
+			// it. Running the gate still catches the case that matters most
+			// -- no approved digest recorded at all -- and the count stops
+			// being a lie. The filter cannot be widened: it is
+			// byte-identical to the consumer's jq and to every digest
+			// already in the ledger. Recorded in docs/work-items.md.
+			Importing json.RawMessage `json:"importing"`
+		} `json:"change"`
+	}
+	if err := json.Unmarshal(raw, &changes); err != nil {
+		return 0, fmt.Errorf("its resource_changes does not read as a list of changes: %v", err)
 	}
 	count := 0
-	for _, rc := range parsed.ResourceChanges {
-		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" {
+	for _, rc := range changes {
+		importing := len(rc.Change.Importing) > 0 && !bytes.Equal(rc.Change.Importing, []byte("null"))
+		if len(rc.Change.Actions) == 1 && rc.Change.Actions[0] == "no-op" && !importing {
 			continue
 		}
 		count++
 	}
-	return count, true
+	return count, nil
 }
 
 // runRotation re-plans and, if a generation boundary passed, re-applies

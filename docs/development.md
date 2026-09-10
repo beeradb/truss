@@ -40,21 +40,37 @@ nothing.
 
 ## Building and testing
 
-    go build ./...
-    go vet ./...
-    go test -count=1 ./...
-    go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...  # reachable stdlib vulnerabilities
-    scripts/leakscan          # refuses anything identifying a real deployment
-    scripts/leakscan-test     # proves leakscan still fails when it should
-    scripts/check-observability   # parses every alerting rule and panel query
+    scripts/toolchain install    # Go, jq and OpenTofu, at the pinned versions
+    scripts/check
 
-`check-observability` needs `promtool` from a Prometheus release and skips
-loudly without it; CI sets `TRUSS_REQUIRE_PROMTOOL=1`, which turns that skip
-into a failure — the same shape the jq differential test already uses. It
-exists because `go test` cannot tell a valid query from an invalid one that
-happens to name real metrics: a broken panel renders "No data", which is what
-a quiet week looks like, and a broken rule makes Prometheus reject the whole
-file and silently disarm every rule beside it.
+[toolchain.md](toolchain.md) says what those versions are, where each is
+pinned, and how to build a machine image or a provisioning pass around them.
+
+That is the whole chain, in the order it must run: build, vet,
+`go test -count=1`, govulncheck for reachable standard-library
+vulnerabilities, `scripts/toolchain-test` — which proves the installer still
+refuses an archive that is not the one this repository pinned —
+`scripts/ledger-retention-test` — which drives
+`ledger-retention`'s `check-writes` and `lock`: the measurement before an
+irreversible retention lock, and the door itself — `scripts/leakscan-test`,
+which proves the leak scanner still fails when it should — and then
+`scripts/leakscan` itself, which refuses anything identifying a real
+deployment.
+
+The three `-test` scripts are there for the same reason: a guard nobody has
+watched fail is a claim. The leak scanner has been vacuous in green CI, twice.
+`check-writes` shipped exiting zero while printing the objects that forbid
+locking, and `lock`'s refusals — a bucket it could not describe, no policy,
+and the confirmation that has to name the bucket — are watched here too,
+along with the fact that a refusal did not lock anyway, because the door it
+opens does not close. `scripts/toolchain-test` is the same argument applied to
+what fetches the toolchain: an archive that is not the one this repository
+pinned has to be refused before anything is installed, and that refusal is
+watched rather than assumed. See [toolchain.md](toolchain.md).
+
+CI runs the same script. A chain stated in two places drifts, and the reason
+for each step is written beside the command rather than here.
+
 
 This repository is public and the platform it manages is not — that's the whole
 risk. A live deployment has real account ids, bucket names, hostnames and vault

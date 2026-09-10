@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Everything that must pass before a commit, in the order it must run.
+#
+# ⚠️ ONE DEFINITION, CALLED BY BOTH. .github/workflows/ci.yml runs this script
+# rather than restating the steps, because one fact written in two places is
+# the failure this repository has already paid for twice: the plan digest
+# against the consumer's jq, and scripts/protection's payload against
+# CheckProtection. A pre-commit chain that has drifted from CI is that bug
+# with a slower fuse.
+#
+# ⚠️ NEVER CHAIN THIS TO A COMMIT. `scripts/check && git commit` commits either
+# way under some shells' error handling, and it reads a different tree than it
+# tested. Run it, read it, then commit.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# ⚠️ THE TOOLCHAIN THAT IS INSTALLED, NEVER ONE FETCHED MID-RUN. Unset,
+# GOTOOLCHAIN is `auto`, and `go run` silently downloads whatever a tool's
+# go.mod asks for -- so govulncheck pinned at a version needing Go 1.26 passed
+# here on a box with 1.25 installed, while CI ran the same command and failed:
+# actions/setup-go sets GOTOOLCHAIN=local, which forbids the download. A check
+# that passes locally by fetching a different compiler is not the check CI
+# runs, and the difference is invisible until CI says so.
+export GOTOOLCHAIN=local
+
+step() { echo "check: $*" >&2; }
+
+step "go build";     go build ./...
+step "go vet";       go vet ./...
+
+# ⚠️ -count=1 IS NOT OPTIONAL. Cached results have twice passed over code that
+# did not compile, and actions/setup-go caches GOCACHE -- where Go stores test
+# results -- by default, so a pull request that does not touch go.mod can
+# restore stale results and pass against broken code.
+#
+# TRUSS_REQUIRE_JQ=1 turns the digest differential test's skip into a failure.
+# CI sets it; locally the test skips when jq is absent, which is why CI also
+# runs `jq --version` before this.
+step "go test";      go test -count=1 ./...
+
+# ⚠️ IT IS THE STANDARD LIBRARY THIS SCANS, NOT DEPENDENCIES -- there are none
+# (go.mod is three lines, there is no go.sum, port-plan.md §7.1). What it can
+# find is a stdlib or toolchain vulnerability this code actually REACHES,
+# which is precisely the class a zero-dependency project cannot fix by bumping
+# something. Reachability is why it is this and not a scanner: it reports call
+# paths, not advisories against a version number.
+#
+# ⚠️ Pinned, not @latest -- a tag is a mutable pointer somebody else controls,
+# and @latest is strictly worse than a tag. Nothing is added to go.mod or
+# go.sum, which leakscan's own narrow exemption asserts.
+#
+# ⚠️ AND PINNED TO ONE THIS REPOSITORY'S GO CAN RUN. v1.8.0 declares `go
+# 1.26.0`, so under GOTOOLCHAIN=local it refuses to build against the 1.25 that
+# go.mod asks for -- CI failed on exactly this for three commits while every
+# local run passed by downloading 1.26 behind the scenes. v1.7.0 is the newest
+# that declares 1.25. Bumping this means bumping go.mod, scripts/toolchain and
+# its checksums together, deliberately, rather than discovering it here.
+step "govulncheck";  go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+# ⚠️ THE INSTALLER THAT FETCHES THIS TOOLCHAIN, WATCHED REFUSING. It verifies
+# every archive against a pinned checksum, and a verification nobody has seen
+# fail is a claim. Needs no network: the test drives it with a fake curl.
+step "toolchain-test"; scripts/toolchain-test
+
+# ⚠️ THE GATE BEFORE AN IRREVERSIBLE LOCK, AND THE DOOR ITSELF, WATCHED
+# FAILING. check-writes ended at `uniq -d` and exited 0 whether or not it
+# printed the objects that forbid locking, so it reported success while
+# listing them; both subcommands' probes then reported gcloud's own failures
+# as specific and wrong causes.
+step "ledger-retention-test"; scripts/ledger-retention-test
+
+# ⚠️ THE SCANNER'S OWN TEST FIRST, AND THAT ORDER IS THE POINT. A scan that has
+# quietly stopped matching reports success, so "does the guard still work" is
+# answered before its answer is trusted. Two of its patterns were once inert
+# under CI's own grep while passing there in green.
+step "leakscan-test"; scripts/leakscan-test
+step "leakscan";      scripts/leakscan
+
+# ⚠️ THE DASHBOARDS AND ALERTING RULES ARE THE HALF OF observability/ THAT `go
+# test` CANNOT REACH: metrics_contract_test.go checks the metric NAMES a panel
+# cites are ones truss emits, which a syntactically broken query passes while
+# being unparseable. A bad panel renders "No data" (a quiet week's shape); a
+# bad rule makes Prometheus reject the whole file. check-observability parses
+# every rule and every panel query with Prometheus's and Loki's own parsers.
+# It skips loudly without promtool/logcli; TRUSS_REQUIRE_PROMTOOL=1 (CI sets
+# it) turns that skip into a failure, the same shape TRUSS_REQUIRE_JQ uses.
+step "check-observability"; scripts/check-observability
+
+echo "check: clean"

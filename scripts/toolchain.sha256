@@ -1,0 +1,23 @@
+# Checksums for everything scripts/toolchain installs, in `sha256sum -c`
+# format so the verification is the standard tool and not a string compare of
+# our own.
+#
+# ⚠️ TAKEN FROM EACH PROJECT'S OWN PUBLISHED CHECKSUM, not from a download:
+# the Go project's download index, jq's published checksum file and OpenTofu's
+# SHA256SUMS, all read on 2026-09-09. A checksum computed from the file you just fetched proves
+# only that the file downloaded intact, which is not the question.
+#
+# ⚠️ BOTH ARCHITECTURES, because this repository ships both: release.yml
+# builds truss-linux-arm64 beside truss-linux-amd64 and the Dockerfile is
+# parameterised by TARGETARCH. A checksum file that covered only the machine
+# it was written on would make the installer refuse on half of them.
+#
+# ⚠️ scripts/toolchain refuses if this file and its own version table
+# disagree about which files exist. Two statements of one fact drift; the
+# repository has paid for that three times.
+a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712  go1.25.14.linux-amd64.tar.gz
+5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  jq-linux-amd64
+50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec  tofu_1.12.6_linux_amd64.tar.gz
+9bf234ea70ffec9347fdf6b22ce4add51717d3386a38a441e8c8743fceb5eaee  go1.25.14.linux-arm64.tar.gz
+4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5  jq-linux-arm64
+9bd0228a81bcd0c88f7045c74378f45a815779f19897191dff7d9efba9976b9e  tofu_1.12.6_linux_arm64.tar.gz

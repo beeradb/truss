@@ -168,18 +168,97 @@ check 'other x/ still bites'   refuse d.go 'import "golang.org/x/mod/sumdb/note"
 # shape that names OUR infrastructure, so exempting github.com generally would
 # have let the platform repository's own URL through. Pinned to the project
 # path instead, and this is what proves it.
-check 'opentofu release'     clean  d.txt 'curl -o t.zip https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip'
+check 'opentofu release'     clean  Dockerfile \
+  '      "https://github.com/opentofu/opentofu/releases/download/v${OPENTOFU_VERSION}/tofu_${OPENTOFU_VERSION}_linux_${TARGETARCH}.zip"; \'
+check 'tofu manifest row'    clean  scripts/toolchain \
+  'tofu|amd64|1.12.6|tofu_1.12.6_linux_amd64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.tar.gz'
+# ⚠️ THE SAME URL SOMEWHERE ELSE, AND THE SAME URL WITH SOMETHING ELSE BESIDE
+# IT. Unanchored, this exemption excused whatever shared the line -- a
+# sentence naming a mirror host beside it scanned clean.
+check 'tofu url, another file' refuse d.txt \
+  'curl -o t.zip https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.zip'
+check 'tofu url plus a bucket' refuse scripts/toolchain \
+  'tofu|amd64|1.12.6|tofu_1.12.6_linux_amd64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu.tar.gz  # mirrored to gs://real-bucket'
 check 'another repo on gh'   refuse d.txt 'see https://github.com/someone/private-infra/blob/main/apply.sh'
-check 'prometheus release'   clean  d.txt 'curl -o p.tgz https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz'
-# ⚠️ THE NEIGHBOUR THAT MUST STILL REFUSE. `prometheus/` alone would have been
-# the easy exemption and would have let every OTHER repository in that
-# organisation through -- and, far worse, taught the next person that an
-# org-wide match is acceptable here. The pin is to one project path.
-check 'prometheus, other repo' refuse d.txt 'https://github.com/prometheus/pushgateway/releases/download/v1.11.1/pushgateway.tar.gz'
-check 'loki release'         clean  d.txt 'curl -o l.zip https://github.com/grafana/loki/releases/download/v3.4.2/logcli-linux-amd64.zip'
-check 'grafana, other repo'  refuse d.txt 'https://github.com/grafana/alloy/releases/download/v1.10.0/alloy-linux-amd64.zip'
+# ⚠️ AND ONE THAT WALKS BACK OUT OF THE PROJECT, which an open-ended tail
+# exempted while naming somebody else's repository entirely.
+check 'tofu url that escapes' refuse d.txt \
+  'curl https://github.com/opentofu/opentofu/releases/download/../../someorg/private-platform/x'
+
+# ⚠️ THE QUERY-TOOLS ACTION'S DOWNLOADS, ANCHORED TO THAT ONE FILE. ci.yml
+# fetches promtool and logcli through .github/actions/query-tools to parse the
+# observability rules and dashboards; the release URLs name the vendor and are
+# identical for every user. The refusing halves keep the exemption narrow:
+# another repository in the same org, and the very same URL in ANY OTHER file,
+# both still bite -- the latter is what proves the anchoring.
+check 'promtool in the action'  clean  .github/actions/query-tools/action.yml \
+  '            "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}.tar.gz"'
+check 'logcli in the action'    clean  .github/actions/query-tools/action.yml \
+  '          "https://github.com/grafana/loki/releases/download/v${v}/logcli-linux-amd64.zip"'
+check 'prometheus other repo'   refuse .github/actions/query-tools/action.yml \
+  '  https://github.com/prometheus/pushgateway/releases/download/v1.11.1/pushgateway.tar.gz'
+check 'grafana other repo'      refuse .github/actions/query-tools/action.yml \
+  '  https://github.com/grafana/alloy/releases/download/v1.10.0/alloy-linux-amd64.zip'
+check 'prometheus url elsewhere' refuse d.txt \
+  'curl https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz'
+
 check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
 check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
+
+# ⚠️ THE TOOLCHAIN'S OWN DOWNLOADS, UNDER THE SAME RULE AND WITH THE SAME
+# LIMIT. scripts/toolchain fetches the pinned Go, jq and OpenTofu; a published
+# release address names the vendor and is identical for every user. The
+# refusing halves are what keep the exemptions narrow: another path on the
+# same host, and another repository on the forge, both still bite.
+# ⚠️ THE WHOLE LINE, NOT A SUBSTRING OF IT. These two are anchored to the
+# manifest record they exist for, so a release URL with anything else on the
+# line -- a bucket, a hostname, a note -- no longer carries that line past the
+# scanner. The older exemptions in this file are substrings and do not have
+# that property; docs/work-items.md records it.
+check 'go download'          clean  scripts/toolchain \
+  'go|amd64|1.25.0|go1.25.0.linux-amd64.tar.gz|https://go.dev/dl/go1.25.0.linux-amd64.tar.gz'
+check 'go url plus a bucket' refuse scripts/toolchain \
+  'go|amd64|1.25.0|go1.25.0.linux-amd64.tar.gz|https://go.dev/dl/go1.25.0.linux-amd64.tar.gz  # mirrored to gs://real-bucket'
+check 'another go.dev path'  refuse d.txt 'read https://go.dev/doc/toolchain for the rest'
+check 'go url, another file' refuse d.txt 'curl -o go.tgz https://go.dev/dl/go1.25.0.linux-amd64.tar.gz'
+check 'jq release'           clean  scripts/toolchain \
+  'jq|amd64|1.7.1|jq-linux-amd64|https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64'
+check 'another jqlang path'  refuse d.txt 'see https://github.com/jqlang/jq/issues/2063 for the escaping'
+# ⚠️ AND A URL THAT WALKS BACK OUT OF THE PROJECT. With `/` inside the tail's
+# character class this was exempt, in a manifest-shaped line, while naming
+# somebody else's repository entirely.
+check 'jq url that escapes'  refuse scripts/toolchain \
+  'jq|amd64|1.7.1|jq-linux-amd64|https://github.com/jqlang/jq/releases/download/../../someorg/private-platform/x'
+# ⚠️ AND AFTER A PERFECTLY VALID TAG AND FILENAME, which anchoring the first
+# two segments does not catch -- the traversal simply moves further along.
+# That is why the rule is one pass over the whole line rather than a shape per
+# exemption.
+check 'traversal after a valid asset' refuse d.txt \
+  'curl https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu.zip/../../../../someorg/private-platform/apply.sh'
+check 'traversal after our module'   refuse d.go \
+  'import "github.com/beeradb/truss/../../someorg/private-platform/x"'
+check 'traversal in the registry'    refuse d.txt \
+  'provider "registry.opentofu.org/../../someorg/private-platform/x"'
+
+# ⚠️ A PUBLISHED CHECKSUM IS THE ONE LONG HEX STRING THIS REPOSITORY MUST BE
+# ABLE TO WRITE. Pinning an artefact by digest is what makes "what ran last
+# night" answerable. Exempted as the exact `sha256sum -c` shape and only in
+# the file that owns the checksums -- the refusing halves prove every other
+# way of writing 64 hex characters still bites, including the same line one
+# file over.
+# ⚠️ THE STAND-IN IS GENERATED, NOT WRITTEN. A real checksum here would be
+# clean only because every hit whose line contains the word "leakscan" is
+# dropped -- this file's own path does -- so these cases would prove nothing
+# about the exemption under test. docs/work-items.md records that hole.
+sha="$(printf '%064d' 0)"
+check 'a checksum line'      clean  scripts/toolchain.sha256 \
+  "$sha  go1.25.0.linux-amd64.tar.gz"
+check 'checksum elsewhere'   refuse docs/toolchain.md \
+  "$sha  go1.25.0.linux-amd64.tar.gz"
+check 'checksum, one space'  refuse scripts/toolchain.sha256 \
+  "$sha go1.25.0.linux-amd64.tar.gz"
+check 'a bare account id'    refuse scripts/toolchain.sha256 \
+  "account = $sha"
 
 # ⚠️ The trailer guard reads history, not the tree, so these are the only cases
 # here that need a real commit. The clean case matters as much as the refusing
