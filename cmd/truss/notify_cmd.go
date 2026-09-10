@@ -39,6 +39,14 @@ type expiringDTO struct {
 type reportDTO struct {
 	Subject string `json:"subject"`
 	LastSHA string `json:"last_sha"`
+	// failed_sha and planned_sha travel beside last_sha rather than
+	// replacing it: last_sha is the ledger position and still what a
+	// non-failure summary reports, while these two say where a failure
+	// actually was. Absent means "this failure belongs to no commit",
+	// which is what a caller composing a report about a protection
+	// refusal should send -- see notify.Report.FailedSHA.
+	FailedSHA  string `json:"failed_sha"`
+	PlannedSHA string `json:"planned_sha"`
 
 	Applied int    `json:"applied"`
 	Noop    int    `json:"noop"`
@@ -67,6 +75,8 @@ func (d reportDTO) toReport() notify.Report {
 	return notify.Report{
 		Subject:        subject,
 		LastSHA:        d.LastSHA,
+		FailedSHA:      d.FailedSHA,
+		PlannedSHA:     d.PlannedSHA,
 		Applied:        d.Applied,
 		Noop:           d.Noop,
 		Failure:        d.Failure,

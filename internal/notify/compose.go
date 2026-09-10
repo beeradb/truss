@@ -27,7 +27,32 @@ type Expiring struct {
 // Report is everything a run needs to describe itself in one line.
 type Report struct {
 	Subject string // "platform applier"
+	// LastSHA is the ledger position: the last commit this pass left
+	// applied. It is what the non-failure summary reports.
+	//
+	// ⚠️ IT IS NOT WHERE A FAILURE HAPPENED, AND SAYING SO WAS A REAL BUG.
+	// The failure clause used to read "FAILED at <LastSHA>", which named
+	// the last commit that SUCCEEDED while describing a refusal of the next
+	// one. Observed on a live applier 2026-09-10: "FAILED at f42f97f"
+	// about a provider block that exists only in the commit after it. Use
+	// FailedSHA for that.
 	LastSHA string
+
+	// FailedSHA is the commit a failure belongs to. Empty when the failure
+	// belongs to no commit -- a protection gate that refused before the
+	// queue was read, a credential that would not mount, an expiry sweep
+	// that could not report -- and then the alert names no commit at all,
+	// which is the honest shape rather than a plausible wrong one.
+	FailedSHA string
+
+	// PlannedSHA is the branch head whose tree was checked out and planned
+	// when FailedSHA failed. It is reported separately because the applier
+	// plans AT THE HEAD while working through the queue one commit at a
+	// time, so the tree that produced a tofu error is not in general the
+	// tree of the commit whose turn it was. Omitted from the text when it
+	// is empty or equal to FailedSHA, so the common single-commit case
+	// stays short.
+	PlannedSHA string
 
 	Applied, Noop int
 	Failure       string
@@ -66,9 +91,20 @@ type Report struct {
 func Compose(r Report) string {
 	var text string
 	switch {
-	case r.Failure != "":
+	case r.Failure != "" && r.FailedSHA != "":
+		at := r.FailedSHA
+		if r.PlannedSHA != "" && r.PlannedSHA != r.FailedSHA {
+			at += " (planned at " + r.PlannedSHA + ")"
+		}
 		text = fmt.Sprintf("%s FAILED at %s: %s (applied=%d noop=%d)",
-			r.Subject, r.LastSHA, trimReason(r.Failure), r.Applied, r.Noop)
+			r.Subject, at, trimReason(r.Failure), r.Applied, r.Noop)
+	case r.Failure != "":
+		// No commit to name. Naming one anyway is what the bash did and
+		// what truss copied: it printed the ledger position under the word
+		// "at", so a branch-protection refusal that never looked at a
+		// commit still pointed a reader at one.
+		text = fmt.Sprintf("%s FAILED: %s (applied=%d noop=%d)",
+			r.Subject, trimReason(r.Failure), r.Applied, r.Noop)
 	case r.Applied == 0 && r.Noop == 0:
 		text = fmt.Sprintf("%s: nothing to apply", r.Subject)
 	default:

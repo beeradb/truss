@@ -25,7 +25,7 @@ func TestAppliedAndNoopCountsAreInTheMessage(t *testing.T) {
 
 func TestAFailureLeadsWithFAILEDAndTheTrimmedReason(t *testing.T) {
 	got := Compose(Report{
-		Subject: "platform applier", LastSHA: "sha1",
+		Subject: "platform applier", LastSHA: "base", FailedSHA: "sha1",
 		Applied: 1, Noop: 2, Failure: "exit code 1\x00 from apply",
 	})
 	want := "platform applier FAILED at sha1: exit code 1 from apply (applied=1 noop=2)"
@@ -34,7 +34,7 @@ func TestAFailureLeadsWithFAILEDAndTheTrimmedReason(t *testing.T) {
 	}
 
 	long := strings200(801)
-	got = Compose(Report{Subject: "platform applier", LastSHA: "sha1", Failure: long})
+	got = Compose(Report{Subject: "platform applier", LastSHA: "base", FailedSHA: "sha1", Failure: long})
 	marker := "\n... truncated; see the run's pod logs for the rest."
 	wantSuffix := marker + " (applied=0 noop=0)"
 	if !hasSuffix(got, wantSuffix) {
@@ -187,8 +187,13 @@ func TestSilentAgreesWithComposeOnEveryField(t *testing.T) {
 	for i := 0; i < rt.NumField(); i++ {
 		name := rt.Field(i).Name
 		switch name {
-		case "Subject", "LastSHA", "DriftRun":
-			// Not clauses: two render the headline, one gates another field.
+		case "Subject", "LastSHA", "FailedSHA", "PlannedSHA", "DriftRun":
+			// Not clauses. Subject and LastSHA render the headline;
+			// DriftRun gates another field; FailedSHA and PlannedSHA only
+			// change the headline of a report that ALSO carries a Failure,
+			// and Failure's own sample below is what exercises Silent for
+			// all three. Their own behaviour is pinned by
+			// TestAFailureNamesTheCommitThatFailedNotTheLedgerPosition.
 			continue
 		}
 		sample, ok := samples[name]
@@ -206,5 +211,91 @@ func TestSilentAgreesWithComposeOnEveryField(t *testing.T) {
 		if r.Silent() {
 			t.Errorf("Report.%s = %v makes Compose say %q, and Silent still reports nothing to say", name, sample, text)
 		}
+	}
+}
+
+// TestAFailureNamesTheCommitThatFailedNotTheLedgerPosition is the
+// reproduction of a defect the reference bash has and truss copied: the
+// failure clause printed the LEDGER POSITION -- the last commit that
+// succeeded -- under the words "FAILED at <sha>". A refusal of the NEXT
+// commit therefore pointed a reader at the previous one.
+//
+// Observed on a live applier 2026-09-10: "FAILED at f42f97f" about a
+// `provider "tailscale" {}` block that exists only in the commit after
+// f42f97f. The person debugging it had to diff two trees to discover the
+// alert was talking about neither.
+//
+// ⚠️ LastSHA IS DELIBERATELY DIFFERENT FROM FailedSHA IN EVERY CASE BELOW.
+// A fixture where the two agree cannot tell the fix from the defect -- that
+// is exactly the shape the original bug hid in, because most passes apply
+// nothing and the two shas coincide.
+func TestAFailureNamesTheCommitThatFailedNotTheLedgerPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    Report
+		want string
+	}{
+		{
+			name: "the commit that failed, not the one that last succeeded",
+			r: Report{
+				Subject: "platform applier", LastSHA: "base", FailedSHA: "sha1",
+				Failure: "tofu plan failed for platform",
+			},
+			want: "platform applier FAILED at sha1: tofu plan failed for platform (applied=0 noop=0)",
+		},
+		{
+			// The applier plans at the BRANCH HEAD while working through
+			// the queue one commit at a time, so the tree that produced a
+			// tofu error is not in general the tree of the commit whose
+			// turn it was. Naming only one of the two is what made the live
+			// case take a two-tree diff to explain.
+			name: "and the tree it planned, when that is a different one",
+			r: Report{
+				Subject: "platform applier", LastSHA: "base",
+				FailedSHA: "sha1", PlannedSHA: "headsha1",
+				Failure: "tofu plan failed for platform",
+			},
+			want: "platform applier FAILED at sha1 (planned at headsha1): tofu plan failed for platform (applied=0 noop=0)",
+		},
+		{
+			// A queue holding one commit plans that commit's own tree, and
+			// repeating the sha would be noise rather than information.
+			name: "but not when the head and the commit are the same",
+			r: Report{
+				Subject: "platform applier", LastSHA: "base",
+				FailedSHA: "sha1", PlannedSHA: "sha1",
+				Failure: "tofu plan failed for platform",
+			},
+			want: "platform applier FAILED at sha1: tofu plan failed for platform (applied=0 noop=0)",
+		},
+		{
+			// ⚠️ NO COMMIT IS NAMED, AND THAT IS THE POINT. A protection
+			// gate refuses before the queue is even read, so there is no
+			// commit this failure belongs to. The bash printed one anyway
+			// -- plausible, and irrelevant.
+			name: "no commit at all when the failure belongs to none",
+			r: Report{
+				Subject: "platform applier", LastSHA: "base",
+				Failure: "branch protection on main does not meet the bar: enforce_admins is off",
+			},
+			want: "platform applier FAILED: branch protection on main does not meet the bar: enforce_admins is off (applied=0 noop=0)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Compose(tc.r); got != tc.want {
+				t.Fatalf("Compose() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestASuccessfulPassStillReportsTheLedgerPosition guards the other half:
+// LastSHA is still the right answer for the non-failure summary, and
+// narrowing the failure clause must not have narrowed that too.
+func TestASuccessfulPassStillReportsTheLedgerPosition(t *testing.T) {
+	got := Compose(Report{Subject: "platform applier", LastSHA: "sha9", Applied: 2, Noop: 1})
+	want := "platform applier: applied=2 noop=1 last=sha9"
+	if got != want {
+		t.Fatalf("Compose() = %q, want %q", got, want)
 	}
 }
