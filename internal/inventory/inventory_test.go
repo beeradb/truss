@@ -136,12 +136,93 @@ func defects() []defect {
 			wantFile:  "inventory/hosts/alpha.json",
 			wantWords: []string{`"alph4"`, `"alpha"`, "rename"},
 		},
+		// ⚠️ checkCluster, checkProject AND checkEnvironment EACH REPEAT THE
+		// SAME SCHEMA-AND-NAME SHAPE checkHost ALREADY HAS ABOVE, AND ONLY THE
+		// HOST COPY WAS EVER MUTATION-TESTED. Disabling the schema or name
+		// check inside any of the other three left this whole suite green --
+		// found by the 2026-09-10 mutation audit. One case per record type,
+		// same as Host already gets two.
+		{
+			name: "ClusterUnknownSchema",
+			mutate: func(s *Snapshot) {
+				c := s.Clusters["prod"]
+				c.Schema = "truss.cluster/v2"
+				s.Clusters["prod"] = c
+			},
+			wantFile:  "inventory/clusters/prod.json",
+			wantWords: []string{`"truss.cluster/v2"`, "not recognised", `"truss.cluster/v1"`},
+		},
+		{
+			name: "ClusterNameDoesNotMatchFilenameStem",
+			mutate: func(s *Snapshot) {
+				c := s.Clusters["prod"]
+				c.Name = "prod2"
+				s.Clusters["prod"] = c
+			},
+			wantFile:  "inventory/clusters/prod.json",
+			wantWords: []string{`"prod2"`, `"prod"`, "rename"},
+		},
+		{
+			name: "ProjectUnknownSchema",
+			mutate: func(s *Snapshot) {
+				p := s.Projects["wren"]
+				p.Schema = "truss.project/v2"
+				s.Projects["wren"] = p
+			},
+			wantFile:  "inventory/projects/wren.json",
+			wantWords: []string{`"truss.project/v2"`, "not recognised", `"truss.project/v1"`},
+		},
+		{
+			name: "ProjectNameDoesNotMatchFilenameStem",
+			mutate: func(s *Snapshot) {
+				p := s.Projects["wren"]
+				// checkProject builds each environment's expected key from
+				// p.Name rather than the file's stem, so changing Name alone
+				// also breaks that lookup ("wren2/prod" has no record) --
+				// a second, real but unrelated refusal. Emptying Environments
+				// isolates this case to the name-vs-stem defect alone.
+				p.Environments = nil
+				p.Name = "wren2"
+				s.Projects["wren"] = p
+			},
+			wantFile:  "inventory/projects/wren.json",
+			wantWords: []string{`"wren2"`, `"wren"`, "rename"},
+		},
+		{
+			name: "EnvironmentUnknownSchema",
+			mutate: func(s *Snapshot) {
+				e := s.Environments["wren/prod"]
+				e.Schema = "truss.environment/v2"
+				s.Environments["wren/prod"] = e
+			},
+			wantFile:  "inventory/environments/wren/prod.json",
+			wantWords: []string{`"truss.environment/v2"`, "not recognised", `"truss.environment/v1"`},
+		},
+		{
+			name: "EnvironmentNameDoesNotMatchFilenameStem",
+			mutate: func(s *Snapshot) {
+				e := s.Environments["wren/prod"]
+				e.Name = "prod2"
+				s.Environments["wren/prod"] = e
+			},
+			wantFile:  "inventory/environments/wren/prod.json",
+			wantWords: []string{`"prod2"`, `"prod"`, "rename"},
+		},
 		{
 			name: "EnvironmentNamesAClusterWithNoRecord",
 			mutate: func(s *Snapshot) {
 				e := s.Environments["wren/prod"]
 				e.Placement.Cluster = strPtr("ghost")
 				s.Environments["wren/prod"] = e
+				// checkOrphanDeliveryUnits derives the wanted delivery
+				// directory from (cluster, namespace); moving to a cluster
+				// with no record also moves what is wanted from
+				// prod/wren-prod to ghost/wren-prod, which would otherwise
+				// add two more, unrelated refusals (the old one orphaned,
+				// the new one missing). Moving the fixture's delivery unit
+				// to match keeps this case isolated to the cluster-reference
+				// defect.
+				s.DeliveryUnits = []string{"ghost/wren-prod"}
 			},
 			wantFile:  "inventory/environments/wren/prod.json",
 			wantWords: []string{`"ghost"`, "inventory/clusters/ghost.json"},
@@ -180,10 +261,16 @@ func defects() []defect {
 					Placement: Placement{Cluster: strPtr("prod"), Namespace: strPtr("wren-prod")},
 					Vault:     VaultRef{Mount: "secret", Prefix: "wren/staging"},
 				}
-				// Give it its own delivery unit so this case tests only
-				// the namespace collision, not also tripping the
-				// delivery-unit checks.
-				s.DeliveryUnits = append(s.DeliveryUnits, "prod/wren-staging")
+				// No DeliveryUnits change needed: deliveryUnit derives the
+				// directory from the NAMESPACE, and both environments claim
+				// "wren-prod" -- the collision this case means to test --
+				// so they derive the identical requirement, already
+				// satisfied by validSnapshot's existing prod/wren-prod.
+				// An earlier version of this fixture added a second,
+				// same-named-but-wrong "prod/wren-staging" entry here, which
+				// nothing ever wants and which checkOrphanDeliveryUnits
+				// correctly flagged as stale -- a second, unrelated refusal
+				// this case was not supposed to be testing.
 			},
 			wantFile:  "inventory/environments/wren/prod.json",
 			wantWords: []string{"inventory/environments/wren/staging.json", `"prod"`, `"wren-prod"`},
@@ -260,6 +347,13 @@ func defects() []defect {
 				e := s.Environments["wren/prod"]
 				e.Placement.Namespace = nil
 				s.Environments["wren/prod"] = e
+				// checkOrphanDeliveryUnits skips an environment missing
+				// either half of its placement -- see its own comment -- so
+				// wren/prod stops wanting ANY delivery directory here, which
+				// would orphan validSnapshot's prod/wren-prod as a second,
+				// unrelated refusal. Dropping it isolates this case to the
+				// missing-placement defect alone.
+				s.DeliveryUnits = nil
 			},
 			wantFile:  "inventory/environments/wren/prod.json",
 			wantWords: []string{"kubernetes", "placement.cluster", "placement.namespace"},
@@ -320,6 +414,12 @@ func defects() []defect {
 				e := s.Environments["wren/prod"]
 				e.Shape = "container"
 				s.Environments["wren/prod"] = e
+				// checkOrphanDeliveryUnits only wants a delivery for shape
+				// "kubernetes"; an unrecognised shape stops wanting one at
+				// all, which would orphan validSnapshot's prod/wren-prod as
+				// a second, unrelated refusal. Dropping it isolates this
+				// case to the unrecognised-shape defect alone.
+				s.DeliveryUnits = nil
 			},
 			wantFile:  "inventory/environments/wren/prod.json",
 			wantWords: []string{`"container"`, "not recognised", "fix shape"},
@@ -337,14 +437,22 @@ func defects() []defect {
 	}
 }
 
+// TestCheckRefusesEachDefect breaks exactly one thing in the valid snapshot
+// per case and requires Check to report exactly one MORE problem than the
+// clean baseline (zero, per TestAValidSnapshotHasNoProblems) -- not merely
+// "at least one". Asserting only presence would still pass a Check that grew
+// a second, spurious refusal alongside the real one: the count is the only
+// thing here that catches a mutation which widens a check rather than
+// disabling it.
 func TestCheckRefusesEachDefect(t *testing.T) {
+	baseline := len(Check(validSnapshot()))
 	for _, d := range defects() {
 		t.Run(d.name, func(t *testing.T) {
 			s := validSnapshot()
 			d.mutate(&s)
 			got := Check(s)
-			if len(got) == 0 {
-				t.Fatalf("expected a refusal, got none")
+			if len(got) != baseline+1 {
+				t.Fatalf("Check returned %d problems, want exactly %d (the clean baseline plus this one defect): %v", len(got), baseline+1, got)
 			}
 			joined := strings.Join(got, "\n")
 			if !strings.Contains(joined, d.wantFile) {

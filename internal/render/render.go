@@ -27,10 +27,16 @@ import (
 type Runner struct {
 	// Bin is the kustomize executable. Required: there is no default, so a
 	// caller that forgot to configure one is refused rather than silently
-	// resolving whatever is first on PATH -- the version is part of the
-	// digest contract, and "whichever kustomize this machine happens to
-	// have" is exactly the drift the pinned .kustomize-version exists to
-	// prevent.
+	// resolving whatever is first on PATH.
+	//
+	// ⚠️ THE VERSION IS PART OF THE DIGEST CONTRACT, AND NOTHING IN THIS
+	// PACKAGE ENFORCES IT. Two renderers of different versions can emit
+	// different bytes for one tree, which is a digest mismatch reported as
+	// "the tree and the render disagree" -- true, but not the useful half of
+	// the truth. What pins it is the image: kustomize-version at the repo
+	// root feeds a required build-arg, the same shape OPENTOFU_VERSION uses.
+	// A deployment whose CI renders with some other kustomize gets refusals
+	// it will find hard to read, and no code here will tell it why.
 	Bin string
 
 	// Env is the EXACT environment the child gets. An empty slice means an
@@ -40,9 +46,12 @@ type Runner struct {
 	// the same reason (runner.go:198-203).
 	Env []string
 
-	// Stderr receives everything kustomize writes there. Never nil in
-	// production: a render that failed for a reason nobody kept is a render
-	// nobody can fix.
+	// Stderr receives everything kustomize writes there. Required, like Bin:
+	// a render that failed for a reason nobody kept is a render nobody can
+	// fix, and a nil io.Writer here does not panic -- exec.Cmd treats it as
+	// "discard", so the transcript this whole package exists to preserve
+	// would vanish silently instead of loudly. Build refuses it the same way
+	// it refuses an empty Bin, rather than only documenting the expectation.
 	Stderr io.Writer
 }
 
@@ -58,10 +67,13 @@ type Runner struct {
 // have missed the other.
 //
 // Refusing it is not squeamishness about Helm as a tool. --enable-helm makes
-// the renderer FETCH A CHART FROM A REPOSITORY AT RENDER TIME, which is the
-// network reach the baked provider mirror exists to prevent: a box holding
-// write credentials for four clouds must not resolve anything from a package
-// registry while it works. It also re-admits randAlphaNum, genCA and now,
+// the renderer FETCH A CHART FROM A REPOSITORY AT RENDER TIME, from a process
+// that runs beside write credentials for four clouds. That reach is refused
+// for renders the same way `tofu init -plugin-dir` refuses it for providers:
+// resolve nothing from a registry while working. (⚠️ Truss itself bakes no
+// provider mirror -- Dockerfile's own note says so, and the plugin cache
+// belongs to the consumer -- so the parallel is the rule, not a mirror this
+// image carries.) It also re-admits randAlphaNum, genCA and now,
 // none of which can ever hash to the same bytes twice. Charts are inflated
 // once, by a human, and the rendered manifests are committed.
 var buildArgs = []string{"build"}
@@ -79,6 +91,9 @@ func (r Runner) Build(ctx context.Context, dir string) ([]byte, error) {
 	}
 	if dir == "" {
 		return nil, fmt.Errorf("render: no directory given")
+	}
+	if r.Stderr == nil {
+		return nil, fmt.Errorf("render: no stderr writer configured")
 	}
 
 	args := append(append([]string(nil), buildArgs...), dir)
@@ -140,13 +155,61 @@ func Digest(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// blackholeProxy is an address nothing listens on. It is appended to every
+// render's environment so that any attempt to reach the network fails at
+// connect, loudly, naming the URL it wanted.
+//
+// ⚠️ A RENDER READING THE NETWORK IS NOT HYPOTHETICAL AND THIS IS NOT BELT
+// AND BRACES. `kustomize build` resolves a remote `resources:` entry over
+// the network by default -- there is no flag to turn it off, and
+// --load-restrictor governs local files rather than URLs. Measured on
+// v5.7.1: a kustomization whose only resource is a GitHub URL renders
+// cleanly, exit 0, with the content fetched at build time.
+//
+// That would quietly destroy the property this whole gate rests on. Both
+// sides of a digest agree only because both read the same inputs; a remote
+// base at a moving ref makes them read different ones, and the refusal would
+// blame the tree when the world really had moved. Worse is the case where
+// both sides fetch the SAME bytes -- then the gate passes and certifies
+// manifests nobody reviewed. And it is a network reach from a process that
+// runs beside credentials for four clouds.
+//
+// Measured with the proxy below: exit 1, zero bytes on stdout, and an error
+// naming both the URL it wanted and the proxy that refused it. So the enforcement needs no YAML
+// parser and no regex over a kustomization -- which matters, because
+// AGENTS.md's rule is to gate on the field and never on rendered text, and a
+// pattern written for one YAML style misses the other. internal/parity uses
+// the same technique for the same reason.
+//
+// A unit that genuinely wants a remote base gets a refusal that names the
+// URL, and the answer is the one charts get: vendor it into the reviewed
+// diff, where somebody reads it.
+// The host is a name that cannot resolve -- .invalid is reserved for exactly
+// this by RFC 2606 -- rather than a loopback address. Two reasons, and the
+// second is the better one: scripts/leakscan refuses an IP literal anywhere
+// in this repository and is right to, since it cannot tell a black hole from
+// somebody's cluster; and the name is carried verbatim into the error a
+// blocked render produces, so the refusal explains itself to whoever reads
+// the log instead of showing them a port nobody recognises.
+const blackholeProxy = "http://truss-render-must-not-reach-the-network.invalid:1"
+
 // explicitEnv returns a non-nil slice always, so exec.Cmd never falls back
-// to the parent's environment.
+// to the parent's environment -- and always ends with the proxy settings, so
+// a caller cannot unset them by supplying their own. Later entries win in
+// exec, which is what makes appending here an override rather than a
+// suggestion. NO_PROXY is emptied for the same reason: left populated, it is
+// the one variable that would wave a host straight past this.
 func (r Runner) explicitEnv() []string {
-	if r.Env == nil {
-		return []string{}
+	env := []string{}
+	if r.Env != nil {
+		env = append(env, r.Env...)
 	}
-	return r.Env
+	return append(env,
+		"HTTP_PROXY="+blackholeProxy, "http_proxy="+blackholeProxy,
+		"HTTPS_PROXY="+blackholeProxy, "https_proxy="+blackholeProxy,
+		"ALL_PROXY="+blackholeProxy, "all_proxy="+blackholeProxy,
+		"NO_PROXY=", "no_proxy=",
+	)
 }
 
 // exitOnly reduces an exec error to its status. The transcript is already on

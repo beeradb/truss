@@ -48,6 +48,15 @@ func TestBuildReturnsExactlyStdout(t *testing.T) {
 // actually enforced. kustomize refuses a helmCharts field on its own when the
 // flag is absent (measured on v5.7.1: exit 1, "must specify --enable-helm"),
 // so the only way truss can weaken that is by passing the flag.
+//
+// ⚠️ IT ASSERTS THE EXACT ARGV, NOT MERELY THE ABSENCE OF --enable-helm.
+// Both sides of the digest gate -- CI's render-digest and the applier's
+// render pass -- call this same Build, so a Build that dropped dir from its
+// argv would run `kustomize build` with no path on both sides: the process's
+// working directory, rendered twice, agreeing byte for byte and proving
+// nothing about the tree the commit actually touched. Checking "contains
+// build" and "lacks enable-helm" both stayed true under that mutation; only
+// pinning the full argv catches it.
 func TestBuildNeverPassesEnableHelm(t *testing.T) {
 	bin, argvFile, _ := fakeKustomize(t, `printf 'x\n'`)
 	r := Runner{Bin: bin, Stderr: io.Discard}
@@ -58,11 +67,8 @@ func TestBuildNeverPassesEnableHelm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading argv: %v", err)
 	}
-	if strings.Contains(string(argv), "enable-helm") {
-		t.Errorf("argv = %q, want no --enable-helm: passing it lets the renderer fetch a chart at render time", argv)
-	}
-	if !strings.Contains(string(argv), "build") {
-		t.Errorf("argv = %q, want a build invocation", argv)
+	if got, want := string(argv), "build\ndeliveries/beta/web\n"; got != want {
+		t.Fatalf("argv = %q, want exactly %q", got, want)
 	}
 }
 
@@ -81,8 +87,14 @@ func TestBuildDoesNotInheritTheEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading env: %v", err)
 	}
+	// ⚠️ THE BUFFER IS NEVER PRINTED. This assertion fails exactly when the
+	// environment WAS inherited, which is precisely when dumping it is most
+	// dangerous: on a public CI runner that log is readable by anybody, and
+	// the parent environment is where every credential lives. Report the
+	// canary's presence, never the haystack. scripts/leakscan cannot catch
+	// this class -- it scans the source, and the secret arrives at runtime.
 	if strings.Contains(string(env), "must-not-be-inherited") {
-		t.Errorf("child environment = %q, want the canary absent", env)
+		t.Error("the canary reached the child: Build inherited the parent environment")
 	}
 }
 
@@ -103,6 +115,18 @@ func TestBuildRefusesWithoutABinaryOrADirectory(t *testing.T) {
 	bin, _, _ := fakeKustomize(t, `printf 'x\n'`)
 	if _, err := (Runner{Bin: bin, Stderr: io.Discard}).Build(context.Background(), ""); err == nil {
 		t.Error("Build accepted an empty directory")
+	}
+}
+
+// TestBuildRefusesANilStderr is Bin's own refusal, applied to Stderr: a nil
+// io.Writer does not panic exec.Cmd, it is silently read as "discard", so
+// without this check a render that failed for a reason nobody kept would
+// fail quietly rather than loudly -- exactly the transcript this package
+// exists to preserve (Stderr's own doc comment).
+func TestBuildRefusesANilStderr(t *testing.T) {
+	bin, _, _ := fakeKustomize(t, `printf 'x\n'`)
+	if _, err := (Runner{Bin: bin}).Build(context.Background(), "d"); err == nil {
+		t.Error("Build accepted a nil Stderr; a failed render's transcript would be silently discarded")
 	}
 }
 
@@ -175,5 +199,41 @@ func TestDigestIsSHA256Hex(t *testing.T) {
 	}
 	if Digest([]byte("a")) == Digest([]byte("b")) {
 		t.Error("two different renders hashed the same")
+	}
+}
+
+// TestBuildCannotReachTheNetwork pins the proxy settings every render runs
+// under. The property they defend was measured rather than assumed:
+// `kustomize build` resolves a remote `resources:` URL over the network by
+// default, with no flag to disable it, and a proxy pointed at a closed port
+// is what stops it -- exit 1, zero bytes, an error naming the URL.
+//
+// Without this the two sides of the digest could read different inputs, or
+// the same unreviewed ones, and the gate would certify manifests nobody saw.
+func TestBuildCannotReachTheNetwork(t *testing.T) {
+	bin, _, envFile := fakeKustomize(t, `printf 'x\n'`)
+	r := Runner{Bin: bin, Env: []string{"PATH=/usr/bin", "NO_PROXY=github.com"}, Stderr: io.Discard}
+	if _, err := r.Build(context.Background(), "d"); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	env, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env: %v", err)
+	}
+	got := string(env)
+	for _, want := range []string{
+		"HTTPS_PROXY=" + blackholeProxy,
+		"https_proxy=" + blackholeProxy,
+		"HTTP_PROXY=" + blackholeProxy,
+		"ALL_PROXY=" + blackholeProxy,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("child environment lacks %q", want)
+		}
+	}
+	// A caller's own NO_PROXY must not survive: it is the one variable that
+	// would wave a host straight past the blackhole.
+	if strings.Contains(got, "NO_PROXY=github.com") {
+		t.Error("a caller's NO_PROXY survived; it must be emptied, not merged")
 	}
 }

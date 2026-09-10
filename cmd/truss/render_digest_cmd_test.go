@@ -138,7 +138,10 @@ func TestRenderDigestDoesNotLeakTheParentEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading env: %v", err)
 	}
+	// ⚠️ THE BUFFER IS NEVER PRINTED -- this fails exactly when the
+	// environment was inherited, which is when dumping it is most dangerous.
+	// On a public CI runner that log is readable by anybody.
 	if strings.Contains(string(env), "must-not-be-inherited") {
-		t.Errorf("child environment = %q, want the canary absent", env)
+		t.Error("the canary reached the child: render-digest inherited the parent environment")
 	}
 }

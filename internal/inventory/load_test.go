@@ -82,6 +82,30 @@ func TestLoadReportsANonJSONRecord(t *testing.T) {
 	}
 }
 
+// TestLoadReportsADirectoryWhereARecordBelongs covers the other half of
+// readJSON's file-vs-directory split from TestLoadReportsANonJSONRecord: a
+// directory named like a record (someone's `mkdir alpha.json` instead of a
+// file) must not be silently skipped or misread. fstest.MapFS synthesises a
+// directory entry for every intermediate path component, so a file placed
+// AT "inventory/hosts/subdir.json/marker" is what makes ReadDir report
+// "subdir.json" itself as a directory -- there is no other way to construct
+// one against this in-memory filesystem.
+func TestLoadReportsADirectoryWhereARecordBelongs(t *testing.T) {
+	tree := validTree()
+	tree["inventory/hosts/subdir.json/marker"] = &fstest.MapFile{Data: []byte("not a record")}
+
+	_, problems := Load(tree)
+	if len(problems) != 1 {
+		t.Fatalf("problems = %v, want exactly one, for the directory", problems)
+	}
+	if !strings.Contains(problems[0], "inventory/hosts/subdir.json") {
+		t.Errorf("problem = %q, want it to name the directory", problems[0])
+	}
+	if !strings.Contains(problems[0], "directory") {
+		t.Errorf("problem = %q, want it to say a directory is where a record belongs", problems[0])
+	}
+}
+
 // TestLoadReportsEveryBadRecordNotJustTheFirst: a tree with three broken
 // records should report three. Stopping at the first turns fixing an
 // inventory into a guessing loop.
