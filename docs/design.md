@@ -238,9 +238,21 @@ The `ansible` row is the same precedent `credentials` already sets —
 `docs/credentials.md`: *"what a human reviews here is the code diff itself,
 not a plan"* — applied a second time, for a structurally identical reason
 rather than a copy of the same one: both roots have state (tokens; a
-machine's configuration) that CI is not allowed to read or reach. `internal/
-ansible` and `internal/gates.CheckAnsibleTargets` exist; neither is called
-from the pass yet — see `docs/work-items.md`.
+machine's configuration) that CI is not allowed to read or reach.
+
+`runCommitLoop` calls both (`cmd/truss/ansible_unit.go`): plays run after
+every OpenTofu root and before every render — infrastructure makes the
+machine, configuration configures it, delivery ships onto it — and each one
+is proved before it runs. The target set comes from `inventory.Host.Config`
+inverted, the live half from `tailnet.Reconcile`, and a deployment with no
+tailscale credential mounted is refused rather than run unchecked: with no
+evidence about which hosts exist there is no gate, and this kind has nothing
+else. Three absence rules now differ by kind, deliberately — an absent root
+is a **refusal** (its state may hold live resources), an absent delivery
+unit is a **prune** (the reconciler removes what it applied), and an absent
+play is a **retirement**: deleting it un-configures nothing, the machine
+keeps exactly what it has, and claiming otherwise in either direction would
+be a lie about somebody's machine.
 
 Only one of the three ways Helm could get in is actually enforced; the other
 two are a rule the deployment keeps, not a check the applier makes.

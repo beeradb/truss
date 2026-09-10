@@ -147,9 +147,10 @@ func git(f fixtures, args []string) int {
 		return 0
 	case has(args, "ls-tree"):
 		// The sha sits immediately before the "--" pathspec separator,
-		// whatever the flag count -- execGit shapes this call three
-		// different ways (TreeRoots: `-d --name-only`; TreeRenderUnits and
-		// TreeTofuUnits: `-d -r --name-only`, cmd/truss/git.go), and a fixed
+		// whatever the flag count -- execGit shapes this call two
+		// different ways across four callers (TreeRoots: `-d --name-only`;
+		// TreeRenderUnits, TreeTofuUnits and TreeAnsibleUnits: `-d -r
+		// --name-only`, cmd/truss/git.go), and a fixed
 		// offset from "ls-tree" read the flag itself as the sha the moment a
 		// second one (`-r`) was added.
 		//
@@ -176,6 +177,15 @@ func git(f fixtures, args []string) int {
 			// The roots the harness creates on disk, matching the
 			// reference shim's own default: a scenario only declares
 			// `tree` when it is about a project appearing or vanishing.
+			//
+			// ⚠️ THE PATHSPEC AFTER `--` IS DELIBERATELY IGNORED, AND THAT
+			// IS SAFE ONLY BECAUSE EVERY CALLER FILTERS WITH repo.KindOf.
+			// This shim answers every ls-tree with the same listing, so
+			// TreeAnsibleUnits gets "platform" and "projects/recipes" and
+			// filters both away -- which is the right answer, since the
+			// bash this corpus records had no plays. A caller that trusted
+			// the pathspec instead of the filter would get a wrong answer
+			// here and nothing would say so.
 			roots = []string{"platform", "projects/recipes"}
 		}
 		for _, r := range roots {
