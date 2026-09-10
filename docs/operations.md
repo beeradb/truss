@@ -4,7 +4,7 @@ What to actually do when something needs doing. Every procedure here is a
 command, not a sequence of clicks — a step described as "open the settings page
 and untick the box" is a step nobody can review, repeat or automate.
 
-## Branch protection: the only way past a stuck gate
+## Branch protection: the all-or-nothing way past a stuck gate
 
     export TRUSS_REPO=<owner>/<the repository the applier applies>
 
@@ -25,11 +25,20 @@ The applier refuses to run at all unless protection is exactly as
 every pass rather than trusting that somebody set it once. So this is not a
 cosmetic setting: **`off` stops the applier, and `on` starts it again.**
 
-⚠️ **This is the escape hatch, and it is the only one.** With
-`enforce_admins` on and force pushes refused, the owner is bound by the same
-rules as everyone else, and there is deliberately no override for a gate that
-refuses wrongly — no flag, no forced merge, no bypass list. What exists instead
-is this: turn protection off, fix the thing, turn it back on.
+⚠️ **This is the escape hatch for the repository as a whole, and it is the
+only one at that scope.** With `enforce_admins` on and force pushes refused,
+the owner is bound by the same rules as everyone else, and there is
+deliberately no way to force a merge or bypass a list of names to get one
+gate to stand down while every other stays up. What exists at this scope is
+this: turn protection off, fix the thing, turn it back on.
+
+A narrower override exists too, aimed at one commit rather than the whole
+repository: `truss skip <sha> --reason <text>` advances HEAD past a single
+commit that the applier has already tried and refused, guarded by the ledger
+credential rather than repository admin, four checks, and an alert sent
+before anything is written. See [docs/threat-model.md](threat-model.md) for
+what it guards against and why it can still walk past a commit gate 1 there
+refused.
 
 That trade is only acceptable because the hatch is one command and leaves a
 trail. Toggling protection is recorded in the repository's audit log, and while

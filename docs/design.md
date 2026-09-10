@@ -130,13 +130,17 @@ flowchart TD
     P -- yes --> C{a new commit<br/>on main?}
     C -- no --> ROT
     C -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
-    G1 -- passes --> N{touches a root?}
-    N -- no --> ADV[record noop,<br/>advance HEAD] --> C
+    G1 -- passes --> N{touches a root or<br/>a delivery unit?}
+    N -- no (both empty) --> ADV[record noop,<br/>advance HEAD] --> C
     G1 -- fails any of those --> STOP[stop the queue here:<br/>refuse this commit, alert]
     N -- yes --> PL[plan every root it touched]
     PL --> G2{each plan's digest matches<br/>what CI filed<br/>credentials root is exempt}
     G2 -- no --> STOP
-    G2 -- yes --> AP2[apply · record applied,<br/>advance HEAD] --> C
+    G2 -- yes --> AP2[apply every root]
+    AP2 --> RD[render every delivery<br/>unit it touched]
+    RD --> G3{each render's digest matches<br/>what CI filed}
+    G3 -- no --> STOP
+    G3 -- yes --> REC[record applied,<br/>advance HEAD] --> C
     STOP --> ROT
     ROT[daily pass only:<br/>re-plan credentials at HEAD, rotate if a boundary passed,<br/>sweep every credential's expiry<br/>skipped if protection failed] --> TAIL
     TAIL[write the heartbeat,<br/>send the alert] --> E([done])
@@ -185,10 +189,23 @@ plan depends on the tree *and* on the live infrastructure, which is why
 entries — two identities with different read permissions see different
 attribute values in one plan, and that once made two "No changes" plans hash
 differently and refused every apply. A render depends on the tree alone: no
-state, no credentials, no network. So there is nothing to canonicalise, the
-bytes are hashed as they are, and the renderer is handed `PATH` and `HOME` and
-nothing else. **The moment a render could read a credential, it could produce
-output that depends on who ran it, and the two sides would stop agreeing.**
+state, no credentials. Network takes a line of its own, because "no network"
+is not a property a renderer has on its own — `kustomize build` resolves a
+remote `resources:` URL over the network by default and there is no flag to
+turn that off. Measured on v5.7.1: a kustomization whose only resource was a
+GitHub URL rendered cleanly, exit 0, the content fetched at build time.
+`internal/render` closes it instead: every render runs with `HTTP_PROXY`,
+`HTTPS_PROXY` and `ALL_PROXY` (both cases) pointed at a reserved `.invalid`
+hostname that cannot resolve, and `NO_PROXY` emptied so it cannot wave a host
+past the proxy — measured against the same kustomize: exit 1, zero bytes on stdout, the
+reach failing at connect and naming the URL it wanted. A unit that genuinely
+needs a remote base gets the same answer a chart does, below: vendor it into
+the reviewed diff, where somebody reads it. So there is nothing to
+canonicalise, the bytes are hashed as they are, and the renderer is handed
+`PATH` and `HOME`, plus the proxy variables that enforce the no-network rule,
+and nothing else. **The moment a render could read a credential, it could
+produce output that depends on who ran it, and the two sides would stop
+agreeing.**
 
 Two consequences follow from the same fact:
 
@@ -197,20 +214,30 @@ Two consequences follow from the same fact:
   versions, the unit has a non-deterministic input, or the tree is not the one
   that was reviewed — and sending an operator to look at their infrastructure
   for a fault in their repository would waste the alert.
-- **Nothing is exempt.** The credentials root is exempt from the *plan* gate
-  because CI genuinely cannot plan it, which is a fact about the world rather
-  than a convenience. Rendering has no equivalent fact, so a unit CI could not
-  render is one the applier cannot render either.
+- **Nothing `gates.CheckRenderDigest` sees is exempt.** The credentials root is
+  exempt from the *plan* gate because CI genuinely cannot plan it, which is a
+  fact about the world rather than a convenience. Rendering has no equivalent
+  fact, so a unit CI could not render is one the applier cannot render either.
+  ⚠️ One case never reaches the gate at all: `renderOneUnit` skips a unit
+  that is absent from the commit's own checkout, because that absence is the
+  commit deleting it — a prune, not an edit. The reconciler removes what it
+  applied, and refusing here would make retiring a workload impossible; see
+  the threat-model row for deleting a delivery unit.
 
-Helm is refused in every form — no binary, no `helm_release`, and no
-`kustomize build --enable-helm`. The flag makes the renderer fetch a chart
-from a repository *at render time*, which is the network reach the baked
-provider mirror exists to prevent, and it re-admits `randAlphaNum` and `now`,
-which can never hash the same twice. Charts are inflated once, by hand, and
-the rendered manifests are committed — so the reviewer reads the manifests
-rather than a version number. Enforcement needs no parser: kustomize refuses a
-`helmCharts` field on its own when the flag is absent, so never passing it is
-the whole rule.
+Only one of the three ways Helm could get in is actually enforced; the other
+two are a rule the deployment keeps, not a check the applier makes.
+`--enable-helm` is never passed, so a kustomization carrying a `helmCharts`
+field is refused by kustomize itself when the flag is absent — measured on
+v5.7.1: exit 1, zero bytes, "must specify --enable-helm" — and that needs no
+parser, matching AGENTS.md's rule to gate on the field rather than rendered
+text. Passing the flag would make the renderer fetch a chart from a repository
+*at render time*, the same network reach the proxy settings above exist to
+prevent, and it re-admits `randAlphaNum` and `now`, which can never hash the
+same twice. Nothing in this tree refuses a `helm_release` resource in an
+OpenTofu root, and nothing checks for a helm binary on the machine — see
+docs/work-items.md for what closing either would take. Charts are inflated
+once, by hand, and the rendered manifests are committed — so the reviewer
+reads the manifests rather than a version number.
 
 The applier renders and compares. It applies nothing: a reconciler does that.
 

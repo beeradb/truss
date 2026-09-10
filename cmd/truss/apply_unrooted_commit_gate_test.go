@@ -42,7 +42,14 @@ func TestACommitTouchingNoRootIsStillGated(t *testing.T) {
 	git := &fakeGit{
 		CommitsList: []string{sha},
 		ChangedByCommit: map[string][]string{
-			sha: {"deliveries/beta/wren-prod/kustomization.yaml"},
+			// ⚠️ A DOCS PATH, AND IT HAS TO BE. An earlier version of this
+			// fixture used a delivery path, which stopped reproducing the
+			// defect the moment render units existed: a delivery IS a unit,
+			// so the noop-and-advance branch is not taken for it and the
+			// test passed with the gate back in its old place. Measured by
+			// mutation, 2026-09-10. The route the defect actually took is a
+			// path no kind claims -- docs, a README, a CI workflow.
+			sha: {"docs/README.md"},
 		},
 		TreeRootsByCommit: map[string][]string{sha: nil},
 		HasDirFn:          func(string) bool { return true },

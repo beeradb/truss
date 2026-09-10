@@ -552,6 +552,25 @@ downstream of the plan can prevent them; catching them there refuses the apply
 but does not stop the execution that already happened. Those two halves want
 different mechanisms and should not be built as one gate.
 
+## `helm_release` has no enforcer
+
+The render gate refuses `--enable-helm` (`internal/render`) and kustomize
+refuses a `helmCharts` field itself when the flag is absent — that half is
+real. Nothing refuses the same escape taken from the tofu side: a
+`helm_release` resource in an OpenTofu root reaches a chart repository at
+*apply* time exactly the way `--enable-helm` reaches one at render time, and
+no gate in this tree looks for one.
+
+What closing it would take is the same shape as the deferred provisioner
+gate above: `tofu show -json`'s plan JSON names each resource's provider and
+type, so `helm_release` is a field-level check over
+`configuration.root_module.resources[]`, needing no HCL parser — the same
+reasoning that splits the provisioner gate cleanly from a source-level check.
+It is deferred for the same reason that one is: there is no `tofu` binary in
+this environment to confirm the shape against, and this codebase's standard,
+stated there, is to verify against a real `tofu show -json` before depending
+on one.
+
 ## The ledger records history it cannot prove
 
 `Put` has no precondition, no `Delete` exists, and nothing links one record
@@ -714,6 +733,84 @@ gate nobody can prove is worse than a gap somebody has written down.** The
 gap is here. Closing it means decoding `rules[].type` in
 `internal/forge/rulesets.go` and adding the sibling of `CheckRulesets` for a
 non-branch ref, verified against a repository that actually has the ruleset.
+
+## The kind layer classifies directories the pass never executes
+
+`internal/repo/units.go` defines `KindTofu` for `clusters/<name>` and
+`hosts/<name>`, and `KindAnsible` for `ansible/plays/<name>`, and its own
+doc says a kind is "how the applier treats it: what binary renders or plans
+it". `runCommitLoop` reads only `KindRender` out of `TouchedUnits`
+(`renderUnitsFor`, `cmd/truss/render_unit.go`); tofu work still comes from
+`TouchedRoots` alone, which only ever names `credentials`, `platform` and
+`projects/<name>`. So a commit touching only `clusters/beta/main.tf` is
+recorded as a noop and HEAD advances past it, while this repository's own
+kind layer says that path is an OpenTofu root that should have been planned
+and applied.
+
+⚠️ **The behaviour is unchanged from before the kind layer existed — what is
+new is a comment claiming otherwise.** `KindTofu` covering clusters and hosts
+was added to `KindOf` without the pass gaining a second reader for it, so the
+doc comment now describes a capability the code does not have.
+
+`TouchedRoots` cannot simply be widened to cover them: `internal/parity`
+compares it, byte for byte, against recordings of the bash it ports, and
+widening it changes what the pass plans for commits the corpus already has
+answers for. Closing this needs a second consumer of `TouchedUnits`'s
+`KindTofu` entries — planning and applying clusters and hosts the way
+`applyOneRoot` already does for `TouchedRoots`'s entries — not a change to
+`TouchedRoots` itself.
+
+## The two sides of the render digest do not share a derivation
+
+`cmd/truss/render_unit.go`'s doc comment on `renderUnitsFor` claims "CI
+derives the units with this same function, so both sides agree on the set".
+It cannot: `repo.TouchedUnits` lives under `internal/`, which a consumer's CI
+job cannot import, and no subcommand exposes the touched-unit set for a
+commit — `truss render-digest` takes a single directory
+(`cmd/truss/render_digest_cmd.go`), never a commit range.
+
+Worse, the rule a consumer's CI actually mirrors is asymmetric with the one
+the applier runs. `unitSharedInput` (`internal/repo/units.go`) fires on
+`inventory/`, `.kustomize-version` and `.ansible-version` in addition to
+`modules/`, `providers.allow` and `.opentofu-version`; `sharedInput`, the
+tofu-side rule, has only the latter three. So a commit that only touches
+`inventory/` makes the applier demand a filed digest for every render unit in
+the tree — including units whose CI had no rule telling it to render them,
+because CI is mirroring the narrower, tofu-side pattern. The refusal that
+comes out says "refusing to deliver a manifest nobody reviewed", which names
+the wrong cause: the manifest may have been reviewed, but the two sides
+derived different sets of units to check.
+
+What closes it: a subcommand that prints the touched units for a commit, so
+CI and the applier both call one implementation instead of a consumer's CI
+maintaining its own approximation of a rule that lives in this repository.
+
+## `internal/inventory` declares fields nothing reads back
+
+Three fields on `Host` and `Cluster` are documented as paths into the rest of
+the tree and never checked against it: `Host.ProvisionedBy` ("a tofu unit
+path, e.g. \"hosts/dev-beta\""), `Host.Config` ("an ansible unit path, or
+explicit null" — `checkHost` only ever tests it for nilness, never resolves
+the string it holds), and `Cluster.Baseline` ("a `baselines/<name>`
+directory"). `repo.KindOf` is the function that would tell a real unit path
+from a typo or a directory that was renamed out from under it, and nothing in
+`internal/inventory` calls it.
+
+Three more fields are read by nothing in the binary at all: `Host.Frozen`,
+`Host.Decommissioned`, and `Environment.Frozen`. `Check` never tests any of
+the three, so a decommissioned host and a frozen environment pass `Check`
+identically to a live one — the same environment could be reconciled,
+rendered and delivered to exactly as if nothing had been declared about it.
+
+⚠️ **That is absent-read-as-compliant, inside the one package whose own
+comments name that as the failure to avoid** — `decode`'s comment says a record
+that "looks fully read but was not is worse than one that visibly failed to
+parse", and these fields fail exactly that way: they parse, they are named in
+the schema's own doc comments, and nothing downstream ever looks at them
+again.
+
+Also unrecorded anywhere else: the package itself, and `truss inventory
+validate`, are described in no document in `docs/`.
 
 ## Checked and deliberately not wanted
 
