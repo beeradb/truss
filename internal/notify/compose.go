@@ -105,6 +105,34 @@ func Compose(r Report) string {
 	return text
 }
 
+// Silent reports whether Compose has nothing to say about r at all: no
+// failure, nothing applied, nothing no-opped, and not one of the appended
+// clauses.
+//
+// ⚠️ IT IS NOT "NOTHING WAS APPLIED", AND THAT DISTINCTION IS THE WHOLE
+// POINT. A caller that suppresses the message on an idle pass -- which is
+// what a dead-man's-switch deployment does -- suppresses the DRIFT, EXPIRING,
+// EXPIRY NOT CHECKED and rotation clauses with it if it asks the narrower
+// question, because a drift pass applies nothing by definition. The daily
+// pass is exactly the pass that carries those clauses and exactly the pass
+// that looks idle, so asking "did anything apply" silences the one report
+// that matters while the monitor stays green.
+//
+// It lives here, beside Compose, because the list of clauses is Compose's own
+// and a second copy of it at a call site is how it drifts.
+// TestSilentAgreesWithComposeOnEveryField holds the two together.
+func (r Report) Silent() bool {
+	if r.Failure != "" || r.Applied != 0 || r.Noop != 0 {
+		return false
+	}
+	return !(r.DriftRun && r.DriftSkipped != "") &&
+		r.RotatedChanges == 0 &&
+		len(r.Drifted) == 0 &&
+		len(r.Errored) == 0 &&
+		r.ExpiryUnavailable == "" &&
+		len(r.Expiring) == 0
+}
+
 // trimReason reproduces trim_reason (apply.sh:345-354): NUL bytes are
 // dropped, the text is cut at 800 bytes, and a truncation marker is
 // appended when the ORIGINAL text (before NUL-stripping) was over 800 bytes

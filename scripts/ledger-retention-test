@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# Proves scripts/ledger-retention still refuses what it claims to refuse.
+#
+# ⚠️ THIS EXISTS BECAUSE check-writes ONCE ALWAYS PASSED. It is the gate
+# before `lock`, which cannot be undone, and it ended at `uniq -d` -- which
+# exits 0 whether or not it printed anything. So it listed the objects that
+# forbid locking and reported success while doing it. Only the lesser
+# "versioning is off" case ever refused.
+#
+# It drives the REAL script with a fake `gcloud` on PATH, because the answers
+# are what the script reads and a rewrite of its logic here would be testing
+# a copy.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/ledger-retention"
+[ -x "$SCRIPT" ] || { echo "ledger-retention-test: $SCRIPT is not executable" >&2; exit 1; }
+
+pass=0 fail=0
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# assert_out checks that an outcome says what it should and not what it should
+# not. Shared by both drivers: one definition, because two copies of a rule
+# drifting apart is the defect these scripts exist to catch.
+#
+#   want_msg    wording unique to the branch that should have fired. "cannot
+#               answer" opens two of them and the header carries the words DO
+#               NOT LOCK unconditionally, so a substring common to several
+#               branches stays green under mutations that skip the logic.
+#   want_relay  what gcloud itself said. Two inputs the script cannot tell
+#               apart -- an empty bucket and a 403 -- are told apart here or
+#               nowhere.
+#   want_absent wording the output must NOT carry. A dangling "gcloud said:"
+#               with nothing under it is a refusal quoting a witness that said
+#               nothing.
+# ⚠️ CALL IT AS `assert_out ... || return 0`, NEVER `|| return`. Handing this
+# function's status back out of a driver aborts the whole suite under `set -e`
+# at the first wrong-reason failure: every later case skipped and no summary
+# printed, while the sibling wanted/got path carries on. A runner that stops
+# at the first finding hides the rest of them.
+assert_out() { # name got out want_msg [want_relay] [want_absent]
+  local name="$1" got="$2" out="$3" want_msg="$4" want_relay="${5:-}" want_absent="${6:-}"
+  local why=""
+  case "$out" in
+    *"$want_msg"*) ;;
+    *) why="$got, but for the wrong reason -- wanted it to say \"$want_msg\"" ;;
+  esac
+  if [ -z "$why" ] && [ -n "$want_relay" ]; then
+    case "$out" in
+      *"$want_relay"*) ;;
+      *) why="$got for the right reason, but did not relay \"$want_relay\"" ;;
+    esac
+  fi
+  if [ -z "$why" ] && [ -n "$want_absent" ]; then
+    case "$out" in
+      *"$want_absent"*) why="$got for the right reason, but said \"$want_absent\" when it should not" ;;
+    esac
+  fi
+  [ -n "$why" ] || return 0
+  fail=$((fail + 1))
+  echo "FAIL  $name: $why" >&2
+  echo "$out" | sed 's/^/      /' >&2
+  return 1
+}
+
+
+# Runs check-writes against a fake gcloud answering with the given versioning
+# setting and object listing. want=refuse|clean
+# ⚠️ THE LISTING'S EXIT CODE IS A PARAMETER, BECAUSE THE REAL ONE HAS ONE.
+# `gcloud storage ls` exits non-zero when the wildcard matches nothing, so a
+# fake that always exits 0 asserts an outcome production cannot produce -- and
+# when a fixture and production disagree, the fixture is the bug.
+# ⚠️ AND A REFUSAL MUST NAME ITS OWN CAUSE, so `want_msg` is not optional
+# decoration. Under `set -e` a command substitution that fails aborts the
+# script and exits 1, which is indistinguishable from a refusal if the exit
+# code is all anyone reads -- so a guard deleted outright still looked green
+# here. Matching the message is what makes these cases bite.
+# ⚠️ AND THE FAKE WRITES TO BOTH STREAMS, because the real one does. With
+# everything on stdout the script's own `2>&1` was never exercised, and it was
+# reading gcloud's chatter as object names.
+#
+# ⚠️ want_msg MUST BE UNIQUE TO ITS BRANCH. "cannot answer" appears in two of
+# them and the unconditional header carries the words DO NOT LOCK, so those
+# substrings passed under mutations that skipped the logic entirely.
+check() { # name want versioning listing ls_exit want_msg [stderr] [want_relay]
+       #       [describe_exit] [describe_stderr] [want_absent]
+  local name="$1" want="$2" versioning="$3" listing="$4" ls_exit="$5" want_msg="$6" said="${7:-}" want_relay="${8:-}"
+  local describe_exit="${9:-0}" describe_said="${10:-}" want_absent="${11:-}"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin"
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    printf "  *describe*) printf '%%s\\\\n' '%s'; printf '%s' >&2; exit %s ;;\n" \
+      "$versioning" "$describe_said" "$describe_exit"
+    printf "  *ls*) printf '%s'; printf '%s' >&2; exit %s ;;\n" "$listing" "$said" "$ls_exit"
+    echo 'esac'
+  } > "$dir/bin/gcloud"
+  chmod +x "$dir/bin/gcloud"
+
+  set +e
+  out=$(PATH="$dir/bin:$PATH" TRUSS_RECORDS_BUCKET=scratch "$SCRIPT" check-writes 2>&1); rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+  if [ "$got" != "$want" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return 0
+  pass=$((pass + 1)); echo "ok    $name ($got)"
+}
+
+# Drives `lock`, whose describe probe had the same defect and sits in front of
+# the one-way door. want=refuse|clean
+check_lock() { # name want period describe_exit describe_stderr confirm want_msg
+             #       [want_relay] [want_absent] [bucket]
+  local name="$1" want="$2" period="$3" describe_exit="$4" describe_said="$5" confirm="$6" want_msg="$7"
+  local want_relay="${8:-}" want_absent="${9:-}"
+  # ⚠️ THE BUCKET IS A PARAMETER, so a case can confirm a name that is not
+  # this default. With one hardcoded name serving as both the bucket and the
+  # right confirmation, a guard comparing against that literal string --
+  # rather than against the bucket under lock -- passed everything.
+  local bucket="${10:-scratch}"
+  local dir="$tmp/$RANDOM$RANDOM" out rc
+  mkdir -p "$dir/bin"
+  # ⚠️ THE FAKE RECORDS THE LOCK, AND WHICH BUCKET IT LOCKED. "It said
+  # LOCKED" is not "it locked" -- without this marker, deleting the
+  # `buckets update --lock-retention-period` line left every case green, and
+  # the script announced a one-way door it had never opened. Recording the
+  # arguments rather than a bare touch catches the other half: a lock aimed
+  # at a bucket that is not the one named.
+  {
+    echo '#!/bin/sh'
+    echo 'case "$*" in'
+    printf "  *describe*) printf '%%s\\n' '%s'; printf '%s' >&2; exit %s ;;\n" \
+      "$period" "$describe_said" "$describe_exit"
+    printf "  *lock-retention-period*) printf '%%s' \"\$*\" > '%s/locked'; exit 0 ;;\n" "$dir"
+    echo "  *) exit 0 ;;"
+    echo 'esac'
+  } > "$dir/bin/gcloud"
+  chmod +x "$dir/bin/gcloud"
+
+  set +e
+  out=$(PATH="$dir/bin:$PATH" TRUSS_RECORDS_BUCKET="$bucket" \
+    TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT="$confirm" "$SCRIPT" lock 2>&1); rc=$?
+  set -e
+  local got=clean
+  [ "$rc" -eq 0 ] || got=refuse
+  if [ "$got" != "$want" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: wanted $want, got $got" >&2
+    echo "$out" | sed 's/^/      /' >&2
+    return
+  fi
+  # ⚠️ THE DOOR ITSELF, FIRST AND ON EVERY CASE. A refusal that locked anyway
+  # is the worst outcome this script has, and it is invisible in the exit
+  # code. Asserted BEFORE the wording, because a mutation that opens the door
+  # early usually breaks a message too -- and then the wording failure
+  # returned first and hid the open door completely.
+  if [ "$want" = clean ]; then
+    if [ ! -f "$dir/locked" ]; then
+      fail=$((fail + 1)); echo "FAIL  $name: said so, but never locked" >&2; return
+    fi
+    case "$(cat "$dir/locked")" in
+      *"gs://$bucket"*) ;;
+      *) fail=$((fail + 1))
+         echo "FAIL  $name: locked, but not the bucket it was given -- gcloud got: $(cat "$dir/locked")" >&2
+         return ;;
+    esac
+  fi
+  if [ "$want" = refuse ] && [ -f "$dir/locked" ]; then
+    fail=$((fail + 1)); echo "FAIL  $name: refused, and locked the bucket anyway" >&2; return
+  fi
+
+  assert_out "$name" "$got" "$out" "$want_msg" "$want_relay" "$want_absent" || return 0
+  pass=$((pass + 1)); echo "ok    $name ($got)"
+}
+
+# ⚠️ THE LOAD-BEARING CASE. Two generations of one key is precisely what
+# forbids a lock: retention refuses a REPLACE as well as a delete, so a
+# bucket whose objects are rewritten cannot record the failures you most
+# need recorded once it is locked.
+check "an object with two generations refuses" refuse True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha1#2\ngs://<bucket>/HEAD#5\n' 0 "were written more than"
+
+check "one generation each is clean" clean True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\ngs://<bucket>/HEAD#5\n' 0 "none: every object"
+
+# A rewritten HEAD is the same defect on the key that matters most.
+check "a rewritten HEAD refuses" refuse True \
+  'gs://<bucket>/HEAD#1\ngs://<bucket>/HEAD#2\n' 0 "were written more than"
+
+# Versioning off means overwritten generations were discarded, so the count
+# cannot answer the question -- and saying nothing would read as a pass.
+check "versioning off refuses rather than printing nothing" refuse False \
+  'gs://<bucket>/applied/sha1#1\n' 0 "versioning is not enabled"
+
+# ⚠️ AN EMPTY BUCKET IS NOT A PASS, AND IT IS NOT "REWRITTEN" EITHER. The real
+# gcloud exits non-zero when the wildcard matches nothing, which is the same
+# silence a wrong project or an expired credential gives. Zero objects is no
+# evidence that objects are written once, so it refuses -- and says which of
+# the three answers it is giving.
+check "an empty bucket cannot answer, and refuses" refuse True '' 1 "listed no objects" \
+  'One or more URLs matched no objects.\n' "matched no objects"
+
+# ⚠️ THE SCRIPT CANNOT TELL THIS FROM AN EMPTY BUCKET, and must not pretend
+# to: both print nothing and exit non-zero. What separates them is gcloud's
+# own words, which is why the refusal relays them and why this asserts that.
+check "a failed listing refuses rather than reading as rewritten" refuse True \
+  '' 1 "listed no objects" \
+  'ERROR: (gcloud.storage.ls) HTTPError 403: does not have storage.objects.list access\n' \
+  "HTTPError 403"
+
+# ⚠️ THE CASE THAT MAKES THE EXIT CODE LOAD-BEARING. Every other refusal is
+# reachable through the empty-listing half of the guard, so with only those,
+# deleting the exit-code test left the suite green. A listing that dies
+# partway has already printed objects: the stdout is non-empty, it looks like
+# two well-behaved keys, and it is a fragment.
+check "a listing that failed partway is not a measurement" refuse True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/applied/sha2#1\n' 1 "did not complete" \
+  'ERROR: (gcloud.storage.ls) HTTPError 500\n'
+
+# ⚠️ THE STREAM CASES. gcloud writes notices and retry warnings to stderr on a
+# perfectly successful call, and the script once merged them into the listing:
+# a single notice made an EMPTY bucket look measured and clean, and a warning
+# printed twice came back from `uniq -d` as a rewritten object.
+check "a notice on stderr is not an object" refuse True '' 0 "listed no objects" \
+  'Updates are available for some Google Cloud CLI components.\n' \
+  "Updates are available"
+
+check "a warning repeated on stderr is not a rewrite" clean True \
+  'gs://<bucket>/applied/sha1#1\ngs://<bucket>/HEAD#5\n' 0 "none: every object" \
+  'WARNING: retrying request\nWARNING: retrying request\n'
+
+# ⚠️ THE PROBE'S OWN FAILURE IS NOT "VERSIONING IS OFF". It once swallowed
+# gcloud's exit code and stderr, so a 403 or a misspelled bucket was reported
+# as that one specific and wrong cause with the evidence discarded.
+check "a describe that fails is not a versioning answer" refuse '' '' 0 "could not be described" \
+  '' "HTTPError 403" 1 'ERROR: (gcloud.storage.buckets.describe) HTTPError 403\n'
+
+# A describe that fails without saying anything must not quote a witness that
+# said nothing.
+check "a silent describe failure does not quote an empty witness" refuse '' '' 0 \
+  "could not be described" '' '' 1 '' "gcloud said:"
+
+# ⚠️ lock IS THE ONE-WAY DOOR, and its own probe swallowed gcloud's failure
+# the same way -- reporting "has no retention policy to lock. Run `set` first"
+# for a 403 or a misspelled bucket, which is advice that would then create a
+# policy on whatever bucket the name really points at.
+check_lock "a describe that fails is not an absent policy" refuse '' 1 \
+  'ERROR: (gcloud.storage.buckets.describe) HTTPError 403\n' scratch "could not be described" \
+  "HTTPError 403"
+
+check_lock "a silent describe failure before the door quotes nobody" refuse '' 1 '' scratch \
+  "could not be described" '' "gcloud said:"
+
+check_lock "no policy is refused, and says to set one" refuse '' 0 '' scratch \
+  "no retention policy to lock"
+
+check_lock "an unconfirmed lock is refused" refuse 7776000 0 '' '' \
+  "TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT"
+
+# ⚠️ THE CONFIRMATION IS THE BUCKET'S NAME, NOT A NON-EMPTY STRING. With only
+# the empty and correct values covered, weakening the guard to `[ -n ... ]`
+# left the suite green -- and a confirmation you can satisfy without having
+# read which bucket is about to become permanent is not a confirmation.
+check_lock "confirming the wrong bucket is refused" refuse 7776000 0 '' some-other-bucket \
+  "TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT"
+
+# ⚠️ AND IT IS THE BUCKET UNDER LOCK, not one name this test happens to use
+# everywhere. With a single name serving as both, a guard hardcoded to that
+# literal was indistinguishable from the real rule.
+check_lock "a different bucket, confirmed by its own name, locks" clean 7776000 0 '' \
+  another-ledger "this cannot be undone" '' '' another-ledger
+
+check_lock "the default name does not confirm another bucket" refuse 7776000 0 '' \
+  scratch "TRUSS_RETENTION_I_UNDERSTAND_THIS_IS_PERMANENT" '' '' another-ledger
+
+check_lock "a policy plus the bucket named locks" clean 7776000 0 '' scratch \
+  "this cannot be undone"
+
+echo
+echo "ledger-retention-test: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

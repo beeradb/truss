@@ -116,8 +116,16 @@ func TestSendFailsDistinguishablyWhenNoPublisherIsListening(t *testing.T) {
 	if !strings.Contains(msg, "no publisher listening") {
 		t.Errorf("error %q does not say no publisher was listening", msg)
 	}
+	// path is t.TempDir()'s name: it embeds the test name plus an
+	// OS-chosen counter, so it can coincidentally contain digits like
+	// "403" with nothing to do with Vault. Strip it before checking for
+	// Vault-shaped text, or the test's outcome depends on that counter
+	// rather than on what Send actually wrote -- the same class of bug as
+	// a fixture passing only because a laptop had a kubectl context named
+	// "vault".
+	authored := strings.ReplaceAll(msg, path, "")
 	for _, mustNotContain := range []string{"vault", "Vault", "403", "cas"} {
-		if strings.Contains(msg, mustNotContain) {
+		if strings.Contains(authored, mustNotContain) {
 			t.Errorf("error %q reads like a Vault error (contains %q), want a plain dial failure", msg, mustNotContain)
 		}
 	}

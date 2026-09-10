@@ -342,7 +342,9 @@ var Divergences = []Divergence{
 		Bash: "resource_changes: every entry in tofu's own resource_changes array, no-ops " +
 			"included -- summary_from_plan (apply.sh:598) is `jq '.resource_changes | length'`",
 		Truss: "resource_changes: only entries whose actions are not exactly the single element " +
-			"\"no-op\"; a replace ([\"delete\",\"create\"]) is one changed resource, not two",
+			"\"no-op\"; a replace ([\"delete\",\"create\"]) is one changed resource, not two; and a " +
+			"\"no-op\" carrying `importing` counts, because an import block writes the resource into " +
+			"state and so does not change nothing",
 		Why: "Not an accident: OpenTofu lists every resource the plan LOOKED AT in resource_changes, " +
 			"including ones it will not touch, marked `\"actions\":[\"no-op\"]` (verified against a real " +
 			"`tofu show -json` from a scratch root, not assumed). The bash counts the array; measured in " +
@@ -383,8 +385,11 @@ var Divergences = []Divergence{
 			"in it changes nothing, so there is nothing to prove and nothing an attacker gains -- the apply " +
 			"is a no-op either way. This is the same argument plan.Canonical already makes for dropping " +
 			"individual no-op resources, applied to a plan that is entirely no-ops. ⚠️ An UNREADABLE plan is " +
-			"still gated: countResourceChanges returns (0, false) for one it cannot parse, and treating that " +
-			"as \"no changes\" would be absent-reads-as-compliant, which internal/gates exists to keep out.",
+			"still refused, by name: countResourceChanges errors on a document it cannot read as a plan, and " +
+			"treating that as \"no changes\" would be absent-reads-as-compliant, which internal/gates exists " +
+			"to keep out. A plan that legitimately changes nothing is the other answer -- OpenTofu marshals " +
+			"resource_changes omitempty and errored not, so an omitted key on a real plan document counts " +
+			"zero and applies, exactly as the bash's own (.resource_changes // []) does.",
 		Ref: "cmd/truss/apply_cmd.go applyOneRoot (the no-changes exit); " +
 			"cmd/truss/apply_digest_gate_test.go TestAPlanThatChangesNothingIsNotGated; " +
 			"cmd/truss/apply_partial_multiroot_test.go",
@@ -611,19 +616,65 @@ func emptyPlanIsNotGated(d Diff) bool {
 		return strings.HasPrefix(d.Key, "failed/") && namesTheGate(d.Bash)
 	case "extra-key":
 		// applied/<sha>, which the bash never reaches.
-		return strings.HasPrefix(d.Key, "applied/")
+		//
+		// ⚠️ THE COMMIT, NOT THE PREFIX. `applied/` alone accepted the
+		// record filed under ANY sha -- and applied/HEAD as well, with any
+		// value, reopening on this branch the hole the value branch below
+		// was tightened to close. A record written under the wrong commit
+		// arrives here as a lone extra-key, because the bash writes nothing
+		// under applied/ to counterbalance it. Pinned to the corpus's own
+		// commit, measured the same way as the values below.
+		return d.Key == "applied/sha1"
 	case "value":
+		// The ledger watermark itself: the bash leaves it, truss advances
+		// it. Pinned to the corpus's own two values, measured the same way
+		// and for the same reason as /last_sha below -- accepting any
+		// difference here forgives a regression writing the WRONG sha to the
+		// key that decides where the next pass resumes, which is the most
+		// consequential value in the ledger.
 		if d.Key == "applied/HEAD" {
-			return true
+			return d.Bash == "base" && d.Truss == "sha1"
 		}
 		if !strings.HasPrefix(d.Key, "heartbeat") {
 			return false
 		}
+		// ⚠️ EVERY PATH NAMED, AND THE DEFAULT REFUSES. This read
+		// `default: return true`, which accepted any heartbeat difference
+		// at all in these two scenarios -- an entry that says it is pinned
+		// to one story, forgiving everything. The three below are the whole
+		// structural consequence of the queue advancing instead of
+		// stopping, measured by refusing everything and reading what came
+		// back.
 		switch d.Path {
 		case "/failure":
 			return namesTheGate(d.Bash)
+		case "/applied":
+			// The bash refuses the root and applies nothing; truss finishes
+			// the commit.
+			return d.Bash == "0" && d.Truss == "1"
+		case "/last_sha":
+			// The bash leaves HEAD where it was; truss advances it to the
+			// commit it applied. Pinned to the two values the corpus
+			// actually holds, measured 2026-09-09 by refusing this path and
+			// reading what came back: bash "base", truss "sha1", in both
+			// scenarios this entry names.
+			//
+			// ⚠️ NEITHER `d.Bash != d.Truss` NOR AN ABSENT/EMPTY CHECK CAN
+			// FAIL HERE. compareObject emits a value diff only when the two
+			// sides already differ, and ledger.Heartbeat.LastSHA is a plain
+			// string with no omitempty, so truss always writes one. Both
+			// spellings were tried and both accept everything, exactly like
+			// the `default: return true` they replaced -- so a regression
+			// advancing the watermark to the WRONG sha would be forgiven,
+			// which is the one thing this path is here to notice.
+			//
+			// The literals are the price. A re-recorded corpus fails here
+			// and must be looked at, which is correct: the story is "the
+			// queue advanced past the commit the bash refused", and only
+			// somebody reading the new recording can say it still holds.
+			return d.Bash == "base" && d.Truss == "sha1"
 		default:
-			return true
+			return false
 		}
 	}
 	return false

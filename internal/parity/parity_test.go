@@ -143,3 +143,57 @@ func inList(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory is the negative half of the
+// EMPTY-PLAN-IS-NOT-GATED entry. Its heartbeat case once ended in
+// `default: return true`, so any unrelated heartbeat difference in its two
+// scenarios was forgiven under a divergence that claims to be pinned to one
+// story -- a divergence list that accepts everything says nothing.
+func TestEmptyPlanIsNotGatedAcceptsOnlyItsOwnStory(t *testing.T) {
+	accepted := []Diff{
+		{Kind: "extra-key", Key: "applied/sha1"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure",
+			Bash: "projects/recipes: does not match the one approved at headsha1", Truss: ""},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "0", Truss: "1"},
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "sha1"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "sha1"},
+	}
+	for _, d := range accepted {
+		if !emptyPlanIsNotGated(d) {
+			t.Errorf("%s %s is part of this story and was refused", d.Key, d.Path)
+		}
+	}
+
+	refused := []Diff{
+		// An unrelated field on the same object: exactly what the old
+		// default waved through.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/noop", Bash: "0", Truss: "7"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/expiring", Bash: "[]", Truss: `["cf-token-mint"]`},
+		// The right path, the wrong direction: truss refusing where the
+		// bash applied is not this divergence.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/applied", Bash: "1", Truss: "0"},
+		// A failure that does not name the digest gate.
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/failure", Bash: "tofu apply failed", Truss: ""},
+		// The watermark appearing only on truss's side is not this story
+		// either: both sides always write applied/HEAD. Nor is the applied
+		// record filed under a commit that is not the one this story is
+		// about.
+		{Kind: "extra-key", Key: "applied/HEAD"},
+		{Kind: "extra-key", Key: "applied/someothersha"},
+		// The watermark moved to a sha that is not the commit this story is
+		// about is the regression this key exists to catch.
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "someothersha"},
+		{Kind: "value", Key: "applied/HEAD", Bash: "base", Truss: "<absent>"},
+		// truss recording no last_sha at all, or the WRONG one, is not "the
+		// queue advanced past the commit the bash refused".
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "<absent>"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: ""},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "base", Truss: "someothersha"},
+		{Kind: "value", Key: "heartbeat/applier.json", Path: "/last_sha", Bash: "sha1", Truss: "base"},
+	}
+	for _, d := range refused {
+		if emptyPlanIsNotGated(d) {
+			t.Errorf("%s %s = (%q, %q) is not this story and was accepted", d.Key, d.Path, d.Bash, d.Truss)
+		}
+	}
+}

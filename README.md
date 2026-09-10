@@ -193,3 +193,5 @@ different bucket or a different repository is configuration, not a fork.
   protection toggle, an expiring credential, a leak, a drifted configuration.
 - [docs/development.md](docs/development.md) — repo layout, how to build it,
   and how to run the tests.
+- [docs/toolchain.md](docs/toolchain.md) — the pinned Go, jq and OpenTofu,
+  installed by one command and verified against each project's own checksum.
