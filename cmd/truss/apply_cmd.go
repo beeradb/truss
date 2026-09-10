@@ -350,6 +350,39 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 
 // applyResult is everything cmdApply needs to compute an exit code, after
 // runApplyPass has already written the heartbeat and sent the alert.
+// passFailure is a refusal and the two facts a reader needs to act on it.
+//
+// ⚠️ IT EXISTS BECAUSE THE ALERT NAMED THE WRONG COMMIT, AND THE BASH DID
+// TOO. Both reported the LEDGER POSITION -- the last commit successfully
+// applied -- under the words "FAILED at <sha>", so a failure while
+// processing the NEXT commit pointed a reader at the previous one. Observed
+// 2026-09-10 on a live applier: it reported FAILED at f42f97f while choking
+// on a `provider "tailscale" {}` block that exists only in the commit after
+// it, and the person debugging it had to diff two trees to find that out.
+// The recorded bash corpus does the same thing (every failure alert in
+// internal/parity/testdata says "at base"), so correcting it is a declared
+// divergence rather than a bug fix -- see WRONG-COMMIT-IN-FAILURE-ALERT.
+//
+// Head is separate from SHA because the applier PLANS AT THE BRANCH HEAD
+// while working through the queue one commit at a time, so the tree that
+// produced a tofu error is not in general the tree of the commit whose turn
+// it was. Naming only one of the two is what made the live case take a
+// two-tree diff to explain.
+type passFailure struct {
+	// Reason is the refusal text. Empty means no failure.
+	Reason string
+	// SHA is the commit whose turn it was. Empty when the failure belongs
+	// to no commit -- a protection gate that refused before the loop, a
+	// credential that would not mount, a sweep that could not report. An
+	// empty SHA makes the alert say "FAILED:" with no commit at all, which
+	// is the honest shape: there is no commit to name.
+	SHA string
+	// Head is the branch head whose tree was checked out and planned.
+	// Empty when nothing was planned -- the commit gate refuses before any
+	// checkout.
+	Head string
+}
+
 type applyResult struct {
 	failure    string
 	notifyText string
@@ -369,9 +402,13 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	var (
 		appliedCount, noopCount int
 		failure                 string
-		rotationSummary         any = map[string]string{"skipped": "not a drift run"}
-		driftSummary            any = map[string]string{"skipped": "not a drift run"}
-		rotatedChanges          int
+		// failedSHA is the commit the failure belongs to, and plannedSHA
+		// the branch head whose tree was planned. Both stay empty unless
+		// the commit loop is what failed -- see passFailure.
+		failedSHA, plannedSHA string
+		rotationSummary       any = map[string]string{"skipped": "not a drift run"}
+		driftSummary          any = map[string]string{"skipped": "not a drift run"}
+		rotatedChanges        int
 		// rotationApplied is true only when runRotation actually re-applied
 		// the credentials root on THIS pass and reported no error -- never
 		// on a skip (no credentials root, state lock held elsewhere) and
@@ -554,8 +591,15 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		last = newLast
 		appliedCount = applied
 		noopCount = noop
-		if loopFailure != "" {
-			failure = loopFailure
+		if loopFailure.Reason != "" {
+			failure = loopFailure.Reason
+			// ⚠️ THE COMMIT AND THE HEAD TRAVEL WITH THE REASON, so the
+			// alert can name the commit that failed instead of the ledger
+			// position. Only set here, and only from the loop: a failure
+			// arising anywhere else in this pass belongs to no commit, and
+			// leaving these empty is what makes the alert say so rather
+			// than pointing at whichever commit happened to be last.
+			failedSHA, plannedSHA = loopFailure.SHA, loopFailure.Head
 		}
 
 		// ⚠️ THE FREQUENT PASS DOES NOT ROTATE, AND TRUSS HAD THIS INVERTED.
@@ -711,6 +755,8 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	report := notify.Report{
 		Subject:           defaultAlertSubject,
 		LastSHA:           last,
+		FailedSHA:         failedSHA,
+		PlannedSHA:        plannedSHA,
 		Applied:           appliedCount,
 		Noop:              noopCount,
 		Failure:           failure,
@@ -862,7 +908,7 @@ func tofuUnitsFor(changedFiles, treeUnits []string) []string {
 // stop), and whether it stopped because of state-lock contention -- which
 // is not a failure (§2 item 7): no failed/<sha> is filed, HEAD is not
 // advanced past the contended commit, and the returned failure is empty.
-func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure string, lockContended bool) {
+func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure passFailure, lockContended bool) {
 	// The clone, the fetch and the installation token are runApplyPass's job
 	// now, done BEFORE the drift branch so both paths get a repository -- see
 	// the note there. This function is handed a Git that already carries the
@@ -874,7 +920,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	commits, err := d.Git.Commits(ctx, last, "origin/main")
 	if err != nil {
 		d.Obs.failed(classRepo)
-		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), false
+		return last, 0, 0, passFailure{Reason: fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err)}, false
 	}
 
 	// Recorded before anything is applied, so it is the depth the pass FOUND
@@ -885,7 +931,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
 		d.Obs.failed(classCredentials)
-		return last, 0, 0, err.Error(), false
+		return last, 0, 0, passFailure{Reason: err.Error()}, false
 	}
 
 	for _, sha := range commits {
@@ -925,7 +971,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				d.Obs.failed(classLedger)
 				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 			}
-			return last, applied, noop, reason, false
+			return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 		}
 
 		// ⚠️ THE INVENTORY GATE RUNS HERE, BEFORE ANY ROOT IS DERIVED OR ANY
@@ -943,13 +989,13 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				d.Obs.failed(classLedger)
 				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 			}
-			return last, applied, noop, reason, false
+			return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 		}
 
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
 			d.Obs.failed(classRepo)
-			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not read changed files for %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		// ⚠️ roots COMES FROM repo.TouchedUnits, NOT repo.TouchedRoots.
 		// TouchedRoots only ever names credentials, platform and
@@ -968,7 +1014,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		treeTofuUnits, err := d.Git.TreeTofuUnits(ctx, sha)
 		if err != nil {
 			d.Obs.failed(classRepo)
-			return last, applied, noop, fmt.Sprintf("could not read the tree for %s: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not read the tree for %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		roots := tofuUnitsFor(changedFiles, treeTofuUnits)
 
@@ -979,7 +1025,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		treeAnsibleUnits, err := d.Git.TreeAnsibleUnits(ctx, sha)
 		if err != nil {
 			d.Obs.failed(classRepo)
-			return last, applied, noop, fmt.Sprintf("could not read the plays at %s: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not read the plays at %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		plays := ansibleUnitsFor(changedFiles, treeAnsibleUnits)
 
@@ -989,7 +1035,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		// stays reserved for internal/parity's comparison against the bash.
 		treeRenderUnits, err := d.Git.TreeRenderUnits(ctx, sha)
 		if err != nil {
-			return last, applied, noop, fmt.Sprintf("could not read the render units for %s: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not read the render units for %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		renderUnits := renderUnitsFor(changedFiles, treeRenderUnits)
 
@@ -1008,12 +1054,12 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
 				d.Obs.ledgerError()
 				d.Obs.failed(classLedger)
-				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), false
+				return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not record noop for %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 			}
 			if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
 				d.Obs.ledgerError()
 				d.Obs.failed(classLedger)
-				return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
+				return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not advance head to %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 			}
 			last = sha
 			noop++
@@ -1027,7 +1073,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				d.Obs.ledgerError()
 				d.Obs.failed(classLedger)
 			}
-			return last, applied, noop, reason, false
+			return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 		}
 
 		summaries := map[string]ledger.RootSummary{}
@@ -1036,7 +1082,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			summary, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, headSHA, root)
 			if lockBusy {
 				d.logf("state lock held elsewhere; ending this pass without recording a failure")
-				return last, applied, noop, "", true
+				return last, applied, noop, passFailure{}, true
 			}
 			if reason != "" {
 				d.Obs.rootFailed(root)
@@ -1045,7 +1091,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 					d.Obs.failed(classLedger)
 					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 				}
-				return last, applied, noop, reason, false
+				return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 			}
 			if summary.ResourceChanges != nil {
 				d.Obs.rootChanged(root, *summary.ResourceChanges)
@@ -1068,7 +1114,7 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 					d.Obs.failed(classLedger)
 					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 				}
-				return last, applied, noop, reason, false
+				return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 			}
 		}
 
@@ -1090,25 +1136,25 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
 					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 				}
-				return last, applied, noop, reason, false
+				return last, applied, noop, passFailure{Reason: reason, SHA: sha, Head: headSHA}, false
 			}
 		}
 
 		if err := d.Journal.PutApplied(ctx, sha, summaries); err != nil {
 			d.Obs.ledgerError()
 			d.Obs.failed(classLedger)
-			return last, applied, noop, fmt.Sprintf("could not record %s as applied: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not record %s as applied: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
 			d.Obs.ledgerError()
 			d.Obs.failed(classLedger)
-			return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
+			return last, applied, noop, passFailure{Reason: fmt.Sprintf("could not advance head to %s: %v", sha, err), SHA: sha, Head: headSHA}, false
 		}
 		last = sha
 		applied++
 	}
 
-	return last, applied, noop, "", false
+	return last, applied, noop, passFailure{}, false
 }
 
 // credCache lazily reads the "applying credentials" -- Google's key, the

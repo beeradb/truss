@@ -236,12 +236,16 @@ func alertReasonIsTheExitStatus(d Diff) bool {
 	if d.Kind != "alert" {
 		return false
 	}
-	cut := strings.Index(d.Bash, " (applied=")
+	// Frame canonicalised on both sides for the reason
+	// canonicaliseFailureFrame gives: this matcher is about the reason
+	// being reduced to an exit status, not about which commit is named.
+	bashAlert, trussAlert := canonicaliseFailureFrame(d.Bash), canonicaliseFailureFrame(d.Truss)
+	cut := strings.Index(bashAlert, " (applied=")
 	if cut < 0 {
 		return false
 	}
-	head, tail := d.Bash[:cut], d.Bash[cut:]
-	rest, ok := strings.CutPrefix(d.Truss, head+": exit status ")
+	head, tail := bashAlert[:cut], bashAlert[cut:]
+	rest, ok := strings.CutPrefix(trussAlert, head+": exit status ")
 	if !ok {
 		return false
 	}
@@ -251,6 +255,43 @@ func alertReasonIsTheExitStatus(d Diff) bool {
 	}
 	_, err := strconv.Atoi(status)
 	return err == nil
+}
+
+// failureFrame matches the opening clause of a failure alert on either
+// side: "<subject> FAILED at <sha>: ", "<subject> FAILED at <sha> (planned
+// at <head>): " or "<subject> FAILED: ". The three are the same fact said
+// three ways -- see WRONG-COMMIT-IN-FAILURE-ALERT for why truss stopped
+// saying the first one.
+var failureFrame = regexp.MustCompile(`^(.*) FAILED(?: at [^ :]+(?: \(planned at [^ )]+\))?)?: `)
+
+// canonicaliseFailureFrame rewrites either implementation's failure frame
+// to one form, so a matcher about the REASON is not also a matcher about
+// which commit the alert names.
+//
+// ⚠️ THE TWO ARE SEPARATE DIVERGENCES AND MUST NOT BE POLICED BY ONE
+// MATCHER. Before this, every reason-wording entry compared whole alert
+// strings, so each one silently also asserted "and the sha is the same" --
+// which meant correcting the sha broke six unrelated entries at once, none
+// of which is about shas. WRONG-COMMIT-IN-FAILURE-ALERT is what covers the
+// frame, and the frame's correctness is checked properly by unit tests in
+// internal/notify and cmd/truss rather than here: parity can only ever
+// compare truss against the bash's answer, and on this point the bash's
+// answer is the wrong one.
+func canonicaliseFailureFrame(s string) string {
+	return failureFrame.ReplaceAllString(s, "$1 FAILED: ")
+}
+
+// alertNamesADifferentCommit accepts a failure alert that differs ONLY in
+// its opening frame -- the reason, the counts and every appended clause
+// byte-identical.
+func alertNamesADifferentCommit(d Diff) bool {
+	if d.Kind != "alert" {
+		return false
+	}
+	if !failureFrame.MatchString(d.Bash) || !failureFrame.MatchString(d.Truss) {
+		return false
+	}
+	return canonicaliseFailureFrame(d.Bash) == canonicaliseFailureFrame(d.Truss)
 }
 
 // Divergences is the whole list. Read the type doc before adding to it.
@@ -486,6 +527,50 @@ var Divergences = []Divergence{
 			"owner should decide whether the bash gets fixed to match, or this becomes an accepted improvement.",
 		Ref: "applier/apply.sh:136 (die) vs :1112-1113 (write_heartbeat; send_telegram, unconditionally last)",
 	},
+	{
+		ID:     "WRONG-COMMIT-IN-FAILURE-ALERT",
+		Status: StatusIntended,
+		Kind:   "alert",
+		Scenarios: []string{
+			"test_a_missing_strict_key_is_not_read_as_compliant",
+			"test_a_plan_that_differs_from_the_approved_one_is_refused",
+			"test_a_root_with_no_approved_plan_is_refused",
+			"test_a_spent_allowance_fails_the_daily_sweep_and_still_reports",
+			"test_approval_on_an_older_head_sha_is_refused",
+			"test_branch_protection_below_the_bar_refuses_everything",
+			"test_branch_protection_without_strict_is_refused",
+			"test_infra_admin_token_is_read_only_when_a_project_root_needs_it#2",
+			"test_merge_commit_not_githubs_own_is_refused",
+			"test_rotation_does_not_run_when_the_branch_protection_gate_failed",
+			"test_rotation_failure_is_ledgered_alerted_and_fails_the_run",
+			"test_rotation_never_advances_past_a_commit_the_loop_refused",
+			"test_tofu_apply_failure_stops_the_pass_and_leaves_later_commit_unapplied",
+			"test_tofu_plan_failure_is_ledgered_and_nothing_is_applied",
+			"test_two_prs_for_one_commit_is_refused",
+		},
+		Accept: alertNamesADifferentCommit,
+		Bash:   "\"FAILED at <sha>\" where <sha> is the LEDGER POSITION -- the last commit that succeeded -- whatever actually failed",
+		Truss:  "\"FAILED at <sha>\" naming the commit that failed, plus \"(planned at <head>)\" when the tree planned was a different one; and \"FAILED:\" with no commit at all when the failure belongs to none",
+		Why: "The bash prints $LAST_SHA under the word \"at\", so a refusal of the NEXT commit points a reader at " +
+			"the previous one. That is not a cosmetic difference: it was observed misleading somebody on a live " +
+			"applier on 2026-09-10, which reported \"FAILED at f42f97f\" while choking on a `provider " +
+			"\"tailscale\" {}` block that exists only in the commit AFTER f42f97f -- and finding that out took " +
+			"diffing two trees. The applier also PLANS AT THE BRANCH HEAD while working through the queue one " +
+			"commit at a time, so the tree that produced a tofu error is not in general the tree of the commit " +
+			"whose turn it was; naming only one of the two is what made that case ambiguous even once the right " +
+			"commit was named. And a failure that belongs to no commit -- a protection gate that refused before " +
+			"the queue was read, a credential that would not mount, a sweep that could not report -- now names " +
+			"none, where the bash still printed a plausible and irrelevant one. " +
+			"⚠️ This is truss disagreeing with what the bash does, not with what anyone decided it should do: " +
+			"nobody chose $LAST_SHA here, it is simply the variable that was in scope. The failed/<sha> ledger " +
+			"record was always keyed by the RIGHT commit, so the two sinks disagreed with each other and only " +
+			"the ledger was correct. " +
+			"⚠️ Verified by unit test rather than here, deliberately: parity can only compare truss against the " +
+			"bash's answer, and on this point the bash's answer is the wrong one. See " +
+			"TestAFailureNamesTheCommitThatFailedNotTheLedgerPosition (internal/notify) and " +
+			"TestTheAlertNamesTheFailingCommitAndTheTreeItPlanned (cmd/truss).",
+		Ref: "internal/notify/compose.go (the failure clause) vs applier/apply.sh:408-448 (send_telegram)",
+	},
 }
 
 // exactOrAlert accepts the same pair of strings whether it arrives as a
@@ -501,8 +586,12 @@ func exactOrAlert(bash, truss string) func(Diff) bool {
 		if d.Kind != "alert" {
 			return false
 		}
-		return strings.Contains(d.Bash, bash) && strings.Contains(d.Truss, truss) &&
-			strings.Replace(d.Bash, bash, truss, 1) == d.Truss
+		// The frame is canonicalised on both sides first: this helper is
+		// about the REASON, and which commit the alert names is a separate,
+		// separately-declared divergence. See canonicaliseFailureFrame.
+		db, dt := canonicaliseFailureFrame(d.Bash), canonicaliseFailureFrame(d.Truss)
+		return strings.Contains(db, bash) && strings.Contains(dt, truss) &&
+			strings.Replace(db, bash, truss, 1) == dt
 	}
 }
 

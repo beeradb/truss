@@ -75,8 +75,8 @@ func TestOneCredentialCachePerPass(t *testing.T) {
 	defer cancel()
 
 	newLast, applied, _, loopFailure, _ := runCommitLoop(ctx, deps, head, cc)
-	if loopFailure != "" {
-		t.Fatalf("runCommitLoop: %s", loopFailure)
+	if loopFailure.Reason != "" {
+		t.Fatalf("runCommitLoop: %s", loopFailure.Reason)
 	}
 	if applied != 1 {
 		t.Fatalf("runCommitLoop applied %d commits, want 1 -- the credentials root never got exercised", applied)
