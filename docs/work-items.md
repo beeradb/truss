@@ -485,91 +485,67 @@ actors, check `GET /repos/{o}/{r}/rules/branches/main` and each ruleset it
 names for a non-empty `bypass_actors` -- the gate will otherwise announce it
 the hard way, by refusing the next pass.
 
-## `data "external"` executes during the applier's own plan
+## The provisioner / `helm_release` gate is built; `data "external"` is not, and cannot be from here
 
-`docs/threat-model.md` credits a grep for `provisioner` blocks and `external`
-data sources. No such check exists in this tree — it lives in the consumer's
-CI, and CI is not where it matters most.
+`docs/threat-model.md` used to credit a grep for `provisioner` blocks and
+`external` data sources that lived only in the consumer's CI — "and CI is not
+where it matters most." Deferred twice: a regex over HCL source was refused
+("gate on the field, never rendered text" — a `provisioner` inside a comment,
+a string or a heredoc is the flow-style-YAML bug again), `hashicorp/hcl/v2`
+was refused (port-plan.md §7.1 makes every package standard library only,
+and a hand-written HCL tokenizer that gets comments, quoting and heredocs
+subtly wrong fails OPEN, worse than the gap), and the plan-JSON route was
+"the right shape but UNVERIFIED — no tofu binary here."
 
-Terraform and OpenTofu read a data source **during plan**, deferring to apply
-only when an argument is unknown. So `data "external"` and `data "http"` in a
-merged tree run with the applier's credentials and network position on every
-pass, and the daily drift pass re-plans EVERY root, so an untouched root's
-data source fires once a day forever. The digest gate is downstream of this:
-the code has already run before any gate is consulted. `provisioner` is the
-opposite case and is safe to catch later, since it only runs on apply.
+**Now measured against tofu 1.12.6, and built:** `internal/plan.Declarations`
+reads `configuration.root_module.resources[].provisioners[].type` — present
+only on a resource that actually declares one — and recurses
+`module_calls[*].module` to any depth, because a provisioner inside a module
+does NOT appear under `root_module.resources` at all; that array is empty for
+it. Reading only the root module fails OPEN, and the platform this serves is
+almost entirely modules, so that was the difference between a working gate
+and a decorative one. `internal/gates.CheckDeclarations` refuses any
+provisioner found this way (it runs arbitrary commands at apply time, on the
+machine holding write credentials for four clouds, with no diff of what it
+will do) and any `helm_release` resource (closing the gap recorded below),
+naming the address and type of every offender, not just the first.
 
-⚠️ **And a grep would be the wrong fix.** "Gate on the field, never rendered
-text" applies here exactly as it did to the flow-style YAML regex. The check
-is an HCL parse of the checked-out tree (`hashicorp/hcl/v2`, walking `resource`
-and `data` block labels), run before `tofu init`, in the applier's own loop as
-well as CI's. `terraform-config-inspect` is the wrong library: it discards
-resource bodies by design.
+⚠️ **This is not yet wired into the applier's pass.** `internal/gates` and
+`internal/plan` are built and tested (including against real plan JSON
+generated with `tofu init`/`plan`/`show -json`, at zero, one and two module
+levels of nesting), but nothing in `cmd/truss` calls `CheckDeclarations` yet.
+Until it is, the row in `docs/threat-model.md` describes a check that exists
+in this tree, not one the running pass performs.
 
-Deferred because it needs the consumer's CI workflow read alongside it —
-three questions decide the scope: what ref that workflow checks out, whether
-its `permissions:` are narrowed, and whether its existing refusal runs before
-`tofu init` or after. GitHub's own guidance on `pull_request_target` is that
-checked-out code must be "only ever inspected as data and never executed",
-and `tofu plan` is not inspection.
+**`data "external"` and `data "http"` remain unaddressed, and this gate
+cannot be extended to cover them.** Terraform and OpenTofu read a data source
+**during plan**, deferring to apply only when an argument is unknown, so
+`data "external"` and `data "http"` in a merged tree execute with the
+applier's credentials and network position on every pass — and the daily
+drift pass re-plans EVERY root, so an untouched root's data source fires once
+a day forever. `provisioner` and `helm_release` are configuration facts a
+plan JSON exposes as fields, checkable AFTER the plan runs and BEFORE apply;
+a data source has no such checkpoint, because the thing being guarded against
+has already executed by the time any plan JSON exists to read. Only a
+source-level check — the same HCL-parse this entry ruled out as a dependency,
+or a read of the consumer's CI workflow (what ref it checks out, whether
+`permissions:` are narrowed, whether its refusal runs before `tofu init`) —
+could catch it before it runs, and neither is built. This half is still open
+and belongs in this register until one of those is.
 
-## The provisioner / `data "external"` gate, and why it is not built yet
-
-`docs/threat-model.md` credits a grep for `provisioner` blocks and `external`
-data sources. No such check exists in this tree — it lives in the consumer's
-CI, and CI is not where it matters most. Terraform and OpenTofu read a data
-source **during plan**, deferring to apply only when an argument is unknown, so
-`data "external"` and `data "http"` in a merged tree execute with the applier's
-credentials on every pass, and the daily drift pass re-plans EVERY root, so an
-untouched root's data source fires once a day forever. The digest gate sits
-downstream: the code has already run before any gate is consulted.
-
-⚠️ **Attempted 2026-09-09 and deliberately stopped, because every route to it
-either breaks a rule or ships a gate nobody can prove.** Recorded so the next
-pass does not rediscover this:
-
-- **A regex over the source is out.** "Gate on the field, never rendered text"
-  exists for precisely this, and a `provisioner` inside a comment, a string or
-  a heredoc is the flow-style-YAML bug again.
-- **An HCL parser is out.** `hashicorp/hcl/v2` is a dependency, and
-  port-plan.md §7.1 makes every package standard library only. Hand-writing an
-  HCL tokenizer that gets comments, quoting and heredocs right is a real
-  parser, and one that is subtly wrong fails OPEN — worse than the gap.
-- **The plan JSON's `configuration` block is the right shape but unverified.**
-  `tofu show -json` is documented to expose
-  `configuration.root_module.resources[].provisioners[]` as fields, which would
-  make provisioners a field-level check needing no parser. ⚠️ **There is no
-  `tofu` binary in the development environment, so that shape cannot be
-  confirmed here**, and `countResourceChanges`'s comments show this codebase's
-  standard is to verify against a real `tofu show -json` before depending on a
-  shape. Do not build it from the documentation alone.
-
-**What splits cleanly when someone has a real plan file to look at:**
-`provisioner` runs only at APPLY, so catching it from the plan JSON between
-plan and apply is sound and complete — that half needs no parser and no
-dependency. `data "external"` and `data "http"` run at PLAN, so nothing
-downstream of the plan can prevent them; catching them there refuses the apply
-but does not stop the execution that already happened. Those two halves want
-different mechanisms and should not be built as one gate.
-
-## `helm_release` has no enforcer
+## `helm_release` had no enforcer on the tofu side — closed above
 
 The render gate refuses `--enable-helm` (`internal/render`) and kustomize
-refuses a `helmCharts` field itself when the flag is absent — that half is
-real. Nothing refuses the same escape taken from the tofu side: a
-`helm_release` resource in an OpenTofu root reaches a chart repository at
-*apply* time exactly the way `--enable-helm` reaches one at render time, and
-no gate in this tree looks for one.
-
-What closing it would take is the same shape as the deferred provisioner
-gate above: `tofu show -json`'s plan JSON names each resource's provider and
-type, so `helm_release` is a field-level check over
-`configuration.root_module.resources[]`, needing no HCL parser — the same
-reasoning that splits the provisioner gate cleanly from a source-level check.
-It is deferred for the same reason that one is: there is no `tofu` binary in
-this environment to confirm the shape against, and this codebase's standard,
-stated there, is to verify against a real `tofu show -json` before depending
-on one.
+refuses a `helmCharts` field itself when the flag is absent, so
+`docs/design.md`'s "Helm is refused in every form" was only half true: a
+`helm_release` resource in an OpenTofu root reached a chart repository at
+*apply* time exactly the way `--enable-helm` reached one at render time, with
+nothing in this tree looking for it. `internal/gates.CheckDeclarations`
+above now refuses it, by the same field-level check over
+`configuration.root_module.resources[]` (and every module beneath it) that
+closes the provisioner gate — no HCL parser needed, since `type` is a plain
+field in the plan JSON. It carries the same wiring caveat as the entry above:
+built and tested, not yet called from `cmd/truss`.
 
 ## The ledger records history it cannot prove
 
@@ -987,6 +963,31 @@ again.
 
 Also unrecorded anywhere else: the package itself, and `truss inventory
 validate`, are described in no document in `docs/`.
+
+## `CheckMoves` exists and is not wired
+
+`internal/inventory.CheckMoves(before, after Snapshot) []string` refuses a
+stateful environment whose `placement.cluster`, `placement.host` or `shape`
+changed between two snapshots -- the one moment a workload's data would be
+silently orphaned, since PVCs do not follow a placement change and nothing in
+this system makes them. `Check` cannot see this on its own: it takes one
+`Snapshot`, so a move is invisible to it -- the new placement is all that is
+left to look at, with nothing recording that it changed from something else.
+
+Nothing calls it. `cmd/truss` has no `inventory` verb that loads two trees,
+and the applier -- the one caller with both sides in hand, the commit and its
+parent -- does not call it either. It is a function nobody calls, and until
+that changes this is a claim, not a check: an operator could move a stateful
+workload's cluster today and nothing here would refuse it.
+
+What closing it takes: the applier already resolves a commit's parent to
+diff plans; loading `inventory.Load` against both trees (parent as `before`,
+head as `after`) and running `CheckMoves` alongside the existing `Check` is
+the same shape of call already made for the single-snapshot case in
+`cmd/truss/inventory_cmd.go`. The parent tree has to come from the same
+checkout the applier already has -- `git show <parent>:inventory/...` via an
+`fs.FS` adapter, not a second clone -- since `inventory.Load` takes an
+`fs.FS` and performs no I/O of its own.
 
 ## Checked and deliberately not wanted
 
@@ -1424,3 +1425,60 @@ knowing the right people; that has to become an ordinary, documented way to
 run or reach a full-history node before anything depends on it. ⚠️ Steps 1-3 are not a substitute for this and do not foreclose
    it — 17a-4's lesson is that the two halves are complementary, and the
    storage half is the one available now.
+
+## `internal/tailnet` exists and is not wired into the pass
+
+A client for listing tailnet devices, and a pure reconciliation of that list
+against the committed host inventory, built 2026-09-10. Neither half does
+anything the daily pass calls yet -- this entry exists so that stays a
+recorded fact rather than something the next reader has to rediscover from
+the absence of a call site.
+
+The shape follows the design rule this whole tree already runs on: git is
+the source of truth for which machines are managed, and the tailnet is an
+observation, never an input. `tailnet.Reconcile` takes plain device and host
+names and returns two lists -- `UnknownTagged` (a device carrying the
+managed tag that no declared host names, the dangerous direction: an
+intruder or a forgotten host, either way a person's problem) and
+`Unreachable` (a declared host absent from the tailnet, or stale beyond a
+caller-supplied window). Neither list is ever acted on inside the function;
+it names disagreements the same way the credential expiry sweep does, and
+nothing reconciles or removes.
+
+`tailnet.Client` speaks the Tailscale API over `net/http` by hand, matching
+`internal/secrets/kv.go` and `internal/forge/client.go`: a bounded timeout,
+an overridable `BaseURL` so tests never touch the real host, a non-2xx
+turned into a named error rather than an empty device list, and the API key
+kept out of every returned error string by rebuilding errors from redacted
+text rather than wrapping them (`*url.Error` re-renders the request URL on
+every `.Error()` call, which is what makes wrapping insufficient). The
+endpoint, wrapper key and field spellings were verified against the live
+OpenAPI document Tailscale's own interactive API reference renders --
+fetched directly, not guessed -- rather than against a possibly-stale
+mirror; that document also settled a real quirk worth recording:
+`lastSeen` is *omitted*, not zeroed, both for a device that has never come
+online and for one connected to the control server right this second. The
+client folds the second case into "seen at the moment of this call" so a
+live device never reads as maximally stale, and leaves the first as the Go
+zero value, which reads as maximally overdue -- correctly, since a
+registered device that has never checked in is exactly what "unreachable"
+should mean.
+
+**What wiring it in would take**: a daily pass reading a `tailscale-api-key`
+credential from the same mount every other credential here comes through,
+mapping `internal/inventory`'s `Host` records to the plain names
+`Reconcile` takes (deliberately kept out of this package -- see its own doc
+comment, "keeping it ignorant is what lets it be tested without building an
+inventory fixture, and stops a change to the inventory schema rippling in
+here"), and naming both findings lists in the alert the way the expiry
+sweep already names its own.
+
+⚠️ **An unwired sweep is a claim, not a check.** "A check nobody has watched
+fail is a claim" applies here in its other direction too: nothing calls
+`Reconcile` today, so nothing here protects anything yet. `client_test.go`
+and `reconcile_test.go` were each watched red before being trusted --
+ignoring `managedTag` turned the untagged-unknown-device case red, silently
+skipping an unreachable host turned both unreachable cases red, and making
+a non-2xx return an empty slice instead of an error turned the status and
+credential-hygiene tests red -- but that proves the two functions do what
+they claim, not that anything downstream depends on them yet.

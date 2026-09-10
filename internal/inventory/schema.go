@@ -70,6 +70,15 @@ type Environment struct {
 	Requires  []string  `json:"requires"`
 	Vault     VaultRef  `json:"vault"`
 	Frozen    bool      `json:"frozen"`
+	// Stateful is tri-state for the same reason Cluster.HasHAVault is: a
+	// workload that has never said whether it holds persistent state (a
+	// PVC, a database, anything that does not follow the delivery unit) is
+	// a different fact from one that has said "no", and a bool defaulting
+	// nil to false would read every never-asked environment as safe to
+	// move -- which is exactly the environment CheckMoves exists to catch.
+	// Check refuses the nil case; both true and false are answers it
+	// accepts.
+	Stateful *bool `json:"stateful"`
 }
 
 // Placement is where one environment runs. Exactly one of Cluster or Host

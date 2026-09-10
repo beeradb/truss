@@ -30,7 +30,7 @@ func validInventoryFiles() map[string]string {
 			"schema":"truss.environment/v1","project":"wren","name":"prod",
 			"shape":"kubernetes","placement":{"cluster":"prod","namespace":"web"},
 			"requires":["ingress"],"vault":{"mount":"secret","prefix":"wren/prod"},
-			"frozen":false}`,
+			"frozen":false,"stateful":false}`,
 		"deliveries/prod/web/kustomization.yaml": "kind: Kustomization\n",
 	}
 }
