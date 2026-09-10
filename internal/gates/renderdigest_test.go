@@ -7,8 +7,12 @@ import (
 
 const (
 	renderUnit = "deliveries/beta/web"
-	renderHead = "0123456789abcdef0123456789abcdef01234567"
-	renderKey  = "digests/0123456789abcdef0123456789abcdef01234567/deliveries-beta-web.digest"
+	// Placeholder shas are deliberately not hex. scripts/leakscan refuses any
+	// 32+ character hex run, because it cannot tell a fabricated sha from an
+	// account id or a real digest -- and a scanner that could tell would need
+	// a list of the real ones, which would itself be the leak.
+	renderHead = "headsha1"
+	renderKey  = "digests/headsha1/deliveries-beta-web.digest"
 )
 
 func TestCheckRenderDigestAcceptsAMatch(t *testing.T) {

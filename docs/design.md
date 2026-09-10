@@ -173,6 +173,47 @@ compares them, rather than trusting that they're still what somebody set:
 | Enforce for administrators | on | the approver has admin rights and could otherwise walk past every rule above by accident |
 | Allow force pushes / deletions | off | history is the audit log |
 
+## Rendered manifests are gated the same way, and the difference is instructive
+
+A delivery unit is a Kustomize directory. CI renders it, hashes the exact
+bytes, and files the digest under the same prefix as a plan digest; the
+applier renders it again and refuses unless the bytes agree.
+
+It is the easier half of the same idea, and the reason is worth stating. A
+plan depends on the tree *and* on the live infrastructure, which is why
+`internal/plan` reproduces a jq pipeline byte for byte and has to filter no-op
+entries — two identities with different read permissions see different
+attribute values in one plan, and that once made two "No changes" plans hash
+differently and refused every apply. A render depends on the tree alone: no
+state, no credentials, no network. So there is nothing to canonicalise, the
+bytes are hashed as they are, and the renderer is handed `PATH` and `HOME` and
+nothing else. **The moment a render could read a credential, it could produce
+output that depends on who ran it, and the two sides would stop agreeing.**
+
+Two consequences follow from the same fact:
+
+- **A mismatch is never reported as "the world moved".** It cannot have been;
+  a render reads no world. It means the two sides ran different renderer
+  versions, the unit has a non-deterministic input, or the tree is not the one
+  that was reviewed — and sending an operator to look at their infrastructure
+  for a fault in their repository would waste the alert.
+- **Nothing is exempt.** The credentials root is exempt from the *plan* gate
+  because CI genuinely cannot plan it, which is a fact about the world rather
+  than a convenience. Rendering has no equivalent fact, so a unit CI could not
+  render is one the applier cannot render either.
+
+Helm is refused in every form — no binary, no `helm_release`, and no
+`kustomize build --enable-helm`. The flag makes the renderer fetch a chart
+from a repository *at render time*, which is the network reach the baked
+provider mirror exists to prevent, and it re-admits `randAlphaNum` and `now`,
+which can never hash the same twice. Charts are inflated once, by hand, and
+the rendered manifests are committed — so the reviewer reads the manifests
+rather than a version number. Enforcement needs no parser: kustomize refuses a
+`helmCharts` field on its own when the flag is absent, so never passing it is
+the whole rule.
+
+The applier renders and compares. It applies nothing: a reconciler does that.
+
 Absent isn't the same as false, and code that treats them the same is
 dangerous here: `jq '.allow_force_pushes.enabled // true'` turns a compliant
 `false` into a non-compliant `true`, because `//` fires on `false` exactly as

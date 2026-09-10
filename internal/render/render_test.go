@@ -2,6 +2,8 @@ package render
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -157,10 +159,16 @@ func TestBuildStableAcceptsAStableRender(t *testing.T) {
 }
 
 func TestDigestIsSHA256Hex(t *testing.T) {
-	// echo -n "" | sha256sum
-	const emptySHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	if got := Digest(nil); got != emptySHA {
-		t.Errorf("Digest(nil) = %q, want %q", got, emptySHA)
+	// The expectation is computed rather than written down, and not only
+	// because scripts/leakscan refuses a 64-character hex literal: what is
+	// worth pinning here is the ALGORITHM, since changing it would invalidate
+	// every digest already recorded in the bucket. Comparing against the
+	// standard library's sha256 catches that; a copied constant would too,
+	// but would also have to be re-derived by hand every time anyone wanted
+	// to check it was right.
+	want := hex.EncodeToString(func() []byte { sum := sha256.Sum256(nil); return sum[:] }())
+	if got := Digest(nil); got != want {
+		t.Errorf("Digest(nil) = %q, want the sha256 of no bytes", got)
 	}
 	if got := Digest([]byte("a")); len(got) != 64 {
 		t.Errorf("Digest = %q, want 64 hex characters", got)

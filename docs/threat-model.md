@@ -13,6 +13,8 @@
 | pushes directly to `main` (protection off) | not a forge merge commit → refused | signature/committer check |
 | gets the plan job's secrets | reads configuration and state. Changes nothing, reads no token | plan-tier credentials are read-only, and those states hold no secret |
 | swaps what would be applied between review and merge — a compromised CI, a resource that moved, a root applied earlier in the same pass | the applier's own plan stops matching the digest CI filed, so the root is refused rather than applied | the plan-digest gate |
+| merges a commit that touches no OpenTofu root without an approval | refused; the queue stops. The gate runs for every commit, not only the ones that apply something | approval + merge-provenance check, before the roots are derived |
+| edits a delivery unit's manifests after CI rendered them | the applier's own render stops matching the digest CI filed, so the commit is refused | the render-digest gate |
 | gets root on the box the applier runs on | has everything. **This is the trust root**, stated, not hidden | — |
 
 ## What this does NOT protect against

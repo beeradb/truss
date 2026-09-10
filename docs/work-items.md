@@ -661,6 +661,60 @@ optional. `actions/setup-go` caches by default and that cache includes
 `GOCACHE`, which is where test results live — so a PR that does not touch
 `go.mod` can restore cached results. One flag.
 
+## `scripts/check` is weaker than it looks on work that is not staged yet
+
+`scripts/leakscan` enumerates with `git ls-files` (`scripts/leakscan:26`), so
+it scans **tracked files only**. New work sits untracked until `git add`, which
+means a full `scripts/check` run over a branch's worth of new files reports
+`check: clean` without having read any of them.
+
+Measured 2026-09-10: three 32+ character hex literals in two new test files
+survived several clean `scripts/check` runs and were refused by the very next
+run, immediately after the commit that tracked them. Nothing leaked — they were
+a fabricated sha and the sha256 of no bytes — but the scan that would have
+caught a real one had not looked.
+
+The commit path is not itself broken: by the time anything is committed the
+files are tracked, so the scan before the *next* commit sees them. What is
+misleading is the habit the checklist encourages — run `scripts/check`, read
+`clean`, then commit — because on a first commit of new files those are the
+wrong way round.
+
+⚠️ **Do not "fix" this by scanning the working tree.** `git ls-files` is also
+what keeps the scan from reading build output, editor droppings and anything
+else `.gitignore` covers, and a scanner that refuses a file nobody is
+publishing trains people to ignore it. The candidates are: scan `git ls-files`
+plus `git diff --cached --name-only`, so staged-but-new files are included; or
+have `scripts/check` say out loud how many files it scanned, so "clean" over
+zero new files is visibly not the same as "clean" over forty. The second is
+smaller and does not change what is refused.
+
+## The delivery ref is not built, and the reason is the gate rather than the push
+
+The applier renders every delivery unit a commit touches and refuses unless the
+bytes match what CI filed. What it does **not** do yet is publish the result: a
+reconciler still has nothing to track, so the render gate today refuses bad
+manifests without yet being the thing that ships good ones.
+
+The design is a ref only the applier advances — `refs/heads/queued`, fast
+forwarded after every unit of a commit has passed, with a reconciler tracking
+that ref and never `main`. Advancing it is a few lines: `git push` refuses a
+non-fast-forward on its own, so the ordering property is the tool's.
+
+The gate is what is missing. A ref a reconciler applies from is a path to
+production, and publishing one without proving it is protected would add an
+ungated route — anyone with write access could push to it directly. Proving it
+needs a check that the ruleset covering that ref blocks force pushes and
+deletion and restricts who may update it, and `gates.Rulesets` carries only
+enforcement and bypass actors today; the rule *types* are not decoded, and the
+field semantics could not be verified here against a real forge.
+
+⚠️ **The rule is the same one that deferred the `provisioner` gate twice: a
+gate nobody can prove is worse than a gap somebody has written down.** The
+gap is here. Closing it means decoding `rules[].type` in
+`internal/forge/rulesets.go` and adding the sibling of `CheckRulesets` for a
+non-branch ref, verified against a repository that actually has the ruleset.
+
 ## Checked and deliberately not wanted
 
 Recorded so the next survey does not re-derive them.
