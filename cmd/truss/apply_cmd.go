@@ -78,12 +78,25 @@ type applyDeps struct {
 	// and this one's is the narrowest, because a play's tasks run on
 	// somebody else's machine (see ansibleEnv).
 	NewAnsible ansibleFactory
-	// Tailnet lists the devices on the tailnet, the live evidence half of
-	// the ansible target gate. Nil means no tailscale credential is
-	// mounted, which runAnsibleUnits refuses on rather than treating as
-	// "no unknown devices" -- a gate with no evidence is a gate that
+	// Tailnet lists the devices on the tailnet. It is what backs ONE
+	// provider of host evidence for the ansible target gate -- see
+	// hostEvidence, and evidenceProviders, which is what turns this into
+	// one. Nil means no tailscale credential is mounted, in which case the
+	// tailscale provider simply does not exist this pass, and any host
+	// that is reached that way is refused rather than treated as having no
+	// unknown devices near it: a gate with no evidence is a gate that
 	// passes.
-	Tailnet     tailnetLister
+	Tailnet tailnetLister
+	// Dial is how the declared-address evidence provider reaches a
+	// machine. Nil means a real net.Dialer, which is what production uses;
+	// a test supplies its own so that "this host is down" costs neither a
+	// DNS lookup nor a real timeout, and so the suite does not depend on
+	// what the machine running it can route to.
+	//
+	// ⚠️ IT IS A SEAM, NOT A KNOB. Nothing reads it from configuration and
+	// nothing should: which addresses the applier may dial is decided by
+	// the reviewed inventory, and HOW it dials them has one correct answer.
+	Dial        dialer
 	Now         func() time.Time
 	Stderr      io.Writer
 	VaultConfig secrets.KVConfig

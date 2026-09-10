@@ -13,8 +13,10 @@
 // merge-provenance gate, so a play digest would be a check that cannot
 // fail. What review means for a play is the diff itself, the same precedent
 // docs/credentials.md states for the credentials root -- plus the target
-// check in internal/gates, which this package's callers feed from
-// internal/tailnet.Reconcile.
+// check in internal/gates, which this package's callers feed from whichever
+// provider of host evidence vouches for each host -- internal/tailnet's
+// Reconcile for a machine on the tailnet, internal/reach for one at an
+// address its own inventory record states.
 package ansible
 
 import (

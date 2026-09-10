@@ -7,13 +7,11 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/beeradb/truss/internal/ansible"
 	"github.com/beeradb/truss/internal/gates"
 	"github.com/beeradb/truss/internal/inventory"
 	"github.com/beeradb/truss/internal/repo"
-	"github.com/beeradb/truss/internal/tailnet"
 )
 
 // ansibleRunner is the subset of ansible.Runner the pass uses, as a local
@@ -29,40 +27,6 @@ type ansibleRunner interface {
 // ansibleFactory builds a runner for one pass, mirroring tofuFactory and
 // renderFactory.
 type ansibleFactory func(env []string) ansibleRunner
-
-// tailnetLister is the live observation half of the target gate. It is an
-// interface rather than a *tailnet.Client so a test can supply devices, and
-// it lists only -- there is deliberately no method here that changes
-// anything on the tailnet, because git is the source of truth for what is
-// managed and this side is evidence (internal/tailnet's package doc).
-type tailnetLister interface {
-	Devices(ctx context.Context) ([]tailnet.Device, error)
-}
-
-// managedTag is the ACL tag that means "the applier may configure this
-// machine". It is COMPILED IN, not configured, for the reason roots and
-// unit kinds are: which tag causes configuration to execute on a machine is
-// an engine value, and a deployment that could rename it could point the
-// applier at a tag somebody else is allowed to apply. It matches the tag the
-// plan grants `tag:applier` SSH to.
-const managedTag = "tag:managed"
-
-// tailnetStaleAfter is how long since a device was last seen before the
-// applier stops believing a declared host is reachable.
-//
-// ⚠️ A CONNECTED DEVICE IS NEVER STALE BY THIS CLOCK. Tailscale omits
-// `lastSeen` entirely for a device that is connected to the control server
-// right now, and tailnet.Devices folds that case into "seen at the moment of
-// this call" (tailnet.Device.LastSeen's own doc), so this bound only ever
-// judges a device that has actually gone away.
-//
-// One hour rather than a tighter figure because the failure this prevents is
-// not subtle: a play that starts against a host it cannot reach dies partway
-// through and leaves that machine half configured, which is worse than the
-// pass refusing before it touched anything. An hour is long enough to
-// survive clock skew and a short outage, short enough that "in the inventory
-// and gone" is still a fact about now.
-const tailnetStaleAfter = time.Hour
 
 // ansibleUnitsFor derives the plays a commit touches: the ansible half of
 // the same repo.TouchedUnits call whose credentials/tofu half tofuUnitsFor
@@ -95,18 +59,9 @@ func ansibleUnitsFor(changedFiles, treeUnits []string) []string {
 // a check that cannot fail. What review means for a play is the diff, the
 // precedent docs/credentials.md sets for the credentials root, plus this:
 // the play runs against exactly the hosts the committed inventory hands it,
-// cross-checked against the live tailnet, or it does not run.
+// each one cross-checked against live evidence from whichever provider
+// vouches for it (see hostEvidence), or it does not run.
 func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA string, plays []string) string {
-	// ⚠️ NO TAILNET MEANS NO PLAY, NOT A PLAY WITHOUT THE CHECK. A
-	// deployment that has not mounted the tailscale credential simply has no
-	// evidence about its hosts, and running a play anyway would be the
-	// target gate failing open -- the precise thing internal/gates exists to
-	// forbid. This costs a deployment nothing until it commits its first
-	// play, which is also the commit that makes the refusal correct.
-	if d.Tailnet == nil {
-		return fmt.Sprintf("refusing to run %s at %s: no tailscale credential is mounted, so the applier has no evidence about which hosts exist -- a play is gated by its target set and nothing else, so without that evidence there is no gate", strings.Join(plays, ", "), headSHA)
-	}
-
 	headFS, err := d.Git.TreeFS(ctx, headSHA)
 	if err != nil {
 		return fmt.Sprintf("could not read the inventory tree at %s: %v", headSHA, err)
@@ -132,12 +87,108 @@ func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA 
 		return fmt.Sprintf("refusing to run %s at %s: the inventory does not load: %s", strings.Join(plays, ", "), headSHA, strings.Join(problems, "; "))
 	}
 
-	devices, err := d.Tailnet.Devices(ctx)
-	if err != nil {
-		return fmt.Sprintf("could not list the tailnet before running %s at %s: %v", strings.Join(plays, ", "), headSHA, err)
-	}
-	findings := tailnet.Reconcile(devices, managedHostNames(snap), managedTag, d.now(), tailnetStaleAfter)
+	// ⚠️ WHAT WILL RUN IS SETTLED BEFORE ANY EVIDENCE IS GATHERED, AND THE
+	// ORDER IS NOT COSMETIC. A provider that has to touch a machine to
+	// observe it must touch only the machines this commit is about, so the
+	// pass has to know which plays are actually going to run -- a retired
+	// play, or one whose every host is frozen, names hosts that nobody is
+	// about to configure and that nothing should be dialling on their
+	// behalf.
+	plans := ansiblePlans(d, snap, headSHA, plays)
 
+	ev, reason := gatherEvidence(ctx, d, evidenceProviders(d, snap), snap, plans, headSHA)
+	if reason != "" {
+		return reason
+	}
+
+	for _, plan := range plans {
+		targets := gates.AnsibleTargets{
+			Play:     plan.play,
+			Declared: plan.declared,
+			// ⚠️ EVERY PLAY IS HANDED THE WHOLE PASS'S Undeclared, WHICH
+			// IS WHAT MAKES CheckAnsibleTargets' "refuse every play, not
+			// only this one" true. A refusal returns from this function and
+			// fails the pass, so no later play runs -- and because the same
+			// evidence goes to the first play as to the last, the refusal
+			// cannot depend on which play happens to sort first.
+			Unknown:     ev.Undeclared,
+			Unreachable: intersect(ev.Unreachable, plan.declared),
+		}
+		if problems := gates.CheckAnsibleTargets(targets); len(problems) > 0 {
+			return strings.Join(problems, "; ")
+		}
+
+		playDir := d.Cfg.Workdir + "/" + plan.play
+
+		// ⚠️ CHECK MODE FIRST, AND ITS FAILURE REFUSES BEFORE ANYTHING
+		// CHANGES. This is the closest thing a play has to a plan: an error
+		// here -- an unreachable host, a task that cannot evaluate, a
+		// missing variable -- is found while every machine is still
+		// untouched, rather than on host four of six.
+		before, err := r.Check(ctx, playDir, plan.declared)
+		if err != nil {
+			return fmt.Sprintf("check mode refused %s at %s before anything ran: %v", plan.play, headSHA, err)
+		}
+		for _, h := range sortedHosts(before.ChangedByHost) {
+			d.logf("ansible: %s would change %d task(s) on %s", plan.play, before.ChangedByHost[h], h)
+		}
+
+		if _, err := r.Apply(ctx, playDir, plan.declared); err != nil {
+			return fmt.Sprintf("could not run %s at %s: %v", plan.play, headSHA, err)
+		}
+
+		// ⚠️ THE CONVERGENCE CHECK NAMES, IT DOES NOT REFUSE. A host still
+		// reporting work immediately after a successful run means a
+		// non-idempotent task, which is a defect in the play -- but the run
+		// already succeeded and the machine is already configured, so
+		// failing the pass here would wedge the queue behind a change that
+		// worked. This is the drift posture the whole project keeps: name,
+		// never reconcile, and never punish the commit for what it revealed.
+		after, err := r.Check(ctx, playDir, plan.declared)
+		if err != nil {
+			d.logf("ansible: could not re-check %s at %s after applying it, so its convergence is unknown: %v", plan.play, headSHA, err)
+			continue
+		}
+		for _, h := range sortedHosts(after.ChangedByHost) {
+			if after.ChangedByHost[h] > 0 {
+				d.logf("ansible: %s still reports %d changed task(s) on %s straight after a successful run -- a task in it is not idempotent", plan.play, after.ChangedByHost[h], h)
+			}
+		}
+	}
+	return ""
+}
+
+// playPlan is one play and the hosts it will be run against, settled before
+// any evidence is gathered.
+type playPlan struct {
+	play string
+	// declared is the play's hosts, minus the frozen and the
+	// decommissioned. It may be EMPTY, and such a plan is deliberately
+	// still in the list: an empty declared set is a refusal
+	// (CheckAnsibleTargets), not something to quietly skip.
+	declared []string
+}
+
+// playNames is the plays of a plan list, for a message that has to name
+// what it is refusing.
+func playNames(plans []playPlan) []string {
+	out := make([]string, 0, len(plans))
+	for _, p := range plans {
+		out = append(out, p.play)
+	}
+	return out
+}
+
+// ansiblePlans decides which plays will run and against which hosts.
+//
+// ⚠️ IT REFUSES NOTHING, AND THE SPLIT IS THE POINT. Everything it drops --
+// a retired play, a play whose every host is frozen -- is dropped because
+// somebody deliberately arranged for it to run nothing, which is not a
+// failure. Every actual refusal is downstream, where the evidence is, so
+// there is exactly one place a play can be stopped and it is the target
+// gate.
+func ansiblePlans(d applyDeps, snap inventory.Snapshot, headSHA string, plays []string) []playPlan {
+	var plans []playPlan
 	for _, play := range plays {
 		// ⚠️ A PLAY THAT NO LONGER EXISTS IS A RETIREMENT, NOT A REFUSAL AND
 		// NOT A PRUNE. applyOneRoot refuses an absent root because its state
@@ -169,65 +220,15 @@ func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA 
 			d.logf("ansible: every host of %s is frozen; nothing to configure at %s", play, headSHA)
 			continue
 		}
-
-		targets := gates.AnsibleTargets{
-			Play:     play,
-			Declared: declared,
-			// ⚠️ EVERY PLAY IS HANDED THE WHOLE PASS'S UnknownTagged, WHICH
-			// IS WHAT MAKES CheckAnsibleTargets' "refuse every play, not
-			// only this one" true. A refusal returns from this function and
-			// fails the pass, so no later play runs -- and because the same
-			// findings go to the first play as to the last, the refusal
-			// cannot depend on which play happens to sort first.
-			Unknown:     findings.UnknownTagged,
-			Unreachable: intersect(findings.Unreachable, declared),
-		}
-		if problems := gates.CheckAnsibleTargets(targets); len(problems) > 0 {
-			return strings.Join(problems, "; ")
-		}
-
-		playDir := d.Cfg.Workdir + "/" + play
-
-		// ⚠️ CHECK MODE FIRST, AND ITS FAILURE REFUSES BEFORE ANYTHING
-		// CHANGES. This is the closest thing a play has to a plan: an error
-		// here -- an unreachable host, a task that cannot evaluate, a
-		// missing variable -- is found while every machine is still
-		// untouched, rather than on host four of six.
-		before, err := r.Check(ctx, playDir, declared)
-		if err != nil {
-			return fmt.Sprintf("check mode refused %s at %s before anything ran: %v", play, headSHA, err)
-		}
-		for _, h := range sortedHosts(before.ChangedByHost) {
-			d.logf("ansible: %s would change %d task(s) on %s", play, before.ChangedByHost[h], h)
-		}
-
-		if _, err := r.Apply(ctx, playDir, declared); err != nil {
-			return fmt.Sprintf("could not run %s at %s: %v", play, headSHA, err)
-		}
-
-		// ⚠️ THE CONVERGENCE CHECK NAMES, IT DOES NOT REFUSE. A host still
-		// reporting work immediately after a successful run means a
-		// non-idempotent task, which is a defect in the play -- but the run
-		// already succeeded and the machine is already configured, so
-		// failing the pass here would wedge the queue behind a change that
-		// worked. This is the drift posture the whole project keeps: name,
-		// never reconcile, and never punish the commit for what it revealed.
-		after, err := r.Check(ctx, playDir, declared)
-		if err != nil {
-			d.logf("ansible: could not re-check %s at %s after applying it, so its convergence is unknown: %v", play, headSHA, err)
-			continue
-		}
-		for _, h := range sortedHosts(after.ChangedByHost) {
-			if after.ChangedByHost[h] > 0 {
-				d.logf("ansible: %s still reports %d changed task(s) on %s straight after a successful run -- a task in it is not idempotent", play, after.ChangedByHost[h], h)
-			}
-		}
+		plans = append(plans, playPlan{play: play, declared: declared})
 	}
-	return ""
+	return plans
 }
 
-// managedHostNames is every host git says is managed, which is what
-// tailnet.Reconcile compares the live device list against.
+// managedHostNames is every host git says is managed, WHICHEVER provider
+// vouches for each -- the fleet a discovering provider measures what it
+// sees against, and the reason a machine reached at a stated address is not
+// an intruder just because it also turns up on the tailnet.
 //
 // ⚠️ A DECOMMISSIONED HOST IS NOT MANAGED, AND A FROZEN ONE IS. Frozen means
 // "do not configure this now", so a frozen host that has vanished from the
