@@ -28,6 +28,11 @@ import (
 // collapses `inventory validate` to one top-level verb, the same way
 // `ledger` and `gate` already collapse `ledger get`/`ledger put` and `gate
 // protection`/`gate commit`.
+//
+// `units` post-dates all of the above: it prints the units a commit touches
+// so CI and the applier derive the set from one implementation, closing
+// docs/work-items.md's "The two sides of the render digest do not share a
+// derivation".
 func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 	want := []string{
 		"ledger",
@@ -43,6 +48,7 @@ func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 		"skip",
 		"render-digest",
 		"inventory",
+		"units",
 	}
 	if !reflect.DeepEqual(subcommands, want) {
 		t.Fatalf("subcommands = %v, want %v", subcommands, want)

@@ -91,7 +91,13 @@ type fakeForge struct {
 	// ProtectionResult keep passing: it was never making a claim about
 	// rulesets, and a real repository with none is not a hole.
 	RulesetsResult gates.Rulesets
-	RulesetsErr    error
+
+	// RulesetsByBranch answers per ref where a test needs main and the
+	// delivery ref to differ, which is most tests that touch delivery: the
+	// applier asks about both in one pass and they are protected by
+	// different rulesets in any real deployment.
+	RulesetsByBranch map[string]gates.Rulesets
+	RulesetsErr      error
 
 	Token    string
 	TokenErr error
@@ -116,7 +122,20 @@ func (f *fakeForge) Protection(ctx context.Context, branch string) (gates.Protec
 }
 
 func (f *fakeForge) Rulesets(ctx context.Context, branch string) (gates.Rulesets, error) {
+	if rs, ok := f.RulesetsByBranch[branch]; ok {
+		return rs, f.RulesetsErr
+	}
 	return f.RulesetsResult, f.RulesetsErr
+}
+
+// protectedDeliveryRulesets is a ruleset shaped the way CheckDeliveryRef
+// demands: active, nobody may bypass it, and it blocks both force pushes and
+// deletion so the ref's history stays append-only.
+func protectedDeliveryRulesets() gates.Rulesets {
+	return gates.Rulesets{Applicable: []gates.Ruleset{{
+		ID: 42, Name: "delivery ref", Enforcement: "active",
+		Rules: []string{"non_fast_forward", "deletion"},
+	}}}
 }
 
 func (f *fakeForge) InstallationToken(ctx context.Context) (string, time.Time, error) {
@@ -739,9 +758,16 @@ type fakeGit struct {
 	// TreeRootsByCommit because the driver keeps the two listings apart --
 	// TreeRoots reproduces the bash's exact ls-tree and must not widen.
 	TreeRenderUnitsByCommit map[string][]string
-	HasDirFn                func(root string) bool
-	CheckoutErr             error
-	CommitsErr              error
+
+	// PushedRefs records every PushRef as "<ref>=<sha>". Whether the
+	// delivery ref moved AT ALL is the property the ref gate exists to
+	// control, so a test asserting a refusal has to be able to see it --
+	// the same reason fakeTofu records applies.
+	PushedRefs  []string
+	PushRefErr  error
+	HasDirFn    func(root string) bool
+	CheckoutErr error
+	CommitsErr  error
 
 	// DirsAtRef makes HasDir depend on WHICH TREE IS CHECKED OUT, which the
 	// real one does and this fake did not. Without it no test could see a
@@ -820,6 +846,14 @@ func (g *fakeGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 
 func (g *fakeGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
 	return g.TreeRenderUnitsByCommit[sha], nil
+}
+
+func (g *fakeGit) PushRef(ctx context.Context, sha, ref string) error {
+	if g.PushRefErr != nil {
+		return g.PushRefErr
+	}
+	g.PushedRefs = append(g.PushedRefs, ref+"="+sha)
+	return nil
 }
 
 func (g *fakeGit) Checkout(ctx context.Context, ref string) error {

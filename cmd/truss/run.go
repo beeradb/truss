@@ -14,6 +14,10 @@ import (
 // inventory consistency check, neither of which existed when either table
 // was written. `inventory` collapses `inventory validate` to one top-level
 // verb, the same way `ledger` and `gate` already collapse their own verbs.
+// `units` post-dates all of those: it prints the units a commit touches, so
+// CI and the applier derive the set from one implementation instead of a
+// consumer's CI reimplementing the rule (docs/work-items.md, "The two sides
+// of the render digest do not share a derivation").
 // TestSubcommandsAreExactlyTheDocumentedSet reads this slice directly rather
 // than re-deriving it, so adding a subcommand here is the one place that
 // needs to change for that test to see it.
@@ -31,6 +35,7 @@ var subcommands = []string{
 	"skip",
 	"render-digest",
 	"inventory",
+	"units",
 }
 
 func isSubcommand(name string) bool {
@@ -74,6 +79,10 @@ subcommands:
   inventory validate [dir] [--json]
                          check the inventory tree for dangling references
                          and orphaned delivery units
+  units <sha> [--dir <path>] [--kind <kind>]
+                         print the units a commit touches, one per line as
+                         "<kind>\t<path>" in execution order (credentials,
+                         tofu, ansible, render); --kind filters to one kind
 `
 
 // run is the binary's only entry point besides main, and main's only job
@@ -119,6 +128,8 @@ func runEnv(ctx context.Context, args []string, getenv func(string) string, stdi
 		return cmdRenderDigest(ctx, rest, getenv, stdout, stderr)
 	case "inventory":
 		return cmdInventory(rest, stdout, stderr)
+	case "units":
+		return cmdUnits(ctx, rest, stdout, stderr)
 	default:
 		// Unreachable: isSubcommand already filtered args[0]. Kept as an
 		// explicit refusal rather than a panic so a future subcommand

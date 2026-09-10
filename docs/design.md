@@ -239,7 +239,35 @@ docs/work-items.md for what closing either would take. Charts are inflated
 once, by hand, and the rendered manifests are committed — so the reviewer
 reads the manifests rather than a version number.
 
-The applier renders and compares. It applies nothing: a reconciler does that.
+The applier renders and compares. It applies nothing: a reconciler does that —
+and what it hands over is a ref rather than an artefact.
+
+**`refs/heads/queued` is the boundary between reviewed and running.** After a
+pass has gated a commit, applied every root it touched and matched every render
+against the digest CI filed, it fast-forwards that ref to the commit. A
+reconciler tracks `queued` and never `main`, so it can only ever see commits
+the applier has already gated: a refusal anywhere freezes the ref, every
+cluster holds its last known-good state, and the alert says why.
+
+The applier refuses to publish onto a ref whose history nothing protects — an
+unprotected ref is not a weaker gate, it is a path to production nobody is
+watching. It re-reads the rulesets covering that ref and requires them to block
+force pushes and deletion, for the reason `main` needs the same: history is the
+audit log, and a cluster was told to apply what is in it. The check runs before
+the push, because discovering afterwards would be discovering it too late.
+
+⚠️ It does not prove that only the applier can move the ref. See
+`docs/work-items.md` for what that would take and why it was accepted here.
+
+The push is a plain fast-forward with no lease and no force, so the ordering
+property is git's rather than ours: a ref somebody else has moved makes this
+fail loudly instead of overwriting whatever they did. A delivery ref
+disagreeing with the applier is a fact somebody needs to look at.
+
+The name is `queued` and not `delivered` because delivered implies done, and
+truss cannot know a cluster has the manifests at the moment it hands them over.
+And a deployment with no delivery units is never asked to protect a ref it does
+not use — the tree decides, so a tree that is pure OpenTofu owes nothing here.
 
 Absent isn't the same as false, and code that treats them the same is
 dangerous here: `jq '.allow_force_pushes.enabled // true'` turns a compliant

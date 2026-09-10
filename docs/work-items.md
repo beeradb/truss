@@ -708,7 +708,44 @@ have `scripts/check` say out loud how many files it scanned, so "clean" over
 zero new files is visibly not the same as "clean" over forty. The second is
 smaller and does not change what is refused.
 
-## The delivery ref is not built, and the reason is the gate rather than the push
+## The delivery ref is built, and what it does not prove
+
+Decided by the owner 2026-09-10: the applier publishes to `refs/heads/queued`
+after gating a commit and matching every render, and refuses unless an active
+ruleset blocks `non_fast_forward` and `deletion` on that ref. A reconciler
+tracks that ref and never `main`, so it can only ever see commits the applier
+has already gated.
+
+⚠️ **IT DOES NOT PROVE THAT ONLY THE APPLIER CAN MOVE THE REF, AND THAT IS A
+DECISION RATHER THAN AN OVERSIGHT.** Blocking force pushes and deletion leaves
+an ordinary fast-forward open to anyone with write access — deliberately,
+because the applier needs exactly that and needs no bypass actor to do it.
+Restricting the pusher would need an `update` rule whose sole bypass actor is
+the applier's App, and the effect of that combination could not be measured
+here: it needs a ruleset that exists to read back, and creating one was refused
+as a write to repository configuration.
+
+The trade was accepted because `docs/threat-model.md` already places the
+approver's own accounts out of scope, so on a repository whose only writers are
+the approver and the applier, push-exclusivity defends against a party the
+model has already excluded.
+
+⚠️ **THAT CEASES TO BE TRUE THE MOMENT A SECOND HUMAN OR A CI JOB GETS WRITE
+ACCESS TO THE APPLIED REPOSITORY, AND NOTHING NOTICES WHEN IT DOES.** Closing
+it needs the measurement above. Until then this is the one place where a
+property is held by who has access rather than by a gate.
+
+Two smaller things the same work left behind. A deployment with no delivery
+units is never asked to protect a ref it does not use — the tree decides, so a
+pure-OpenTofu tree owes nothing here — and the failure direction is a ref that
+stays put rather than one that advances unwatched. And the ref is `queued`
+rather than `delivered`, because advancing it means truss handed the manifests
+over, not that a cluster has them; a second ref advanced from observed
+reconciler status would be the honest answer to "what is actually running",
+and is not built.
+
+### Superseded: why it was deferred
+
 
 Measured 2026-09-10, which narrows this from "unverified" to one specific
 unanswered question.
@@ -810,30 +847,40 @@ answers for. Closing this needs a second consumer of `TouchedUnits`'s
 `applyOneRoot` already does for `TouchedRoots`'s entries — not a change to
 `TouchedRoots` itself.
 
-## The two sides of the render digest do not share a derivation
+## ~~The two sides of the render digest do not share a derivation~~ (closed)
 
-`cmd/truss/render_unit.go`'s doc comment on `renderUnitsFor` claims "CI
-derives the units with this same function, so both sides agree on the set".
-It cannot: `repo.TouchedUnits` lives under `internal/`, which a consumer's CI
-job cannot import, and no subcommand exposes the touched-unit set for a
-commit — `truss render-digest` takes a single directory
+`cmd/truss/render_unit.go`'s doc comment on `renderUnitsFor` used to claim
+"CI derives the units with this same function, so both sides agree on the
+set". It could not: `repo.TouchedUnits` lives under `internal/`, which a
+consumer's CI job cannot import, and no subcommand exposed the touched-unit
+set for a commit — `truss render-digest` takes a single directory
 (`cmd/truss/render_digest_cmd.go`), never a commit range.
 
-Worse, the rule a consumer's CI actually mirrors is asymmetric with the one
+Worse, the rule a consumer's CI actually mirrored was asymmetric with the one
 the applier runs. `unitSharedInput` (`internal/repo/units.go`) fires on
 `inventory/`, `.kustomize-version` and `.ansible-version` in addition to
 `modules/`, `providers.allow` and `.opentofu-version`; `sharedInput`, the
 tofu-side rule, has only the latter three. So a commit that only touches
 `inventory/` makes the applier demand a filed digest for every render unit in
 the tree — including units whose CI had no rule telling it to render them,
-because CI is mirroring the narrower, tofu-side pattern. The refusal that
+because CI was mirroring the narrower, tofu-side pattern. The refusal that
 comes out says "refusing to deliver a manifest nobody reviewed", which names
 the wrong cause: the manifest may have been reviewed, but the two sides
 derived different sets of units to check.
 
-What closes it: a subcommand that prints the touched units for a commit, so
-CI and the applier both call one implementation instead of a consumer's CI
-maintaining its own approximation of a rule that lives in this repository.
+What closed it: `truss units <sha>` (`cmd/truss/units_cmd.go`) prints the
+units a commit touches — `<kind>\t<path>` per line, in `repo.TouchedUnits`'
+own kind-then-path order — by feeding the same `ChangedFiles` and
+`TreeRenderUnits` (`cmd/truss/git.go`) into the same `repo.TouchedUnits` the
+apply pass calls. `--kind render` is what a consumer's CI actually runs, so
+its render-digest step derives the exact set `unitSharedInput` produces
+instead of reimplementing the rule. The subcommand takes no
+`config.Config`, no `getenv` and no credential — a git checkout (`--dir`,
+default `.`) is all it needs, so CI's read-only posture is unaffected.
+`cmd/truss/units_cmd_test.go` covers the asymmetric case directly: a commit
+touching `inventory/x.json` alongside several render units in the tree
+returns every one of them, in the same fixture shape that made the two sides
+disagree before.
 
 ## `internal/inventory` declares fields nothing reads back
 

@@ -35,10 +35,24 @@ type renderFactory func(env []string) renderRunner
 //
 // A shared input therefore re-renders every unit rather than only the ones
 // whose own files changed, and that is accepted cost rather than an
-// oversight: CI derives the units with this same function, so both sides
-// agree on the set and the extra renders simply cost time. A second,
-// kind-aware rule would have to be implemented identically in two places,
-// which is the shape of drift this repository has already paid for once.
+// oversight: CI derives the units by running `truss units --kind render`
+// (cmd/truss/units_cmd.go), which feeds the same ChangedFiles and
+// TreeRenderUnits into the same repo.TouchedUnits this function calls, so
+// both sides agree on the set and the extra renders simply cost time.
+//
+// That subcommand is load-bearing, not decoration. Before it existed, no
+// consumer's CI could import repo.TouchedUnits -- it lives under internal/ --
+// so CI could only maintain its own approximation of the rule, and that
+// approximation was narrower than unitSharedInput here: it fired on
+// modules/, providers.allow and .opentofu-version (the tofu-side rule) but
+// not on inventory/, .kustomize-version or .ansible-version. A commit
+// touching only inventory/ then made the applier demand a filed digest for
+// every render unit in the tree while CI, unaware inventory/ was a shared
+// input on this side, filed one only for the units it thought had changed.
+// The refusal that followed said "refusing to deliver a manifest nobody
+// reviewed" (internal/gates), which names a review failure when the real
+// cause was two sides deriving different sets of units -- the same wrong-
+// cause shape TestCheckRenderDigestTellsAbsentFromMismatched exists for.
 func renderUnitsFor(changedFiles, treeUnits []string) []string {
 	var out []string
 	for _, u := range repo.TouchedUnits(changedFiles, treeUnits) {
@@ -136,4 +150,60 @@ func newRenderFactory(getenv func(string) string, stderr io.Writer) renderFactor
 	return func(env []string) renderRunner {
 		return render.Runner{Bin: bin, Stderr: stderr, Env: env}
 	}
+}
+
+// deliveryRef is the ref a reconciler tracks. It is compiled in rather than
+// configured, for the reason roots are: what the applier publishes to is a
+// property of the engine, and a deployment that could rename it could point a
+// cluster at a ref nothing gates.
+//
+// ⚠️ IT IS `queued` AND NOT `delivered`, BECAUSE DELIVERED IMPLIES DONE.
+// Advancing this ref means truss gated the commit, matched every render
+// against the digest CI filed, and applied every root -- it does not mean a
+// cluster has the manifests, which truss cannot know at the moment it hands
+// them over. A second ref advanced from observed reconciler status would be
+// the honest answer to "what is actually running", and is not built.
+const deliveryRef = "queued"
+
+// publishDeliveryRef fast-forwards the delivery ref to sha, refusing unless
+// that ref's history is append-only. It returns the reason to fail the pass,
+// or empty.
+//
+// The gate runs before the push, not after: a ref nothing protects is a path
+// to production nobody is watching, and discovering that after publishing to
+// it would be discovering it too late.
+func publishDeliveryRef(ctx context.Context, d applyDeps, sha string) string {
+	// ⚠️ A DEPLOYMENT WITH NO DELIVERY UNITS IS NOT ASKED TO PROTECT A REF IT
+	// DOES NOT USE. Without this, requiring a ruleset on the delivery ref
+	// stopped every pass everywhere -- including a tree that is pure
+	// OpenTofu and has no manifests at all -- because the gate refuses an
+	// unprotected ref and an unused ref is unprotected. That would make
+	// delivery a tax on people who never asked for it.
+	//
+	// The tree is what decides, not a configuration flag: a deployment
+	// starts using delivery by committing a unit, and the pass notices on
+	// the commit that does it. An empty listing therefore means "nothing to
+	// publish", never "publish without checking" -- the failure direction is
+	// a ref that stays put, which is visible, rather than one that advances
+	// unwatched.
+	units, err := d.Git.TreeRenderUnits(ctx, sha)
+	if err != nil {
+		return fmt.Sprintf("could not read the render units at %s: %v", sha, err)
+	}
+	if len(units) == 0 {
+		return ""
+	}
+
+	rs, err := d.Forge.Rulesets(ctx, deliveryRef)
+	if err != nil {
+		return fmt.Sprintf("could not read the rulesets protecting %s: %v", deliveryRef, err)
+	}
+	if problems := gates.CheckDeliveryRef(deliveryRef, rs); len(problems) > 0 {
+		return strings.Join(problems, "; ")
+	}
+	if err := d.Git.PushRef(ctx, sha, deliveryRef); err != nil {
+		return fmt.Sprintf("could not publish %s to %s: %v", sha, deliveryRef, err)
+	}
+	d.logf("published %s to %s", sha, deliveryRef)
+	return ""
 }

@@ -287,6 +287,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		rotationApplied  bool
 		drifted, errored []string
 		driftRun         = d.Cfg.DriftOnly
+		queueAdvanced    bool
 		driftSkipped     string
 	)
 
@@ -428,6 +429,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// runCommitLoop already guarantees by returning an empty failure
 		// and the pre-contention HEAD.
 		newLast, applied, noop, loopFailure, _ := runCommitLoop(ctx, d, last, cc)
+		queueAdvanced = newLast != last
 		last = newLast
 		appliedCount = applied
 		noopCount = noop
@@ -445,6 +447,30 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// heartbeat.
 		rotationSummary = map[string]string{"skipped": "rotation runs on the daily pass"}
 		driftSummary = map[string]string{"skipped": "not a drift run"}
+	}
+
+	// Publishing the delivery ref is the last thing the queue does, and only
+	// when the queue is clean: a reconciler tracking this ref must never see
+	// a commit this pass refused.
+	//
+	// ⚠️ NOT ON EVERY PASS, AND THE REASON IS A BUDGET RATHER THAN TIDINESS.
+	// Reading the rulesets that protect the ref is a forge call, and the
+	// frequent pass runs every five minutes -- asking 288 times a day to
+	// re-answer a question that only changes when somebody edits repository
+	// settings is the shape of spending that exhausted a service account's
+	// hourly allowance on 2026-09-07. So it runs when the queue actually
+	// moved, plus once on the daily pass, which is what makes a ref left
+	// behind by an earlier failure heal itself rather than wait for the next
+	// commit to arrive.
+	//
+	// A push that fails is a pass failure: the commits applied, and the
+	// cluster was not told. HEAD has already advanced, so nothing will retry
+	// those commits -- the daily publish is what closes that, and the alert
+	// is what makes somebody look before then.
+	if failure == "" && (queueAdvanced || driftRun) {
+		if reason := publishDeliveryRef(ctx, d, last); reason != "" {
+			failure = reason
+		}
 	}
 
 	// The publisher handoff (design publisher-identity-design.md §3, §9):

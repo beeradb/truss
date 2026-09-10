@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/beeradb/truss/internal/gates"
 	"github.com/beeradb/truss/internal/render"
 )
 
@@ -277,6 +278,7 @@ func TestACommitTouchingOnlyADeliveryIsRenderedNotNooped(t *testing.T) {
 	const head = "headsha1"
 
 	forgeFake := compliantCommitGate("alice", sha, head)
+	forgeFake.RulesetsByBranch = map[string]gates.Rulesets{deliveryRef: protectedDeliveryRulesets()}
 	git := &fakeGit{
 		CommitsList:     []string{sha},
 		ChangedByCommit: map[string][]string{sha: {"deliveries/beta/web/kustomization.yaml"}},
@@ -317,6 +319,7 @@ func TestADeliveryWhoseRenderDoesNotMatchStopsTheQueue(t *testing.T) {
 	const head = "headsha1"
 
 	forgeFake := compliantCommitGate("alice", sha, head)
+	forgeFake.RulesetsByBranch = map[string]gates.Rulesets{deliveryRef: protectedDeliveryRulesets()}
 	git := &fakeGit{
 		CommitsList:             []string{sha},
 		ChangedByCommit:         map[string][]string{sha: {"deliveries/beta/web/kustomization.yaml"}},
@@ -403,5 +406,85 @@ func TestASecondRenderUnitThatDoesNotMatchStopsThePass(t *testing.T) {
 	}
 	if _, ok := fl.get("applied/" + sha); ok {
 		t.Error("applied/" + sha + " was written for a commit whose second unit never matched")
+	}
+}
+
+// deliveryPass builds a commit that touches one delivery unit whose render
+// matches, so the only variable left is the delivery ref's protection.
+func deliveryPass(t *testing.T, rulesets map[string]gates.Rulesets) (applyDeps, *fakeLedger, *fakeGit, string, string) {
+	t.Helper()
+	const sha, head = "commitsha3", "headsha1"
+	forgeFake := compliantCommitGate("alice", sha, head)
+	forgeFake.RulesetsByBranch = rulesets
+	git := &fakeGit{
+		CommitsList:             []string{sha},
+		ChangedByCommit:         map[string][]string{sha: {"deliveries/beta/web/kustomization.yaml"}},
+		TreeRenderUnitsByCommit: map[string][]string{sha: {"deliveries/beta/web"}, head: {"deliveries/beta/web"}},
+		HasDirFn:                func(string) bool { return true },
+	}
+	deps, fl, _ := buildTestDeps(t, forgeFake, git, func([]string) tofuRunner { return &fakeTofu{} })
+	out := []byte("kind: Service\n")
+	deps.NewRender = func([]string) renderRunner { return fakeRender{out: out} }
+	fl.put(deps.Journal.Layout.DigestKey(head, "deliveries/beta/web"), []byte(render.Digest(out)))
+	return deps, fl, git, sha, head
+}
+
+func TestAPassPublishesTheDeliveryRefWhenTheQueueAdvances(t *testing.T) {
+	deps, _, git, sha, head := deliveryPass(t, map[string]gates.Rulesets{deliveryRef: protectedDeliveryRulesets()})
+	git.TreeRenderUnitsByCommit[sha] = []string{"deliveries/beta/web"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, head); result.failure != "" {
+		t.Fatalf("result.failure = %q, want none", result.failure)
+	}
+	want := deliveryRef + "=" + sha
+	if len(git.PushedRefs) != 1 || git.PushedRefs[0] != want {
+		t.Fatalf("PushedRefs = %v, want exactly [%s]", git.PushedRefs, want)
+	}
+}
+
+// TestAPassRefusesToPublishOntoAnUnprotectedRef is the reason the gate runs
+// before the push. A ref a reconciler applies from is a path to production,
+// and one nothing protects is not a weaker gate -- it is a path nobody is
+// watching. Discovering that after publishing would be discovering it late.
+func TestAPassRefusesToPublishOntoAnUnprotectedRef(t *testing.T) {
+	// No entry for the delivery ref: the forge reports nothing protects it.
+	deps, _, git, _, head := deliveryPass(t, map[string]gates.Rulesets{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, head)
+	if result.failure == "" {
+		t.Fatal("the pass published onto a ref nothing protects")
+	}
+	if !strings.Contains(result.failure, "no ruleset applies") {
+		t.Errorf("failure = %q, want it to say nothing protects the ref", result.failure)
+	}
+	if len(git.PushedRefs) != 0 {
+		t.Errorf("PushedRefs = %v, want nothing pushed", git.PushedRefs)
+	}
+}
+
+// TestAPassWithNoDeliveryUnitsNeverTouchesTheRef: requiring a protected ref
+// from a deployment that has no manifests at all would make delivery a tax on
+// people who never asked for it. The tree decides, not a flag.
+func TestAPassWithNoDeliveryUnitsNeverTouchesTheRef(t *testing.T) {
+	const sha, head = "commitsha3", "headsha1"
+	forgeFake := compliantCommitGate("alice", sha, head)
+	git := &fakeGit{
+		CommitsList:     []string{sha},
+		ChangedByCommit: map[string][]string{sha: {"docs/README.md"}},
+		HasDirFn:        func(string) bool { return true },
+	}
+	deps, _, _ := buildTestDeps(t, forgeFake, git, func([]string) tofuRunner { return &fakeTofu{} })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, head); result.failure != "" {
+		t.Fatalf("result.failure = %q, want none: a tree with no delivery units owes nothing to a ref", result.failure)
+	}
+	if len(git.PushedRefs) != 0 {
+		t.Errorf("PushedRefs = %v, want nothing pushed", git.PushedRefs)
 	}
 }

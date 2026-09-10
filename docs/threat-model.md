@@ -16,6 +16,7 @@
 | merges a commit that touches no OpenTofu root without an approval | refused; the queue stops. The gate runs for every commit, not only the ones that apply something | approval + merge-provenance check, before the roots are derived |
 | edits a delivery unit's manifests after CI rendered them | the applier's own render stops matching the digest CI filed, so the commit is refused | the render-digest gate |
 | deletes a delivery unit instead of editing it | not gated at all: `renderOneUnit` reads the absence as the commit retiring the unit and skips the render gate for it, on purpose — the reconciler removes what it applied, and refusing here would make retiring a workload impossible | — (deliberate exemption, `renderOneUnit`) |
+| pushes a commit straight onto the delivery ref | force pushes and deletion are refused by the forge, so history there stays append-only. ⚠️ An ordinary fast-forward by anyone with repository write access is NOT refused — see `docs/work-items.md` | a ruleset the applier re-reads every pass |
 | gets root on the box the applier runs on | has everything. **This is the trust root**, stated, not hidden | — |
 
 ## What this does NOT protect against

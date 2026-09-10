@@ -68,6 +68,10 @@ type gitDriver interface {
 
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
+
+	// PushRef fast-forwards a remote ref to sha. It is the only write this
+	// driver performs, and the only thing truss publishes anywhere.
+	PushRef(ctx context.Context, sha, ref string) error
 }
 
 // execGit drives the real git binary. The installation token is passed in
@@ -184,6 +188,32 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 // the depths in one place -- the same function the commit diff is matched
 // against, so a listing and a diff can never disagree about what a directory
 // is.
+// PushRef fast-forwards refs/heads/<ref> on the remote to sha.
+//
+// ⚠️ NO --force AND NO LEASE, DELIBERATELY: THE ORDERING PROPERTY IS GIT'S,
+// NOT OURS. A plain push refuses a non-fast-forward on its own, so a ref that
+// somebody has moved elsewhere makes this fail loudly rather than overwrite
+// whatever they did. Adding --force-with-lease would be the reflex and would
+// be wrong -- it would make truss the thing that resolves the disagreement,
+// when a delivery ref disagreeing with the applier is a fact somebody needs
+// to look at.
+//
+// The refspec names the destination in full so a local branch of the same
+// name can never be what is pushed.
+func (g execGit) PushRef(ctx context.Context, sha, ref string) error {
+	if err := checkRef(sha); err != nil {
+		return err
+	}
+	if err := checkRef(ref); err != nil {
+		return err
+	}
+	spec := fmt.Sprintf("%s:refs/heads/%s", sha, ref)
+	if _, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "push", "origin", spec}); err != nil {
+		return fmt.Errorf("git push origin %s: %w", spec, err)
+	}
+	return nil
+}
+
 func (g execGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
 	if err := checkRef(sha); err != nil {
 		return nil, err
