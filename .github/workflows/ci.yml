@@ -46,6 +46,29 @@ jobs:
       # green on a comparison it never made.
       - run: jq --version
 
+      # ⚠️ tofu IS A TEST DEPENDENCY FOR THE SAME REASON jq IS, AND ITS
+      # ABSENCE MUST BE JUST AS LOUD. internal/plan's declaration tests
+      # generate real plan JSON and read it back, because the shape they
+      # depend on -- a provisioner nested inside a module -- is a fact about
+      # OpenTofu's output rather than about this code, and a hand-written
+      # fixture would go on agreeing with itself after that shape changed.
+      #
+      # Those tests FAIL rather than skip when tofu is missing, which is what
+      # turned this runner red the first time they ran here. Installing it is
+      # the fix; making them skip would have been the fix that hides.
+      #
+      # ⚠️ VIA scripts/toolchain, NOT A THIRD-PARTY ACTION AND NOT A BARE
+      # curl. The version is pinned in tofu-versions and the download is
+      # checked against scripts/toolchain.sha256, so CI installs exactly what
+      # a developer's machine does and neither reads a version the other
+      # cannot see. docs/toolchain.md says CI does not run this script; that
+      # was written when Go and jq were the whole list and both came from the
+      # runner image, and tofu comes from neither.
+      - run: |
+          scripts/toolchain install tofu
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: tofu version
+
       # ⚠️ THE SAME SCRIPT A DEVELOPER RUNS BEFORE COMMITTING, not a second
       # copy of its steps -- and deliberately not a list of them either, since
       # a list here is a second statement of the order that drifts from the

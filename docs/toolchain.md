@@ -162,9 +162,20 @@ copy of the whole Go tree into a rename.
 
 `.github/workflows/ci.yml` installs Go with `actions/setup-go` reading
 `go-version-file: go.mod`, and uses the runner image's jq after asserting it
-exists with `jq --version`. It does not run `scripts/toolchain`, because the
-runner already has a package manager, a cache and a pinned image, and adding a
-second installer would be a second statement of the same fact.
+exists with `jq --version`. For those two it does not run `scripts/toolchain`,
+because the runner already has a package manager, a cache and a pinned image,
+and adding a second installer would be a second statement of the same fact.
+
+⚠️ **It DOES run `scripts/toolchain install tofu`, and the difference is where
+the tool comes from.** Go arrives from an action and jq from the runner image;
+OpenTofu arrives from neither, so there is no second statement to avoid — there
+is only this script or a bare download beside it. `internal/plan`'s declaration
+tests generate real plan JSON and read it back, because the shape they rely on
+(a provisioner nested inside a module) is a fact about OpenTofu's output rather
+than about this code, and a hand-written fixture would go on agreeing with
+itself after that shape changed. Those tests fail rather than skip when tofu is
+absent, which is what turned CI red the first time they ran there; installing it
+is the fix, and making them skip would have been the fix that hides.
 
 What keeps the two honest is that both read the version from the same place:
 `go.mod` is the single pin, and this script refuses to disagree with it.
