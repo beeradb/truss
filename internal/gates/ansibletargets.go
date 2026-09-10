@@ -6,9 +6,18 @@ import (
 )
 
 // AnsibleTargets is what the applier believes about one play's hosts,
-// gathered from the committed inventory (Declared) and from
-// internal/tailnet.Reconcile's comparison against the live tailnet (Unknown,
-// Unreachable). It is the ansible half of the digest gate's job, done a
+// gathered from the committed inventory (Declared) and from whichever
+// provider of live host evidence vouches for each host (Unknown,
+// Unreachable).
+//
+// ⚠️ IT NAMES NO VENDOR AND MUST NOT START. Tailscale is one source of
+// these three lists and was for a while the only one, which is a fact about
+// the caller and never about this gate: what refuses a play is the shape of
+// its target set, so a deployment reaching its machines some other way is
+// judged by the identical rules. The caller's own log says which provider
+// produced each fact, and -- crucially -- whether any provider in the pass
+// was unable to produce Unknown at all, which an empty Unknown here cannot
+// distinguish from a clean fleet. It is the ansible half of the digest gate's job, done a
 // different way: KindAnsible has no plan digest at all, because CI cannot
 // reach the hosts a play would run against (internal/repo/units.go,
 // KindAnsible's own doc comment), so what review means for a play is the
@@ -26,8 +35,9 @@ type AnsibleTargets struct {
 	// to be managed that nobody declared is either an intruder or a host
 	// somebody forgot, and both need a person.
 	Unknown []string
-	// Unreachable is every declared host absent from the tailnet, or long
-	// unseen -- mirroring tailnet.Findings.Unreachable.
+	// Unreachable is every declared host that whichever provider vouches
+	// for it could not observe right now -- absent from the tailnet or long
+	// unseen, or a stated address that answered nothing.
 	Unreachable []string
 }
 
@@ -48,7 +58,9 @@ type AnsibleTargets struct {
 //
 // An Unreachable declared host is refused, never skipped: absent is not
 // "fine" for a host the inventory says this play configures, the same rule
-// tailnet.Findings.Unreachable's own doc comment states. And an empty
+// tailnet.Findings.Unreachable's own doc comment states. ⚠️ The refusal
+// does not say WHERE it was unreachable, because that depends on which
+// provider vouches for it; the caller names the provider on the line above. And an empty
 // Declared is refused outright -- a play targeting nothing is a play whose
 // inventory wiring is broken, and running it with no --limit built from an
 // empty set is exactly the shape internal/ansible.Runner refuses on the
@@ -68,7 +80,7 @@ func CheckAnsibleTargets(t AnsibleTargets) []string {
 	}
 	if len(t.Unreachable) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"%s: declared host(s) unreachable on the tailnet (%s): absent is not \"fine\"",
+			"%s: declared host(s) unreachable (%s): absent is not \"fine\"",
 			t.Play, strings.Join(t.Unreachable, ", ")))
 	}
 	if len(t.Declared) == 0 {

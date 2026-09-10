@@ -138,6 +138,41 @@ func defects() []defect {
 			wantFile:  "inventory/hosts/alpha.json",
 			wantWords: []string{`"alph4"`, `"alpha"`, "rename"},
 		},
+		// The three ways an access block can be unreadable. A record with
+		// NO access block is deliberately not here: see
+		// TestAHostWithNoAccessBlockIsAccepted below, and Host.Access's own
+		// doc for why nil is the one unstated field this package reads as
+		// an answer.
+		{
+			name: "AccessViaIsNotRecognised",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: "carrier-pigeon"}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{`"carrier-pigeon"`, "not recognised", `"address"`, `"tailscale"`},
+		},
+		{
+			name: "AccessByAddressWithNoAddress",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: AccessAddress}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{"access.address is empty", "nothing to reach it at"},
+		},
+		{
+			name: "AccessByTailscaleCarryingAStaleAddress",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: AccessTailscale, Address: "alpha.example.invalid:22"}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{"not two", "remove the address"},
+		},
 		// ⚠️ checkCluster, checkProject AND checkEnvironment EACH REPEAT THE
 		// SAME SCHEMA-AND-NAME SHAPE checkHost ALREADY HAS ABOVE, AND ONLY THE
 		// HOST COPY WAS EVER MUTATION-TESTED. Disabling the schema or name
