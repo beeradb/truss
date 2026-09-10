@@ -1,0 +1,117 @@
+# Prometheus alerting rules for the Vault the applier reads its credentials
+# from.
+#
+# ⚠️ THESE ARE ABOUT VAULT, AND truss.rules.yml IS ABOUT TRUSS. Both matter to
+# the same outage and they fail differently: truss can be perfectly healthy and
+# refusing everything because Vault is sealed, and Vault can be perfectly
+# healthy while truss cannot read it. Keeping them in one file would invite a
+# rule that reads one and blames the other.
+#
+# ⚠️ THEY DEPEND ON A `telemetry` STANZA IN VAULT'S CONFIG. Vault emits nothing
+# without `prometheus_retention_time`, and without `disable_hostname = true`
+# every metric name is prefixed with the pod's hostname and none of the
+# selectors below match. A group that silently never fires is worse than no
+# group, so pair these with VaultIsNotReporting, which is the one rule here
+# that fires on the ABSENCE of the rest.
+#
+# Running OpenBao? Every metric is `bao_*`. One find-and-replace.
+groups:
+  - name: vault-availability
+    rules:
+      # ⚠️ THE APPLIER CANNOT RUN WITHOUT THIS, and the failure is total: a
+      # sealed Vault answers nothing, so the credential mirror cannot be
+      # refreshed and the expiry sweep cannot earn its answer.
+      - alert: VaultIsSealed
+        expr: vault_core_unsealed == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Vault is sealed
+          description: >-
+            Everything that reads a credential from it is down until somebody
+            unseals it, the applier included. An auto-unseal that has stopped
+            working looks exactly like this.
+
+      - alert: VaultIsNotReporting
+        expr: absent(vault_core_unsealed)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: No Vault metrics exist at all
+          description: >-
+            Either the scrape is broken, or Vault's config has no telemetry
+            stanza and it is emitting nothing. ⚠️ Until this clears, EVERY
+            OTHER RULE IN THIS FILE IS SILENT -- they cannot fire on data that
+            does not exist, so this is the rule that makes the rest honest.
+            Check `prometheus_retention_time` and `disable_hostname = true`.
+
+      # ⚠️ THE ONE THAT LOOKS LIKE NOTHING. Vault refuses any request it cannot
+      # write an audit record for. If every audit device is failing, Vault
+      # stops serving while remaining unsealed, healthy and up by every other
+      # measure on the dashboard -- and the applier's failures will read as
+      # permission problems.
+      - alert: VaultAuditLogIsFailing
+        expr: >-
+          increase(vault_audit_log_request_failure[10m])
+          + increase(vault_audit_log_response_failure[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Vault cannot write its audit log
+          description: >-
+            Vault blocks on audit failure by design. With every device failing
+            it serves nothing, while looking unsealed and healthy. Usually a
+            full disk or a rotated file the process cannot reopen.
+
+  - name: vault-health
+    rules:
+      # A lease count that only climbs is something minting dynamic
+      # credentials and never revoking them. The threshold is deliberately
+      # about the SHAPE rather than a number: this platform's credentials are
+      # minted by an apply on a 45-day clock, so a steadily rising lease count
+      # is not its normal behaviour at any absolute value.
+      - alert: VaultLeaseCountIsClimbing
+        expr: >-
+          deriv(vault_expire_num_leases[6h]) > 0
+          and vault_expire_num_leases > 1000
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: Vault's lease count has been rising for six hours
+          description: >-
+            Something is creating leases faster than they expire. Left alone
+            this ends in an expiration-manager backlog and a slow Vault.
+
+      - alert: VaultIsLeakingGoroutines
+        expr: deriv(vault_runtime_num_goroutines[1h]) > 0 and vault_runtime_num_goroutines > 5000
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: Vault's goroutine count has been climbing for two hours
+          description: >-
+            A count that rises and never falls precedes the memory graph
+            moving. This node is shared, so Vault's footprint is somebody
+            else's headroom.
+
+      # ⚠️ NOT A LATENCY SLO, A "SOMETHING IS WRONG" SIGNAL. Every client is a
+      # pod on the same node, so the only honest expectation is "fast"; a mean
+      # above a quarter-second means the process is struggling rather than that
+      # a target was missed.
+      - alert: VaultIsSlow
+        expr: >-
+          rate(vault_core_handle_request_sum[10m])
+          / rate(vault_core_handle_request_count[10m]) > 250
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Vault's mean request latency is above 250ms
+          description: >-
+            Vault's own summary, in milliseconds. Every client is a pod on this
+            node, so this is not a network problem: look at the lease count,
+            the goroutine count and the node's disk.

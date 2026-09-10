@@ -1,0 +1,59 @@
+# promtool and logcli, for scripts/check-observability.
+#
+# ⚠️ A COMPOSITE ACTION BECAUSE TWO WORKFLOWS NEED THEM AND THE VERSIONS MUST
+# NOT DRIFT. ci.yml checks every push and pull request; release.yml re-checks
+# the tag, deliberately, because a tag can point at a commit that never sat on
+# main and never passed ci.yml. Two copies of this setup would be two pinned
+# versions, and the one that goes stale is the one nobody is reading.
+#
+# ⚠️ EACH ARCHIVE IS VERIFIED AGAINST ITS OWN RELEASE'S CHECKSUM FILE, which
+# is the shape Dockerfile already uses for the OpenTofu binary: one archive,
+# one checksum, nothing extra to trust. Pinned to versions rather than
+# `latest`, for the same reason every action in these workflows is pinned to a
+# commit SHA.
+name: query-tools
+description: Install promtool and logcli, verified against their release checksums.
+
+inputs:
+  prometheus-version:
+    description: Prometheus release to take promtool from.
+    default: "3.5.0"
+  loki-version:
+    description: Loki release to take logcli from.
+    default: "3.4.2"
+
+runs:
+  using: composite
+  steps:
+    - name: promtool
+      shell: bash
+      run: |
+        set -eux
+        v='${{ inputs.prometheus-version }}'
+        f="prometheus-${v}.linux-amd64"
+        curl -fsSL -o /tmp/prom.tar.gz \
+          "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}.tar.gz"
+        curl -fsSL -o /tmp/prom.sums \
+          "https://github.com/prometheus/prometheus/releases/download/v${v}/sha256sums.txt"
+        grep " ${f}.tar.gz\$" /tmp/prom.sums \
+          | sed "s|${f}.tar.gz|/tmp/prom.tar.gz|" \
+          | sha256sum -c -
+        tar xzf /tmp/prom.tar.gz -C /tmp "${f}/promtool"
+        sudo install -m 0755 "/tmp/${f}/promtool" /usr/local/bin/promtool
+
+    - name: logcli
+      shell: bash
+      run: |
+        set -eux
+        v='${{ inputs.loki-version }}'
+        curl -fsSL -o /tmp/logcli.zip \
+          "https://github.com/grafana/loki/releases/download/v${v}/logcli-linux-amd64.zip"
+        curl -fsSL -o /tmp/loki.sums \
+          "https://github.com/grafana/loki/releases/download/v${v}/SHA256SUMS"
+        grep " logcli-linux-amd64.zip\$" /tmp/loki.sums \
+          | sed "s|logcli-linux-amd64.zip|/tmp/logcli.zip|" \
+          | sha256sum -c -
+        # python3 rather than unzip: one fewer thing to depend on being on the
+        # runner, and it is already there for everything else.
+        python3 -c "import zipfile; zipfile.ZipFile('/tmp/logcli.zip').extractall('/tmp')"
+        sudo install -m 0755 /tmp/logcli-linux-amd64 /usr/local/bin/logcli

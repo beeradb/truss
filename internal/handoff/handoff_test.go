@@ -126,6 +126,7 @@ func TestSendFailsDistinguishablyWhenNoPublisherIsListening(t *testing.T) {
 	authored := strings.ReplaceAll(msg, path, "")
 	for _, mustNotContain := range []string{"vault", "Vault", "403", "cas"} {
 		if strings.Contains(authored, mustNotContain) {
+
 			t.Errorf("error %q reads like a Vault error (contains %q), want a plain dial failure", msg, mustNotContain)
 		}
 	}

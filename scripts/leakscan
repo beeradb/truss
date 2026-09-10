@@ -135,6 +135,13 @@ scan() { # pattern description
   # slash. Leaving % out of the class makes this rule silently fail to match
   # and the scan refuses a URL the exemption was written for.
   hits=$(echo "$hits" | grep -vE '^Dockerfile:[0-9]+:[[:space:]]*"?https://github\.com/kubernetes-sigs/kustomize/releases/download/[A-Za-z0-9._%${}-]+/[A-Za-z0-9._${}-]+"?;?[[:space:]]*\\?$' || true)
+  # ⚠️ THE QUERY-TOOLS ACTION FETCHES promtool AND logcli, anchored to that one
+  # composite action file for the same reason the opentofu lines above are
+  # anchored. Prometheus and Loki release URLs name the vendor's public
+  # release, identical for every user; the action builds them from ${v}/${f}
+  # so those segments are permitted. Pinned to the exact `<org>/<repo>` so a
+  # URL into any OTHER repository -- including ours -- is still refused.
+  hits=$(echo "$hits" | grep -vE '^\.github/actions/query-tools/action\.yml:[0-9]+:.*https://github\.com/(prometheus/prometheus|grafana/loki)/releases/download/' || true)
   # The 1Password CLI's apt repository and signing key, under the same rule and
   # with the same limit: `downloads.1password.com/linux/` is a public package
   # source identical for every user, and the path after it carries a

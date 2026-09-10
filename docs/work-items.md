@@ -639,6 +639,14 @@ carries only refusals, drift and expiries. Liveness stays provable and the
 channel becomes worth reading. ⚠️ This adds a dependency whose *absence* is
 the alarm, which is the one kind of dependency that fails safe.
 
+⚠️ **The pushed-metric half of that parenthesis now exists.** Every pass
+pushes `truss_pass_timestamp_seconds`, and the first rule in
+`observability/alerts/truss.rules.yml` is the staleness check on it.
+`HEARTBEAT_PING_URL` stays the mechanism for a deployment with no Prometheus
+of its own, and the two are NOT a fallback for each other: one answers "is it
+still running" to somebody else's monitor, the other to yours, and neither is
+consulted when the other is absent.
+
 **Per-root change counts in the alert.** The counts are already computed.
 `platform: +0/~2/-1` per root reads better than one aggregate number, and
 costs the breakdown rather than a new mechanism.
@@ -647,6 +655,20 @@ costs the breakdown rather than a new mechanism.
 commits behind an unresolved failure until somebody goes looking. "Report the
 counter that moves" argues for it directly, and until the local CLI exists
 the heartbeat is the only place it could show up.
+
+DONE, as `truss_queue_depth`, and it went exactly where this entry said it
+would: `runCommitLoop` knew `len(commits)` before it started and now says so.
+`TrussQueueIsNotDraining` alerts on the wedge -- deep and not moving -- rather
+than on depth alone, because a deep queue that is draining is a busy afternoon.
+
+⚠️ **It is emitted only when the pass actually reached the queue, and the
+absence is load-bearing.** A pass refused at the branch-protection gate knows
+nothing about how much work is waiting; reporting 0 would be a claim it did
+not earn and would read identically to a genuinely empty queue.
+
+⚠️ **It is still not in the heartbeat**, which is what this entry asked for
+literally. The heartbeat is read by a human opening an object in a bucket; the
+metric is read by a rule. Both are worth having and only one exists.
 
 **Plan-comment length.** Atlantis chunks its PR comment fence-aware because
 GitHub truncates. A `platform` plan touching hundreds of resources is the
@@ -669,16 +691,73 @@ To verify an artifact, run: `gh attestation verify <artifact> --repo <owner>/<re
 `ci.yml`. It reports only reachable vulnerabilities, so it does not bring the
 noise a scanner would.
 
-**`log/slog`.** The pass logs with `d.logf`. Structured attributes (commit,
-root, duration) make a CronJob's logs greppable across passes, which is the
-state every incident in `docs/` started from.
+**`log/slog`.** PARTLY DONE, and the remaining half is the half this entry
+was about. The pass now narrates in logfmt with a level -- `time=… level=warn
+msg="…"` -- so "every warning this week" is a field selector instead of a grep
+for whichever words a message happened to use, and the counts reach
+`truss_pass_log_events{level=…}` so the error and warning panels work with no
+log pipeline at all.
 
-## `ci.yml` runs `go test ./...` without `-count=1`
+⚠️ **The structured ATTRIBUTES are still not there.** The message remains one
+quoted prose value; `commit=`, `root=` and `duration=` per call site are what
+this entry asked for and are not what landed. The duration part has a partial
+answer elsewhere -- `truss_root_duration_seconds{root,phase}` times every step
+of every root -- which weakens the case for `duration=` on a log line but not
+for the other two.
 
-`release.yml` has it, `ci.yml` does not, and AGENTS.md says it is not
-optional. `actions/setup-go` caches by default and that cache includes
-`GOCACHE`, which is where test results live — so a PR that does not touch
-`go.mod` can restore cached results. One flag.
+## `ci.yml` runs `go test ./...` without `-count=1` — DONE
+
+Both `ci.yml` and `release.yml` carry it now, on every test step including
+the fuzz one. `actions/setup-go` caches by default and that cache includes
+`GOCACHE`, which is where test results live — so without the flag a PR that
+does not touch `go.mod` can restore cached results and pass tests it never
+ran.
+
+## Nothing can complete a change from outside the cluster
+
+**Raised 2026-09-09 by the question "can't truss itself generate this? why
+would I do it".** It is the right question and the answer is a gap.
+
+truss mints GitHub App installation tokens — that is what `truss token` and
+`forge.Client.InstallationToken` are — so the system does hold a real GitHub
+credential and does refresh it on a clock. But it exists **only inside the
+cluster**: the App private key arrives through the mounted credential mirror,
+which is populated from the applier's vault using a 1Password service-account
+token. A checkout on any other machine has none of that.
+
+So an agent or a maintainer working on this repository from outside can push a
+branch — the deploy keys allow it — and can do nothing else. Opening a pull
+request, reading a check's status, or merging one all need the API, and the
+only identity with API access is a pod that runs for ninety seconds every five
+minutes and has no reason to be doing any of it.
+
+⚠️ **The applier is emphatically the wrong thing to reach for here.** Its App
+is the identity that reads branch protection and applies approved changes; a
+token minted from it merging a pull request would be the applier approving its
+own work, which is the inversion this whole project exists to refuse. Whatever
+closes this gap has to be a *different* identity with a *smaller* grant.
+
+The shape of an answer, none of it started:
+
+- **A scoped token for the working machine**, minted by `credentials/` like
+  everything else and rotated on the same 45-day clock — `pull_requests:
+  write` and `checks: read`, nothing more. It is a credential, so it wants
+  seeding, sweeping and an entry in the expiry table; that is the whole cost
+  and it is the ordinary cost of every other credential here.
+- **Or accept it**, and say so where somebody hits it rather than leaving them
+  to rediscover it. A branch that is ready and a human who clicks merge is a
+  legitimate design; what is not legitimate is it being an accident.
+
+⚠️ **It is worth measuring before building.** This repository requires
+`required_approving_review_count: 0` (scripts/repo-protection, and its comment
+explains why: one maintainer cannot approve their own pull request). So a merge
+here needs green CI and nothing else, and the gap costs one click. In
+`../platform`, where code-owner review IS required, the same gap costs nothing
+at all — a human has to look regardless. That asymmetry is the argument for
+recording this rather than building it today.
+
+Related in kind: `../platform`'s `docs/decisions/tailnet-as-code.md`, which is
+the same shape — a control this platform depends on and does not manage.
 
 ## `scripts/check` is weaker than it looks on work that is not staged yet
 
@@ -942,7 +1021,16 @@ Recorded so the next survey does not re-derive them.
   solve a multi-team or multi-repo problem this does not have, or contradict
   a stated line.
 - **OpenTelemetry.** No collector here, no context to propagate across
-  services, and a short-lived process is the case it serves worst.
+  services, and a short-lived process is the case it serves worst. Still true
+  after metrics landed: what shipped is a Prometheus exposition written by
+  hand into a Pushgateway (`internal/metrics`, no dependency), because a batch
+  job that exits before any scrape reaches it is exactly the case the
+  Pushgateway exists for and exactly the case a tracing SDK serves worst.
+  ⚠️ The cost of that choice is written down where it bites: a gateway serves
+  the last push forever, so an applier that has stopped reports its final
+  healthy state indefinitely, and every alert is anchored on
+  `time() - truss_pass_timestamp_seconds` for that reason. See
+  `observability/README.md`.
 - **A notification abstraction (`shoutrrr`, `notify`).** One transport is
   one way to do things. Revisit only if a second is actually wanted.
 

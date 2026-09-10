@@ -66,9 +66,11 @@ Before committing:
 
     scripts/check
 
-Build, vet, `go test -count=1`, govulncheck, the leak scanner's own test, then
-the leak scanner. CI runs that same script rather than restating the steps, so
-the two cannot drift; the reason for each is written beside the command.
+Build, vet, `go test -count=1`, govulncheck, the leak scanner's own test, the
+leak scanner, then `check-observability` (the alerting rules and dashboard
+queries, parsed by Prometheus's and Loki's own parsers). CI runs that same
+script rather than restating the steps, so the two cannot drift; the reason for
+each is written beside the command.
 
 ⚠️ Never chain the check and the commit: `scripts/check && git commit` commits
 either way under some shells, and reads a different tree than it tested.

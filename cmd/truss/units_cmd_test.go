@@ -170,7 +170,7 @@ func TestUnitsBadShaExitsOne(t *testing.T) {
 	dir, _, _, _, _ := unitsFixture(t)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"units", "0000000000000000000000000000000000dead", "--dir", dir}, strings.NewReader(""), &stdout, &stderr)
+	code := run([]string{"units", "nosuchcommit", "--dir", dir}, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stdout: %q stderr: %q)", code, stdout.String(), stderr.String())
 	}

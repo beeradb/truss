@@ -202,6 +202,23 @@ check 'sibling project'      refuse Dockerfile \
   '      "https://github.com/kubernetes-sigs/kubespray/releases/download/v1.0/x.tar.gz"; \'
 check 'kustomize escapes'    refuse Dockerfile \
   '      "https://github.com/kubernetes-sigs/kustomize/releases/download/../../someorg/private-platform/x"; \'
+
+# ⚠️ THE QUERY-TOOLS ACTION'S DOWNLOADS, ANCHORED TO THAT ONE FILE. ci.yml
+# fetches promtool and logcli through .github/actions/query-tools to parse the
+# observability rules and dashboards; the release URLs name the vendor and are
+# identical for every user. The refusing halves keep the exemption narrow:
+# another repository in the same org, and the very same URL in ANY OTHER file,
+# both still bite -- the latter is what proves the anchoring.
+check 'promtool in the action'  clean  .github/actions/query-tools/action.yml \
+  '            "https://github.com/prometheus/prometheus/releases/download/v${v}/${f}.tar.gz"'
+check 'logcli in the action'    clean  .github/actions/query-tools/action.yml \
+  '          "https://github.com/grafana/loki/releases/download/v${v}/logcli-linux-amd64.zip"'
+check 'prometheus other repo'   refuse .github/actions/query-tools/action.yml \
+  '  https://github.com/prometheus/pushgateway/releases/download/v1.11.1/pushgateway.tar.gz'
+check 'grafana other repo'      refuse .github/actions/query-tools/action.yml \
+  '  https://github.com/grafana/alloy/releases/download/v1.10.0/alloy-linux-amd64.zip'
+check 'prometheus url elsewhere' refuse d.txt \
+  'curl https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz'
 check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
 check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
 

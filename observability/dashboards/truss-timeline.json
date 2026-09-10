@@ -1,0 +1,1066 @@
+{
+  "uid": "truss-timeline",
+  "title": "Truss \u2014 timeline",
+  "description": "What truss reported, when. State over time for passes, gates, rotation and drift. Read the panel at the top before the panels below it.",
+  "tags": [
+    "truss",
+    "gitops",
+    "timeline"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "5m",
+  "timezone": "utc",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "How to read a timeline here",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Every band is the **state truss last reported**, held until the next pass overwrites it. Truss is a CronJob that pushes to a Pushgateway, so a band does not mean \"this was true continuously\" \u2014 it means \"this was true at the last push, and nothing has said otherwise since\".\n\n**A band that never ends is the failure mode to watch for.** If the applier stops pushing entirely, every band on this page freezes in its last healthy colour and stays there. *Since the last pass* on [Truss \u2014 applier overview](/d/truss-overview) is the only panel that goes bad on its own."
+      }
+    },
+    {
+      "type": "row",
+      "title": "Passes",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "title": "Pass outcome",
+      "description": "Whether each pass reported a failure. A refusal repeats every pass until it is resolved -- the queue does not advance past a commit that failed -- so a real refusal shows as a continuous band, not a spike.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_pass_success{pass=\"frequent\"}",
+          "legendFormat": "frequent pass",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_pass_success{pass=\"drift\"}",
+          "legendFormat": "daily pass",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "REFUSED",
+                  "color": "red",
+                  "index": 1
+                },
+                "1": {
+                  "text": "ok",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Which class of thing went wrong",
+      "description": "The frequent pass. Every class is reported every pass, most of them as `clear` -- a class that appeared only when it fired would leave a query returning \"no data\" for two different facts.\n\n`digest` and `commit` are the two that mean somebody or something got past the review path. The rest are operational.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_pass_failure{pass=\"frequent\"}",
+          "legendFormat": "{{class}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "clear",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "FIRED",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Which class of thing went wrong (daily pass)",
+      "description": "The daily pass, which rotates, publishes and sweeps, and never runs the commit loop -- so `commit`, `digest` and `apply` are structurally clear here and `rotation` and `publish` can only appear here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_pass_failure{pass=\"drift\"}",
+          "legendFormat": "{{class}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "clear",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "FIRED",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "The rules truss re-reads every pass",
+      "description": "Branch protection and rulesets are read from the forge's API on every pass and never remembered. Either going red means truss is refusing every commit -- turning protection off does not weaken the applier, it stops it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_gate_ok",
+          "legendFormat": "{{gate}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "REFUSED",
+                  "color": "red",
+                  "index": 1
+                },
+                "1": {
+                  "text": "ok",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "State lock held elsewhere",
+      "description": "Not a failure: a contended pass files nothing, leaves HEAD unmoved and sends no failure alert. The next pass is the retry. A band that never clears is a lock somebody has to break by hand.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_pass_lock_contended",
+          "legendFormat": "{{pass}} pass",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "free",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "contended",
+                  "color": "blue",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Secret rotation",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "title": "Rotation and publishing, day by day",
+      "description": "Rotation runs on the daily pass and nowhere else. `rotation ran` meaning **no** for two consecutive days is the silent failure: nothing errored, and the 45-day clock is still running.\n\nRotation mints; the publisher writes. `rotation succeeded` yes with `publisher confirmed` no leaves the vault holding the previous value until the next daily pass republishes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_rotation_ran{pass=\"drift\"}",
+          "legendFormat": "rotation ran",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_rotation_ok{pass=\"drift\"}",
+          "legendFormat": "rotation succeeded",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_publish_attempted{pass=\"drift\"}",
+          "legendFormat": "publisher contacted",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_publish_ok{pass=\"drift\"}",
+          "legendFormat": "publisher confirmed the write",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "no",
+                  "color": "text",
+                  "index": 0
+                },
+                "1": {
+                  "text": "yes",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Days until each credential expires",
+      "description": "Only credentials inside the warning window or past it appear at all, so a line APPEARING is itself the event. A minted credential should never get here: it re-mints on a 45-day clock in two overlapping generations. A root credential getting here needs a human, because no API can mint it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_credential_days_left",
+          "legendFormat": "{{credential}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": null,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepAfter",
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Resource changes made by rotation",
+      "description": "The rotation timeline in one number. Zero on almost every day, on purpose: the credentials plan is empty until a generation boundary is crossed, and on the day it is not, applying it IS the rotation. A spike here should be followed by `publisher confirmed the write` above.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_rotation_changes{pass=\"drift\"}",
+          "legendFormat": "rotation changes",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": null,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepAfter",
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Expiry dates the publisher recorded",
+      "description": "When the publisher writes a freshly minted value it records when that value dies. Zero on a day something was published is the shape that makes the expiry sweep go quiet later -- the credential exists and nothing is watching its lifetime.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_publish_expiries{pass=\"drift\"}",
+          "legendFormat": "expiries written",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": null,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepAfter",
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Drift",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "state-timeline",
+      "title": "Roots that no longer match their configuration",
+      "description": "Drift is reported and never reconciled: undoing a change somebody made mid-incident is its own outage. Every band here is a change made outside the reviewed path, or a provider changing something under it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_root_drifted",
+          "legendFormat": "{{root}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "matches",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "DRIFTED",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Roots whose drift could not be checked",
+      "description": "\"We looked and could not tell\" is a different claim from \"this drifted\", and it is the one that hides a broken provider credential. These roots are NOT reported as clean anywhere.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_root_drift_errored",
+          "legendFormat": "{{root}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "alignValue": "left",
+        "mergeValues": true,
+        "rowHeight": 0.85,
+        "showValue": "never",
+        "perPage": 20,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "checked",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UNKNOWN",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

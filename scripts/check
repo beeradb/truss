@@ -90,4 +90,14 @@ step "ledger-retention-test"; scripts/ledger-retention-test
 step "leakscan-test"; scripts/leakscan-test
 step "leakscan";      scripts/leakscan
 
+# ⚠️ THE DASHBOARDS AND ALERTING RULES ARE THE HALF OF observability/ THAT `go
+# test` CANNOT REACH: metrics_contract_test.go checks the metric NAMES a panel
+# cites are ones truss emits, which a syntactically broken query passes while
+# being unparseable. A bad panel renders "No data" (a quiet week's shape); a
+# bad rule makes Prometheus reject the whole file. check-observability parses
+# every rule and every panel query with Prometheus's and Loki's own parsers.
+# It skips loudly without promtool/logcli; TRUSS_REQUIRE_PROMTOOL=1 (CI sets
+# it) turns that skip into a failure, the same shape TRUSS_REQUIRE_JQ uses.
+step "check-observability"; scripts/check-observability
+
 echo "check: clean"

@@ -24,6 +24,24 @@ type Config struct {
 	// authenticates to the monitor -- so it must never be logged, and it is
 	// never rendered into the heartbeat or the chat message.
 	HeartbeatPingURL string
+	// MetricsPushURL is the root of a Prometheus Pushgateway
+	// ("http://pushgateway.monitoring.svc:9091"), which the pass pushes its
+	// whole metric set to as its last act. Optional with NO default: empty
+	// means the feature is off and nothing about the pass changes.
+	//
+	// ⚠️ A PUSHGATEWAY, NOT A PROMETHEUS. The pass is a CronJob and is gone
+	// before any scrape could reach it; the gateway is the component that
+	// holds a batch job's last numbers for the scrape to find. What that
+	// means for anybody writing a query is stated in observability/README.md
+	// and is not optional reading: the gateway keeps serving the last push
+	// forever, so an applier that has stopped running entirely still reports
+	// its final healthy state.
+	//
+	// It is a bearer secret in the same sense HeartbeatPingURL is -- it can
+	// carry credentials in its userinfo -- so it is never logged, never
+	// echoed into a problem string, and never rendered into the heartbeat or
+	// the chat message.
+	MetricsPushURL string
 }
 
 // Load reads and validates configuration from the environment via the provided
@@ -109,6 +127,15 @@ func Load(getenv func(string) string) (Config, []string) {
 	// value would otherwise print it into a log line the moment it is wrong.
 	if pingURL := getenv("HEARTBEAT_PING_URL"); pingURL != "" {
 		cfg.HeartbeatPingURL = pingURL
+	}
+
+	// METRICS_PUSH_URL is optional with no default, and never validated or
+	// echoed back into a problem string, for the same reasons
+	// HEARTBEAT_PING_URL above is not: absent means the feature is off, and
+	// a rejected value would print a possibly-credentialled URL into a log
+	// line the moment somebody got it wrong.
+	if pushURL := getenv("METRICS_PUSH_URL"); pushURL != "" {
+		cfg.MetricsPushURL = pushURL
 	}
 
 	// Load DRIFT_CHECK - accepts only 0, 1, or unset

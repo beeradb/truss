@@ -51,7 +51,26 @@ jobs:
       # never passed ci.yml. A release is the artefact people run.
       - run: go vet ./...
       - run: go test -count=1 ./...
+
+      # ⚠️ THE SCANNER'S OWN TEST RUNS FIRST, AND IT WAS MISSING HERE. ci.yml
+      # has run both in this order since the scanner was written, on the
+      # reasoning that a leak scan which has quietly stopped matching reports
+      # success -- two of its patterns were once inert under a real grep while
+      # passing green. This job ran the scan without the test, so a release
+      # could be cut past a guard that had stopped guarding, and the comment
+      # above is exactly why that matters: the tag is not trusted because main
+      # was green.
+      - run: scripts/leakscan-test
       - run: scripts/leakscan
+
+      # And the dashboards and alerting rules, for the same reason as
+      # everything else in this block: a tag can point at a commit that never
+      # sat on main and never passed ci.yml, and observability/ is part of
+      # what a release hands somebody.
+      - uses: ./.github/actions/query-tools
+      - run: scripts/check-observability
+        env:
+          TRUSS_REQUIRE_PROMTOOL: "1"
 
       # ⚠️ -trimpath AND NO BUILD STAMP, SO THE CHECKSUM MEANS SOMETHING. A
       # binary carrying a build path or a timestamp differs on every machine,
