@@ -18,6 +18,12 @@
 # ⚠️ VERSIONS ARE PINNED HERE AND NOWHERE ELSE, except where another file
 # already owns the fact: go.mod owns the Go version and tofu-versions owns
 # OpenTofu's, and this script refuses to disagree with either.
+#
+# ⚠️ AND THE PATCH RELEASE IS PART OF THE PIN. go.mod says `go 1.25`, which
+# actions/setup-go resolves to the newest 1.25.x -- so pinning 1.25.0 here
+# installed a compiler fourteen patch releases behind CI's, and govulncheck
+# found 27 reachable standard-library vulnerabilities in it. Track the patch
+# release CI resolves to, and let govulncheck say when it has moved.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -67,10 +73,10 @@ SUMS="scripts/toolchain.sha256"
 # checksum in scripts/toolchain.sha256 is keyed by filename and would refuse.
 all_records() {
   cat <<'EOM'
-go|amd64|1.25.0|go1.25.0.linux-amd64.tar.gz|https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+go|amd64|1.25.14|go1.25.14.linux-amd64.tar.gz|https://go.dev/dl/go1.25.14.linux-amd64.tar.gz
 jq|amd64|1.7.1|jq-linux-amd64|https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
 tofu|amd64|1.12.6|tofu_1.12.6_linux_amd64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.tar.gz
-go|arm64|1.25.0|go1.25.0.linux-arm64.tar.gz|https://go.dev/dl/go1.25.0.linux-arm64.tar.gz
+go|arm64|1.25.14|go1.25.14.linux-arm64.tar.gz|https://go.dev/dl/go1.25.14.linux-arm64.tar.gz
 jq|arm64|1.7.1|jq-linux-arm64|https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-arm64
 tofu|arm64|1.12.6|tofu_1.12.6_linux_arm64.tar.gz|https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_arm64.tar.gz
 EOM
@@ -419,11 +425,16 @@ case "${1:-}" in
   # supports the first time a third architecture is added. Anything
   # provisioning a host can ask the same way.
   arch) echo "$ARCH" ;;
+  # What this host would install, as `tool|arch|version|filename|url` records.
+  # Seeding a cache offline needs the filenames; a provisioning pass that
+  # reports what it put on a machine needs the versions; and anything naming
+  # either without restating a pin this script owns should ask instead.
+  manifest) manifest ;;
   check) shift; do_check ;;
   install)
     shift
     if [ "$#" -eq 0 ]; then set -- $(manifest | cut -d'|' -f1); fi
     do_install "$@"
     ;;
-  *) echo "usage: $0 arch | check | install [tool...]" >&2; exit 2 ;;
+  *) echo "usage: $0 arch | manifest | check | install [tool...]" >&2; exit 2 ;;
 esac

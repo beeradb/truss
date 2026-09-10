@@ -7,6 +7,7 @@ checksum.
     scripts/toolchain check              what is installed, what is missing
     scripts/toolchain install            everything
     scripts/toolchain install go jq      just those
+    scripts/toolchain manifest           what it would install, and from where
 
 Nothing needs root. Binaries land in `$TRUSS_TOOLCHAIN_PREFIX/bin` (default
 `~/.local/bin`) and the Go tree in `.../lib/go`, so the same command works on
@@ -25,6 +26,13 @@ comparison.
 | Go | `go.mod` | building and testing everything |
 | jq | `scripts/toolchain` | the plan digest's differential test |
 | OpenTofu | `tofu-versions` | verifying plan JSON shapes by measurement |
+
+⚠️ **The patch release is part of the pin, and it matters more than it
+looks.** `go.mod` says `go 1.25`, which `actions/setup-go` resolves to the
+newest 1.25.x — so a table here pinning 1.25.0 installed a compiler fourteen
+patch releases behind CI's, and govulncheck found 27 reachable
+standard-library vulnerabilities in it. Track the patch release CI resolves
+to, and let govulncheck say when it has moved.
 
 **Go** is pinned by `go.mod` and nowhere else. `scripts/toolchain` refuses to
 run if its own table disagrees with it, because a toolchain that differs from
@@ -115,6 +123,10 @@ stable enough to depend on:
   actually run. That is the
   assertion to run after provisioning, and the one to run before trusting a
   green check on an unfamiliar machine.
+- **`scripts/toolchain manifest`** prints what this host would install, as
+  `tool|arch|version|filename|url` records. Seed a cache offline from the
+  filenames, or report what a provision put on a machine from the versions,
+  without restating a pin this script owns.
 - **Two environment variables** are the whole configuration:
   `TRUSS_TOOLCHAIN_PREFIX` (where it installs) and `TRUSS_TOOLCHAIN_CACHE`
   (where archives are kept). Set the cache to a persistent path and a rebuild
@@ -156,3 +168,11 @@ second installer would be a second statement of the same fact.
 
 What keeps the two honest is that both read the version from the same place:
 `go.mod` is the single pin, and this script refuses to disagree with it.
+
+⚠️ **`scripts/check` sets `GOTOOLCHAIN=local`, and that is not a detail.**
+Left unset it means `auto`, and `go run` silently downloads whatever compiler
+a tool's own `go.mod` asks for — so govulncheck pinned at a version needing Go
+1.26 passed on a box with 1.25 installed, scanning a standard library that was
+never going to ship, while CI ran the identical command and failed because
+`actions/setup-go` sets `local`. A check that passes by fetching a different
+compiler is not the check CI runs.

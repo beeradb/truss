@@ -53,9 +53,15 @@ if ! arch_said="$("$SCRIPT" arch 2>&1)"; then
   esac
 fi
 ARCH="$arch_said"
-GO_ARCHIVE="go1.25.0.linux-$ARCH.tar.gz"
-JQ_BINARY="jq-linux-$ARCH"
-TOFU_ARCHIVE="tofu_1.12.6_linux_$ARCH.tar.gz"
+# ⚠️ ASKED, NOT RESTATED -- FOR THE VERSION AS WELL AS THE ARCHITECTURE.
+# Spelled out here, these went stale the moment the Go pin moved from 1.25.0
+# to 1.25.14, and four cases failed for a reason that had nothing to do with
+# what they test. The version is a pin scripts/toolchain owns; this asks it.
+RECORDS=$("$SCRIPT" manifest)
+field_of() { echo "$RECORDS" | awk -F'|' -v t="$1" -v n="$2" '$1==t{print $n}'; }
+GO_VERSION=$(field_of go 3);   GO_ARCHIVE=$(field_of go 4)
+JQ_VERSION=$(field_of jq 3);   JQ_BINARY=$(field_of jq 4)
+TOFU_VERSION=$(field_of tofu 3); TOFU_ARCHIVE=$(field_of tofu 4)
 
 # Runs `toolchain install jq` into a throwaway prefix, with a fake curl that
 # writes `body` instead of downloading. jq is the subject because it installs
@@ -209,14 +215,14 @@ install_ok() {
 
   # A fake `go` distribution: the tarball shape install_go unpacks (a single
   # top-level go/ directory) with the two binaries it links into bin/.
-  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/build/go/bin/go"
+  printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$GO_VERSION" > "$dir/build/go/bin/go"
   printf '#!/bin/sh\nexit 0\n' > "$dir/build/go/bin/gofmt"
   chmod +x "$dir/build/go/bin/go" "$dir/build/go/bin/gofmt"
   tar -C "$dir/build" -czf "$dir/serve/$GO_ARCHIVE" go
 
   # jq ships as a bare binary, tofu inside a tarball as a single file.
-  printf '#!/bin/sh\necho jq-1.7.1\n' > "$dir/serve/$JQ_BINARY"
-  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n' > "$dir/build/tofu"
+  printf '#!/bin/sh\necho jq-%s\n' "$JQ_VERSION" > "$dir/serve/$JQ_BINARY"
+  printf '#!/bin/sh\necho "OpenTofu v%s"\n' "$TOFU_VERSION" > "$dir/build/tofu"
   chmod +x "$dir/build/tofu"
   tar -C "$dir/build" -czf "$dir/serve/$TOFU_ARCHIVE" tofu
 
@@ -267,9 +273,9 @@ install_ok() {
   local tool want have
   for tool in go jq tofu; do
     case "$tool" in
-      go)   want=1.25.0; have=$("$dir/prefix/bin/go" version | awk '{print $3}' | sed 's/^go//') ;;
-      jq)   want=1.7.1;  have=$("$dir/prefix/bin/jq" --version | sed 's/^jq-//') ;;
-      tofu) want=1.12.6; have=$("$dir/prefix/bin/tofu" version | awk '{print $2}' | sed 's/^v//') ;;
+      go)   want=$GO_VERSION; have=$("$dir/prefix/bin/go" version | awk '{print $3}' | sed 's/^go//') ;;
+      jq)   want=$JQ_VERSION;  have=$("$dir/prefix/bin/jq" --version | sed 's/^jq-//') ;;
+      tofu) want=$TOFU_VERSION; have=$("$dir/prefix/bin/tofu" version | awk '{print $2}' | sed 's/^v//') ;;
     esac
     if [ "$have" != "$want" ]; then
       fail=$((fail + 1)); echo "FAIL  a matching archive installs: $tool reports $have, want $want" >&2
@@ -408,7 +414,7 @@ wrong_version_keeps_the_old_tree() {
   }
 
   # The good tree first.
-  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/build/go/bin/go"
+  printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$GO_VERSION" > "$dir/build/go/bin/go"
   printf '#!/bin/sh\nexit 0\n' > "$dir/build/go/bin/gofmt"
   chmod +x "$dir/build/go/bin"/*
   tar -C "$dir/build" -czf "$dir/serve/$GO_ARCHIVE" go
@@ -448,7 +454,7 @@ wrong_version_keeps_the_old_tree() {
   # mutation that deletes the tree read as green.
   local have
   have=$("$dir/prefix/lib/go/bin/go" version 2>/dev/null | awk '{print $3}') || have=""
-  if [ "$have" != "go1.25.0" ]; then
+  if [ "$have" != "go$GO_VERSION" ]; then
     fail=$((fail + 1))
     echo "FAIL  a bad go archive keeps the old tree: go now reports ${have:-nothing}" >&2
     return
@@ -605,7 +611,7 @@ sweep_respects_a_process_it_cannot_signal
 sweep_failure_does_not_stop_the_run() {
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/bin" "$dir/prefix/bin" "$dir/cache"
-  printf '#!/bin/sh\necho jq-1.7.1\n' > "$dir/prefix/bin/jq"
+  printf '#!/bin/sh\necho jq-%s\n' "$JQ_VERSION" > "$dir/prefix/bin/jq"
   chmod +x "$dir/prefix/bin/jq"
   local impossible
   impossible=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
@@ -699,9 +705,9 @@ refusal_says_whether_it_removed_it
 shadowed() {
   local dir="$tmp/$RANDOM$RANDOM" out rc tool
   mkdir -p "$dir/prefix/bin" "$dir/shadow"
-  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/prefix/bin/go"
-  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/prefix/bin/jq"
-  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/prefix/bin/tofu"
+  printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$GO_VERSION" > "$dir/prefix/bin/go"
+  printf '#!/bin/sh\necho jq-%s\n' "$JQ_VERSION"                          > "$dir/prefix/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v%s"\n' "$TOFU_VERSION"                > "$dir/prefix/bin/tofu"
   chmod +x "$dir/prefix/bin"/*
   # An older go, earlier on PATH.
   printf '#!/bin/sh\necho "go version go1.21.0 linux/amd64"\n' > "$dir/shadow/go"
@@ -758,9 +764,9 @@ missing_is_not_shadowed
 trailing_slash() {
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/prefix/bin"
-  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/prefix/bin/go"
-  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/prefix/bin/jq"
-  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/prefix/bin/tofu"
+  printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$GO_VERSION" > "$dir/prefix/bin/go"
+  printf '#!/bin/sh\necho jq-%s\n' "$JQ_VERSION"                          > "$dir/prefix/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v%s"\n' "$TOFU_VERSION"                > "$dir/prefix/bin/tofu"
   chmod +x "$dir/prefix/bin"/*
   set +e
   out=$(cd "$HERE/.." && PATH="$dir/prefix/bin:$PATH" \
@@ -783,9 +789,9 @@ same_file_by_another_name() {
   local dir="$tmp/$RANDOM$RANDOM" out rc
   mkdir -p "$dir/real/bin"
   ln -s "$dir/real" "$dir/link"
-  printf '#!/bin/sh\necho "go version go1.25.0 linux/amd64"\n' > "$dir/real/bin/go"
-  printf '#!/bin/sh\necho jq-1.7.1\n'                          > "$dir/real/bin/jq"
-  printf '#!/bin/sh\necho "OpenTofu v1.12.6"\n'                > "$dir/real/bin/tofu"
+  printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$GO_VERSION" > "$dir/real/bin/go"
+  printf '#!/bin/sh\necho jq-%s\n' "$JQ_VERSION"                          > "$dir/real/bin/jq"
+  printf '#!/bin/sh\necho "OpenTofu v%s"\n' "$TOFU_VERSION"                > "$dir/real/bin/tofu"
   chmod +x "$dir/real/bin"/*
   set +e
   out=$(cd "$HERE/.." && PATH="$dir/real/bin:$PATH" \

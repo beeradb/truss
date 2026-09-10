@@ -14,6 +14,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# ⚠️ THE TOOLCHAIN THAT IS INSTALLED, NEVER ONE FETCHED MID-RUN. Unset,
+# GOTOOLCHAIN is `auto`, and `go run` silently downloads whatever a tool's
+# go.mod asks for -- so govulncheck pinned at a version needing Go 1.26 passed
+# here on a box with 1.25 installed, while CI ran the same command and failed:
+# actions/setup-go sets GOTOOLCHAIN=local, which forbids the download. A check
+# that passes locally by fetching a different compiler is not the check CI
+# runs, and the difference is invisible until CI says so.
+export GOTOOLCHAIN=local
+
 step() { echo "check: $*" >&2; }
 
 step "go build";     go build ./...
@@ -39,7 +48,14 @@ step "go test";      go test -count=1 ./...
 # ⚠️ Pinned, not @latest -- a tag is a mutable pointer somebody else controls,
 # and @latest is strictly worse than a tag. Nothing is added to go.mod or
 # go.sum, which leakscan's own narrow exemption asserts.
-step "govulncheck";  go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+#
+# ⚠️ AND PINNED TO ONE THIS REPOSITORY'S GO CAN RUN. v1.8.0 declares `go
+# 1.26.0`, so under GOTOOLCHAIN=local it refuses to build against the 1.25 that
+# go.mod asks for -- CI failed on exactly this for three commits while every
+# local run passed by downloading 1.26 behind the scenes. v1.7.0 is the newest
+# that declares 1.25. Bumping this means bumping go.mod, scripts/toolchain and
+# its checksums together, deliberately, rather than discovering it here.
+step "govulncheck";  go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
 # ⚠️ THE INSTALLER THAT FETCHES THIS TOOLCHAIN, WATCHED REFUSING. It verifies
 # every archive against a pinned checksum, and a verification nobody has seen
