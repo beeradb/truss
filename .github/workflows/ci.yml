@@ -55,9 +55,17 @@ jobs:
       #
       # TRUSS_REQUIRE_JQ=1 turns the digest differential test's skip into a
       # failure. Setting it here is what makes that test mean something in CI.
+      # ⚠️ promtool AND logcli, because scripts/check runs check-observability
+      # and the dashboards speak two query languages -- PromQL to promtool,
+      # LogQL to logcli. Installed here so scripts/check can require them.
+      - uses: ./.github/actions/query-tools
+
       - run: scripts/check
         env:
           TRUSS_REQUIRE_JQ: "1"
+          # Turns check-observability's skip-without-promtool into a failure,
+          # the same way TRUSS_REQUIRE_JQ does for the digest differential test.
+          TRUSS_REQUIRE_PROMTOOL: "1"
 
       # ⚠️ A SHORT FUZZ RUN, ON PURPOSE. The seed corpus only replays
       # divergences already found; fuzzing is what found them. Three genuine
@@ -70,3 +78,4 @@ jobs:
       - run: go test -count=1 ./internal/plan/ -run 'XXX_none' -fuzz FuzzCanonicalAgreesWithJQ -fuzztime 30s
         env:
           TRUSS_REQUIRE_JQ: "1"
+

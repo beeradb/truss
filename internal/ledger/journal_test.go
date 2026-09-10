@@ -146,6 +146,56 @@ func TestAppliedRecordForANoopIsExactlyNoopTrue(t *testing.T) {
 	}
 }
 
+// TestSkippedRecordShapeAndKey: `truss skip` (docs/work-items.md:86-133)
+// writes {"skipped":true,"reason":...,"at":...}, in that field order, and
+// under the APPLIED key for the sha -- not a key of its own -- so `truss
+// why` has exactly one place to look for "what happened to this commit".
+func TestSkippedRecordShapeAndKey(t *testing.T) {
+	j, fb, closeSrv := testJournal(t)
+	defer closeSrv()
+
+	if err := j.PutSkipped(context.Background(), "headsha1", "known bad plan, never applies"); err != nil {
+		t.Fatalf("PutSkipped: %v", err)
+	}
+
+	body := string(fb.lastBody)
+	skippedIdx := strings.Index(body, `"skipped"`)
+	reasonIdx := strings.Index(body, `"reason"`)
+	atIdx := strings.Index(body, `"at"`)
+	if skippedIdx == -1 || reasonIdx == -1 || atIdx == -1 {
+		t.Fatalf("skipped record missing a field: %s", body)
+	}
+	if !(skippedIdx < reasonIdx && reasonIdx < atIdx) {
+		t.Errorf("skipped record field order = %s, want skipped, reason, at", body)
+	}
+
+	var decoded struct {
+		Skipped bool   `json:"skipped"`
+		Reason  string `json:"reason"`
+		At      string `json:"at"`
+	}
+	if err := json.Unmarshal(fb.lastBody, &decoded); err != nil {
+		t.Fatalf("decoding skipped record: %v", err)
+	}
+	if !decoded.Skipped {
+		t.Errorf("skipped = %v, want true", decoded.Skipped)
+	}
+	if decoded.Reason != "known bad plan, never applies" {
+		t.Errorf("reason = %q, want the given reason", decoded.Reason)
+	}
+	if decoded.At != "2026-09-08T12:30:45Z" {
+		t.Errorf("at = %q, want the fixed test clock's timestamp", decoded.At)
+	}
+
+	if fb.lastReq == nil || fb.lastReq.URL == nil {
+		t.Fatal("no request recorded")
+	}
+	wantKey := testLayout().AppliedKey("headsha1")
+	if got := strings.TrimPrefix(fb.lastReq.URL.Path, "/"+fb.bucket+"/"); got != wantKey {
+		t.Errorf("skipped record written to %q, want the applied key %q", got, wantKey)
+	}
+}
+
 // TestAppliedRecordSortsRootsForDeterminism: the bash iterates a bash
 // associative array whose order is unspecified (§3.4); nothing hashes this
 // object, so the Go port sorts instead, deterministically, which is a

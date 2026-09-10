@@ -45,6 +45,19 @@ type Ruleset struct {
 	Enforcement string
 
 	BypassActors []BypassActor
+
+	// Rules is the rule types this ruleset contributes to the ref in
+	// question -- "deletion", "non_fast_forward", "pull_request" and so on,
+	// in GitHub's own vocabulary rather than a normalised one. CheckRulesets
+	// ignores it; CheckDeliveryRef is what reads it.
+	//
+	// ⚠️ IT IS THE RULES THAT APPLY TO ONE REF, NOT EVERY RULE THE RULESET
+	// DECLARES. The read that produces it asks which rules apply to a
+	// branch, so a ruleset whose conditions exclude this ref contributes
+	// nothing here even though it exists. That is the question a gate about
+	// one ref actually wants, and asking the other one would let a rule
+	// protecting some other branch read as protecting this one.
+	Rules []string
 }
 
 // BypassActor is one actor permitted to skip a ruleset's rules, from

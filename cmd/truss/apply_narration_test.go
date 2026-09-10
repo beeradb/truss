@@ -108,7 +108,12 @@ func TestANoopCommitNarratesWhyHeadAdvanced(t *testing.T) {
 	const sha = "commitsha3"
 	const head = "headsha1"
 
-	forgeFake := &fakeForge{ProtectionResult: compliantGatesProtection()}
+	// ⚠️ The commit gate runs before the roots are derived (runCommitLoop),
+	// so even a commit that touches nothing has to have reached main through
+	// a reviewed, merged PR. This fixture used to omit the gate wiring
+	// entirely and still pass, which was the defect rather than a shortcut --
+	// see TestACommitTouchingNoRootIsStillGated.
+	forgeFake := compliantCommitGate("alice", sha, head)
 	git := &fakeGit{
 		CommitsList: []string{sha},
 		ChangedByCommit: map[string][]string{

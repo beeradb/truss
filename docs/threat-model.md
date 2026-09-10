@@ -13,6 +13,10 @@
 | pushes directly to `main` (protection off) | not a forge merge commit → refused | signature/committer check |
 | gets the plan job's secrets | reads configuration and state. Changes nothing, reads no token | plan-tier credentials are read-only, and those states hold no secret |
 | swaps what would be applied between review and merge — a compromised CI, a resource that moved, a root applied earlier in the same pass | the applier's own plan stops matching the digest CI filed, so the root is refused rather than applied | the plan-digest gate |
+| merges a commit that touches no OpenTofu root without an approval | refused; the queue stops. The gate runs for every commit, not only the ones that apply something | approval + merge-provenance check, before the roots are derived |
+| edits a delivery unit's manifests after CI rendered them | the applier's own render stops matching the digest CI filed, so the commit is refused | the render-digest gate |
+| deletes a delivery unit instead of editing it | not gated at all: `renderOneUnit` reads the absence as the commit retiring the unit and skips the render gate for it, on purpose — the reconciler removes what it applied, and refusing here would make retiring a workload impossible | — (deliberate exemption, `renderOneUnit`) |
+| pushes a commit straight onto the delivery ref | force pushes and deletion are refused by the forge, so history there stays append-only. ⚠️ An ordinary fast-forward by anyone with repository write access is NOT refused — see `docs/work-items.md` | a ruleset the applier re-reads every pass |
 | gets root on the box the applier runs on | has everything. **This is the trust root**, stated, not hidden | — |
 
 ## What this does NOT protect against
@@ -33,11 +37,35 @@
   reads more from the vault than the account is allowed per hour, retrying
   with backoff only spreads the failure out. Budget the reads, then set the
   cadence from the budget.
-- **There's no override for a single stuck gate — only an all-or-nothing one.**
-  No gate can be waived, skipped or forced individually: a check refusing for a
-  reason that turns out to be wrong cannot be argued with. What exists instead
-  is turning protection off entirely, fixing the condition, and turning it back
-  on — `scripts/protection off` / `on`, described in
+- **A single stuck gate now has a narrow override, and everything else still
+  has only a blunt one.** `truss skip <sha> --reason <text>`
+  (`cmd/truss/skip_cmd.go`) advances HEAD past exactly one commit, which the
+  blunt hatch below cannot be aimed at, and it needs the ledger write
+  credential rather than repository admin. All four guards are checked before
+  anything is written: `--reason` must be non-empty; a `failed/<sha>` record
+  must already exist, because the applier has to have actually tried and
+  refused this commit — skipping one it never reached would be guessing about
+  work nobody attempted; the sha must not already be HEAD; and
+  `TRUSS_SKIP_I_UNDERSTAND` must equal that exact sha, because a flag a script
+  can set reflexively on every retry is not a confirmation.
+
+  It announces before it acts, and a skip it cannot announce does not happen:
+  the alert is sent first, and if the send fails, nothing is written and HEAD
+  does not move. That is what earns this hatch the same "can never do it
+  quietly" property the blunt one has — enforced by that ordering, not assumed
+  from it.
+
+  ⚠️ **What it can walk past is exactly what gate 1 above refuses** — a commit
+  with no approval, or no forge merge commit signed by the forge. That is the
+  reason it exists: a commit whose plan can never apply still has to be got
+  past somehow. It is also the danger the guards above are narrowing, not
+  removing: this command applies what the approval gate refused.
+
+  The other override is still all-or-nothing. No gate can be waived, skipped
+  or forced individually by touching protection: a check refusing for a
+  reason that turns out to be wrong cannot be argued with that way. What
+  exists instead is turning protection off entirely, fixing the condition, and
+  turning it back on — `scripts/protection off` / `on`, described in
   [docs/operations.md](operations.md).
 
   That is a real escape hatch and it is deliberately a blunt one. It cannot be

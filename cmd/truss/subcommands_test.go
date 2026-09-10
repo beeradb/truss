@@ -17,6 +17,22 @@ import (
 // that -- the separation is the kubelet projecting a token into one container
 // and the kernel keeping mount namespaces apart, and code presence is not a
 // capability.
+//
+// `status`, `why` and `skip` are not in §4.9's table -- they post-date it,
+// added for the local operator CLI docs/work-items.md:86-133 asks for
+// ("a binary on my computer I can use to inspect the queue and unstick
+// things"), over the same ledger machinery §4.9's rows already built.
+//
+// `render-digest` and `inventory` post-date §4.9 too: the CI side of the
+// render digest gate, and the inventory consistency check. `inventory`
+// collapses `inventory validate` to one top-level verb, the same way
+// `ledger` and `gate` already collapse `ledger get`/`ledger put` and `gate
+// protection`/`gate commit`.
+//
+// `units` post-dates all of the above: it prints the units a commit touches
+// so CI and the applier derive the set from one implementation, closing
+// docs/work-items.md's "The two sides of the render digest do not share a
+// derivation".
 func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 	want := []string{
 		"ledger",
@@ -27,6 +43,12 @@ func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 		"notify",
 		"apply",
 		"publish",
+		"status",
+		"why",
+		"skip",
+		"render-digest",
+		"inventory",
+		"units",
 	}
 	if !reflect.DeepEqual(subcommands, want) {
 		t.Fatalf("subcommands = %v, want %v", subcommands, want)

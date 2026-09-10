@@ -91,7 +91,13 @@ type fakeForge struct {
 	// ProtectionResult keep passing: it was never making a claim about
 	// rulesets, and a real repository with none is not a hole.
 	RulesetsResult gates.Rulesets
-	RulesetsErr    error
+
+	// RulesetsByBranch answers per ref where a test needs main and the
+	// delivery ref to differ, which is most tests that touch delivery: the
+	// applier asks about both in one pass and they are protected by
+	// different rulesets in any real deployment.
+	RulesetsByBranch map[string]gates.Rulesets
+	RulesetsErr      error
 
 	Token    string
 	TokenErr error
@@ -116,7 +122,20 @@ func (f *fakeForge) Protection(ctx context.Context, branch string) (gates.Protec
 }
 
 func (f *fakeForge) Rulesets(ctx context.Context, branch string) (gates.Rulesets, error) {
+	if rs, ok := f.RulesetsByBranch[branch]; ok {
+		return rs, f.RulesetsErr
+	}
 	return f.RulesetsResult, f.RulesetsErr
+}
+
+// protectedDeliveryRulesets is a ruleset shaped the way CheckDeliveryRef
+// demands: active, nobody may bypass it, and it blocks both force pushes and
+// deletion so the ref's history stays append-only.
+func protectedDeliveryRulesets() gates.Rulesets {
+	return gates.Rulesets{Applicable: []gates.Ruleset{{
+		ID: 42, Name: "delivery ref", Enforcement: "active",
+		Rules: []string{"non_fast_forward", "deletion"},
+	}}}
 }
 
 func (f *fakeForge) InstallationToken(ctx context.Context) (string, time.Time, error) {
@@ -264,6 +283,13 @@ type fakeLedger struct {
 	bucket  string
 	objects map[string][]byte
 	srv     *httptest.Server
+
+	// failPutKeys names keys whose PUT answers 500 instead of succeeding --
+	// for a test that needs to observe WRITE ORDER (skip_cmd_test.go's
+	// TestSkipWritesTheRecordBeforeAdvancingHead: PutSkipped must land even
+	// when the following AdvanceHead's PUT to the HEAD key fails). Nil
+	// means every PUT succeeds, matching every other test in this package.
+	failPutKeys map[string]bool
 }
 
 func newFakeLedger(t *testing.T, bucket string) *fakeLedger {
@@ -292,6 +318,17 @@ func (f *fakeLedger) put(key string, body []byte) {
 	f.objects[key] = append([]byte(nil), body...)
 }
 
+// failPutOn makes every future PUT to key answer 500 instead of writing,
+// leaving any object already there untouched -- see failPutKeys.
+func (f *fakeLedger) failPutOn(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failPutKeys == nil {
+		f.failPutKeys = make(map[string]bool)
+	}
+	f.failPutKeys[key] = true
+}
+
 func (f *fakeLedger) handle(w http.ResponseWriter, r *http.Request) {
 	prefix := "/" + f.bucket + "/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -318,6 +355,13 @@ func (f *fakeLedger) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write(body)
 	case http.MethodPut:
+		f.mu.Lock()
+		shouldFail := f.failPutKeys[key]
+		f.mu.Unlock()
+		if shouldFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.objects[key] = append([]byte(nil), body...)
@@ -709,9 +753,21 @@ type fakeGit struct {
 	CommitsList       []string
 	ChangedByCommit   map[string][]string
 	TreeRootsByCommit map[string][]string
-	HasDirFn          func(root string) bool
-	CheckoutErr       error
-	CommitsErr        error
+
+	// TreeRenderUnitsByCommit is the render-unit listing, separate from
+	// TreeRootsByCommit because the driver keeps the two listings apart --
+	// TreeRoots reproduces the bash's exact ls-tree and must not widen.
+	TreeRenderUnitsByCommit map[string][]string
+
+	// PushedRefs records every PushRef as "<ref>=<sha>". Whether the
+	// delivery ref moved AT ALL is the property the ref gate exists to
+	// control, so a test asserting a refusal has to be able to see it --
+	// the same reason fakeTofu records applies.
+	PushedRefs  []string
+	PushRefErr  error
+	HasDirFn    func(root string) bool
+	CheckoutErr error
+	CommitsErr  error
 
 	// DirsAtRef makes HasDir depend on WHICH TREE IS CHECKED OUT, which the
 	// real one does and this fake did not. Without it no test could see a
@@ -786,6 +842,18 @@ func (g *fakeGit) ChangedFiles(ctx context.Context, sha string) ([]string, error
 
 func (g *fakeGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 	return g.TreeRootsByCommit[sha], nil
+}
+
+func (g *fakeGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
+	return g.TreeRenderUnitsByCommit[sha], nil
+}
+
+func (g *fakeGit) PushRef(ctx context.Context, sha, ref string) error {
+	if g.PushRefErr != nil {
+		return g.PushRefErr
+	}
+	g.PushedRefs = append(g.PushedRefs, ref+"="+sha)
+	return nil
 }
 
 func (g *fakeGit) Checkout(ctx context.Context, ref string) error {

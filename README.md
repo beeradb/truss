@@ -158,6 +158,31 @@ sweep runs, the heartbeat is written, and the alert goes out — on success as
 well as failure, because a job that reports only when it fails cannot be told
 apart from a job that is no longer running.
 
+## Every refusal is a number, not just a sentence
+
+Each pass pushes what it did to a Prometheus Pushgateway — the whole state of
+the run, as gauges: which gate refused and in which class, how long each root
+spent in each step of its apply, how many days each credential has left, which
+roots drifted and which ones could not even be checked. The dashboards and the
+alerting rules that read them ship in
+[observability/](observability/README.md).
+
+**The classes are the point.** A digest refusal means the plan about to run did
+not hash to the plan a human read; a `tofu apply` returning non-zero means
+something broke. Both are red and they want different people, so they are
+different series — never a regex over the alert text, which is the mistake a
+dashboard makes once.
+
+⚠️ **A Pushgateway serves the last thing it was given, forever.** An applier
+that has stopped running entirely keeps reporting its final healthy state, so
+every alert here is anchored on `time() - truss_pass_timestamp_seconds` — the
+one expression that goes bad on its own when nothing pushes. That trade is
+written down rather than discovered.
+
+It is off unless you set `METRICS_PUSH_URL`, and a gateway that is down cannot
+fail a pass: the push is the last thing a pass does, long after the heartbeat
+and the alert.
+
 ## Nothing about your deployment is baked into the binary
 
 The repository, the approver, the bucket and its prefixes, the vault mount, and
@@ -195,3 +220,6 @@ different bucket or a different repository is configuration, not a fork.
   and how to run the tests.
 - [docs/toolchain.md](docs/toolchain.md) — the pinned Go, jq and OpenTofu,
   installed by one command and verified against each project's own checksum.
+- [observability/README.md](observability/README.md) — every metric, the
+  dashboards and alerting rules, and the Pushgateway semantics you have to
+  know before writing a query.

@@ -10,8 +10,10 @@
 # ⚠️ WHAT IS IN HERE IS DECIDED BY WHAT TRUSS EXECUTES, and nothing else.
 # Verified by grepping every exec.Command in non-test code: `tofu` (plan and
 # apply), `git` (clone and read the approved commit), `op` (the publisher's
-# 1Password reads). Truss talks to GitHub and to S3 over HTTP in Go, so it
-# needs no `gh` and no `aws` -- both of which the hand-built image carried.
+# 1Password reads), `kustomize` (rendering a delivery unit's manifests so they
+# can be fingerprinted; internal/render.Runner.Build). Truss talks to GitHub
+# and to S3 over HTTP in Go, so it needs no `gh` and no `aws` -- both of which
+# the hand-built image carried.
 #
 # ⚠️ NO PROVIDER MIRROR. The old image baked one, built from the CONSUMER's
 # terraform config, which is what coupled this image to somebody else's repo
@@ -50,6 +52,33 @@ RUN set -eux; \
     unzip -q /tmp/tofu.zip -d /usr/local/bin tofu; \
     rm -f /tmp/tofu.zip /tmp/tofu.sums; \
     chmod 0755 /usr/local/bin/tofu
+
+# ⚠️ ONE KUSTOMIZE VERSION, NOT A LIST LIKE tofu-versions. release.yml builds
+# one image per OpenTofu version because a consumer's CI plans with one tofu
+# and the applier must re-plan with the matching one (see above); the
+# renderer has no equivalent per-consumer coupling, so kustomize-version at
+# the repo root holds exactly one version rather than a table.
+#
+# NO DEFAULT, for the same reason as OPENTOFU_VERSION: a literal here would
+# make the pin silently stale instead of missing.
+ARG KUSTOMIZE_VERSION
+RUN test -n "$KUSTOMIZE_VERSION" || { echo "KUSTOMIZE_VERSION build-arg is required" >&2; exit 1; }
+
+# kustomize, from the release tarball rather than an apt repo: one binary,
+# one checksum, no extra archive to trust for a single file. Used to render
+# delivery units so their manifests can be fingerprinted before being
+# diffed and applied (internal/render.Runner.Build).
+RUN set -eux; \
+    curl -fsSL -o /tmp/kustomize.tar.gz \
+      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    curl -fsSL -o /tmp/kustomize.sums \
+      "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/checksums.txt"; \
+    grep " kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz\$" /tmp/kustomize.sums \
+      | sed "s|kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz|/tmp/kustomize.tar.gz|" \
+      | sha256sum -c -; \
+    tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin kustomize; \
+    rm -f /tmp/kustomize.tar.gz /tmp/kustomize.sums; \
+    chmod 0755 /usr/local/bin/kustomize
 
 # The 1Password CLI, used only by the publisher. Its apt repo is per-arch, so
 # the component below is TARGETARCH rather than a hardcoded amd64 -- which is

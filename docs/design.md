@@ -129,18 +129,32 @@ flowchart TD
     P -- no --> TAIL
     P -- yes --> C{a new commit<br/>on main?}
     C -- no --> ROT
-    C -- yes --> N{touches a root?}
-    N -- no --> ADV[record noop,<br/>advance HEAD] --> C
-    N -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
+    C -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
+    G1 -- passes --> N{touches a root or<br/>a delivery unit?}
+    N -- no (both empty) --> ADV[record noop,<br/>advance HEAD] --> C
     G1 -- fails any of those --> STOP[stop the queue here:<br/>refuse this commit, alert]
-    G1 -- passes --> PL[plan every root it touched]
+    N -- yes --> PL[plan every root it touched]
     PL --> G2{each plan's digest matches<br/>what CI filed<br/>credentials root is exempt}
     G2 -- no --> STOP
-    G2 -- yes --> AP2[apply · record applied,<br/>advance HEAD] --> C
+    G2 -- yes --> AP2[apply every root]
+    AP2 --> RD[render every delivery<br/>unit it touched]
+    RD --> G3{each render's digest matches<br/>what CI filed}
+    G3 -- no --> STOP
+    G3 -- yes --> REC[record applied,<br/>advance HEAD] --> C
     STOP --> ROT
     ROT[daily pass only:<br/>re-plan credentials at HEAD, rotate if a boundary passed,<br/>sweep every credential's expiry<br/>skipped if protection failed] --> TAIL
     TAIL[write the heartbeat,<br/>send the alert] --> E([done])
 ```
+
+**Every commit is gated, including the ones that touch no root.** The gate used
+to run only after the touched-root set came back non-empty, so a commit that
+changed only documentation, a CI workflow or anything else outside the roots
+was recorded as a noop and HEAD advanced past it — without the approval, the
+merged pull request or the merge-commit signature ever being asked for. A noop
+record says *truss* did nothing; it has never meant nothing was done, and the
+difference matters the moment anything else reads the same repository. The
+price is three forge calls for every commit rather than only the ones that
+apply something.
 
 Only the very first refusal is a true dead end — no ledger entry to start from
 means there's nothing yet to run a pass against. Every other outcome, whether
@@ -162,6 +176,98 @@ compares them, rather than trusting that they're still what somebody set:
 | Require branch up to date | on | the plan was computed against exactly what merges |
 | Enforce for administrators | on | the approver has admin rights and could otherwise walk past every rule above by accident |
 | Allow force pushes / deletions | off | history is the audit log |
+
+## Rendered manifests are gated the same way, and the difference is instructive
+
+A delivery unit is a Kustomize directory. CI renders it, hashes the exact
+bytes, and files the digest under the same prefix as a plan digest; the
+applier renders it again and refuses unless the bytes agree.
+
+It is the easier half of the same idea, and the reason is worth stating. A
+plan depends on the tree *and* on the live infrastructure, which is why
+`internal/plan` reproduces a jq pipeline byte for byte and has to filter no-op
+entries — two identities with different read permissions see different
+attribute values in one plan, and that once made two "No changes" plans hash
+differently and refused every apply. A render depends on the tree alone: no
+state, no credentials. Network takes a line of its own, because "no network"
+is not a property a renderer has on its own — `kustomize build` resolves a
+remote `resources:` URL over the network by default and there is no flag to
+turn that off. Measured on v5.7.1: a kustomization whose only resource was a
+GitHub URL rendered cleanly, exit 0, the content fetched at build time.
+`internal/render` closes it instead: every render runs with `HTTP_PROXY`,
+`HTTPS_PROXY` and `ALL_PROXY` (both cases) pointed at a reserved `.invalid`
+hostname that cannot resolve, and `NO_PROXY` emptied so it cannot wave a host
+past the proxy — measured against the same kustomize: exit 1, zero bytes on stdout, the
+reach failing at connect and naming the URL it wanted. A unit that genuinely
+needs a remote base gets the same answer a chart does, below: vendor it into
+the reviewed diff, where somebody reads it. So there is nothing to
+canonicalise, the bytes are hashed as they are, and the renderer is handed
+`PATH` and `HOME`, plus the proxy variables that enforce the no-network rule,
+and nothing else. **The moment a render could read a credential, it could
+produce output that depends on who ran it, and the two sides would stop
+agreeing.**
+
+Two consequences follow from the same fact:
+
+- **A mismatch is never reported as "the world moved".** It cannot have been;
+  a render reads no world. It means the two sides ran different renderer
+  versions, the unit has a non-deterministic input, or the tree is not the one
+  that was reviewed — and sending an operator to look at their infrastructure
+  for a fault in their repository would waste the alert.
+- **Nothing `gates.CheckRenderDigest` sees is exempt.** The credentials root is
+  exempt from the *plan* gate because CI genuinely cannot plan it, which is a
+  fact about the world rather than a convenience. Rendering has no equivalent
+  fact, so a unit CI could not render is one the applier cannot render either.
+  ⚠️ One case never reaches the gate at all: `renderOneUnit` skips a unit
+  that is absent from the commit's own checkout, because that absence is the
+  commit deleting it — a prune, not an edit. The reconciler removes what it
+  applied, and refusing here would make retiring a workload impossible; see
+  the threat-model row for deleting a delivery unit.
+
+Only one of the three ways Helm could get in is actually enforced; the other
+two are a rule the deployment keeps, not a check the applier makes.
+`--enable-helm` is never passed, so a kustomization carrying a `helmCharts`
+field is refused by kustomize itself when the flag is absent — measured on
+v5.7.1: exit 1, zero bytes, "must specify --enable-helm" — and that needs no
+parser, matching AGENTS.md's rule to gate on the field rather than rendered
+text. Passing the flag would make the renderer fetch a chart from a repository
+*at render time*, the same network reach the proxy settings above exist to
+prevent, and it re-admits `randAlphaNum` and `now`, which can never hash the
+same twice. Nothing in this tree refuses a `helm_release` resource in an
+OpenTofu root, and nothing checks for a helm binary on the machine — see
+docs/work-items.md for what closing either would take. Charts are inflated
+once, by hand, and the rendered manifests are committed — so the reviewer
+reads the manifests rather than a version number.
+
+The applier renders and compares. It applies nothing: a reconciler does that —
+and what it hands over is a ref rather than an artefact.
+
+**`refs/heads/queued` is the boundary between reviewed and running.** After a
+pass has gated a commit, applied every root it touched and matched every render
+against the digest CI filed, it fast-forwards that ref to the commit. A
+reconciler tracks `queued` and never `main`, so it can only ever see commits
+the applier has already gated: a refusal anywhere freezes the ref, every
+cluster holds its last known-good state, and the alert says why.
+
+The applier refuses to publish onto a ref whose history nothing protects — an
+unprotected ref is not a weaker gate, it is a path to production nobody is
+watching. It re-reads the rulesets covering that ref and requires them to block
+force pushes and deletion, for the reason `main` needs the same: history is the
+audit log, and a cluster was told to apply what is in it. The check runs before
+the push, because discovering afterwards would be discovering it too late.
+
+⚠️ It does not prove that only the applier can move the ref. See
+`docs/work-items.md` for what that would take and why it was accepted here.
+
+The push is a plain fast-forward with no lease and no force, so the ordering
+property is git's rather than ours: a ref somebody else has moved makes this
+fail loudly instead of overwriting whatever they did. A delivery ref
+disagreeing with the applier is a fact somebody needs to look at.
+
+The name is `queued` and not `delivered` because delivered implies done, and
+truss cannot know a cluster has the manifests at the moment it hands them over.
+And a deployment with no delivery units is never asked to protect a ref it does
+not use — the tree decides, so a tree that is pure OpenTofu owes nothing here.
 
 Absent isn't the same as false, and code that treats them the same is
 dangerous here: `jq '.allow_force_pushes.enabled // true'` turns a compliant

@@ -11,6 +11,20 @@ import (
 	"github.com/beeradb/truss/internal/secrets"
 )
 
+// defaultAlertSubject is what every message this binary sends is addressed
+// from.
+//
+// notify.Report's own doc explains why it is a field there rather than a
+// literal: "this repository is the shareable engine; cmd/truss defaults it so
+// the emitted text is unchanged." It is a constant HERE because three callers
+// need the same word -- the pass, this command, and `truss skip` -- and a
+// fact stated in a third place is a fact that will disagree with itself.
+//
+// Decision 8 (docs/port-plan.md) makes this configuration eventually,
+// defaulting to today's value. A constant is what a default looks like before
+// the knob exists.
+const defaultAlertSubject = "platform applier"
+
 // expiringDTO and reportDTO are the JSON wire shape `truss notify` reads on
 // stdin. notify.Report and notify.Expiring carry no JSON tags of their own
 // (they are composed in-process by the apply pass; notify's own doc records
@@ -48,10 +62,7 @@ func (d reportDTO) toReport() notify.Report {
 	}
 	subject := d.Subject
 	if subject == "" {
-		// notify.Report's own doc: "Subject is a field rather than a
-		// literal because this repository is the shareable engine;
-		// cmd/truss defaults it so the emitted text is unchanged."
-		subject = "platform applier"
+		subject = defaultAlertSubject
 	}
 	return notify.Report{
 		Subject:        subject,
@@ -109,7 +120,7 @@ func cmdNotify(ctx context.Context, args []string, getenv func(string) string, s
 		return 1
 	}
 	dir := secrets.Dir{Root: cfg.SecretsDir}
-	tg, err := loadTelegram(dir)
+	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
 	if err != nil {
 		fmt.Fprintf(stderr, "notify: %v\n", err)
 		return 1

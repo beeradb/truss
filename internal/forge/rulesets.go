@@ -72,11 +72,19 @@ func (c *Client) Rulesets(ctx context.Context, branch string) (gates.Rulesets, e
 	// of how many of its rules matched this branch.
 	var ids []int
 	seen := map[int]bool{}
+	// The rule types each ruleset contributes to THIS ref, which is the only
+	// place they are available: rulesets/{id} describes the ruleset, not
+	// which of its rules reached this branch.
+	types := map[int][]string{}
 	for _, r := range rules {
 		if r.RulesetID == nil {
 			return gates.Rulesets{}, fmt.Errorf("forge: rules for branch %q: an entry has no ruleset_id", branch)
 		}
 		id := *r.RulesetID
+		if r.Type == "" {
+			return gates.Rulesets{}, fmt.Errorf("forge: rules for branch %q: an entry of ruleset %d has no type", branch, id)
+		}
+		types[id] = append(types[id], r.Type)
 		if seen[id] {
 			continue
 		}
@@ -97,7 +105,7 @@ func (c *Client) Rulesets(ctx context.Context, branch string) (gates.Rulesets, e
 		if w.Name != nil {
 			name = *w.Name
 		}
-		gr := gates.Ruleset{ID: id, Name: name, Enforcement: *w.Enforcement}
+		gr := gates.Ruleset{ID: id, Name: name, Enforcement: *w.Enforcement, Rules: types[id]}
 		for _, a := range w.BypassActors {
 			if a.ActorType == nil {
 				return gates.Rulesets{}, fmt.Errorf("forge: ruleset %d: a bypass actor has no actor_type", id)

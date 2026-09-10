@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,13 +60,18 @@ var _ forgeGateway = (*forge.Client)(nil)
 // applyDeps bundles everything the pass needs, real or faked. cmdApply
 // builds the real set; tests build their own.
 type applyDeps struct {
-	Cfg         config.Config
-	Dir         secrets.Dir
-	Journal     *ledger.Journal
-	Forge       forgeGateway
-	Telegram    notify.Telegram
-	Git         gitDriver
-	NewTofu     tofuFactory
+	Cfg      config.Config
+	Dir      secrets.Dir
+	Journal  *ledger.Journal
+	Forge    forgeGateway
+	Telegram notify.Telegram
+	Git      gitDriver
+	NewTofu  tofuFactory
+	// NewRender builds the Kustomize runner for a delivery unit. Separate
+	// from NewTofu because the two kinds are different executors with
+	// different environments -- a render gets no credentials at all, since
+	// rendering reads nothing but the tree.
+	NewRender   renderFactory
 	Now         func() time.Time
 	Stderr      io.Writer
 	VaultConfig secrets.KVConfig
@@ -92,6 +98,13 @@ type applyDeps struct {
 	// cmdApply can wire the real function and a test can fake it without a
 	// real socket.
 	Handoff func(ctx context.Context, path string, timeout time.Duration, r handoff.Request) (handoff.Response, error)
+
+	// Obs accumulates what this pass observed, for the metrics written
+	// beside the heartbeat at its tail. runApplyPass installs it; every
+	// method on it is nil-safe, so a test driving one step of a pass
+	// directly records nothing rather than needing a recorder for a pass it
+	// is not running. Nothing reads it back to make a decision.
+	Obs *passObs
 }
 
 // handoffTimeout bounds one publish exchange from the truss side. It
@@ -111,6 +124,48 @@ func (d applyDeps) now() time.Time {
 // emits the same nine lines, and they are the only per-step visibility into a
 // pass that runs unattended every five minutes -- without them a hung
 // `tofu apply` and a pass that did nothing look identical in a pod log.
+// See log for the line's shape and why it has a level in it.
+func (d applyDeps) logf(format string, args ...any) {
+	d.log(levelInfo, format, args...)
+}
+
+// warnf narrates something that went wrong and did not stop the pass: an
+// alert that could not be sent, a monitor that did not answer. Every one of
+// these was previously indistinguishable from narration in a pod log, and
+// counted for nothing.
+func (d applyDeps) warnf(format string, args ...any) {
+	d.log(levelWarn, format, args...)
+}
+
+// errorf narrates something that went wrong and LOST SOMETHING: a ledger
+// object that was not written, a durable record that now does not exist. The
+// pass may still finish -- most of these are best-effort writes on a path
+// where the alert matters more than the object -- but the evidence is gone
+// either way, so it is not a warning.
+func (d applyDeps) errorf(format string, args ...any) {
+	d.log(levelError, format, args...)
+}
+
+// The three levels. Their whole job is to be a FIELD rather than a tone of
+// voice, so "show me every warning this week" is a query instead of a grep
+// for words somebody happened to choose.
+const (
+	levelInfo  = "info"
+	levelWarn  = "warn"
+	levelError = "error"
+)
+
+// log writes one narration line and counts it.
+//
+// ⚠️ LOGFMT, NOT PROSE WITH A TIMESTAMP IN FRONT OF IT, AND THE LEVEL IS THE
+// REASON. The old line was `[15:04:05] <message>`: readable, and carrying
+// nothing a log pipeline can filter on, so "every warning today" was a grep
+// for whichever words the message happened to use. `level=warn` is a field
+// two of these lines have and the other twelve do not. The message stays one
+// quoted prose value rather than being broken into attributes, so `kubectl
+// logs` is still read by a person -- structured attributes per call site
+// (commit, root, duration) remain the docs/work-items.md entry they were,
+// and this change does not pretend to be it.
 //
 // ⚠️ STDERR, NOT STDOUT, WHICH IS A DELIBERATE DIVERGENCE FROM THE BASH.
 // apply.sh's log() writes to stdout; truss's stdout carries the notify
@@ -118,9 +173,11 @@ func (d applyDeps) now() time.Time {
 // stdout would contaminate a machine-readable channel. internal/parity
 // compares ledger writes and exec calls, never stdio, so nothing in the
 // corpus depends on this.
-func (d applyDeps) logf(format string, args ...any) {
-	fmt.Fprintf(d.Stderr, "[%s] %s\n", d.now().UTC().Format("15:04:05"),
-		fmt.Sprintf(format, args...))
+func (d applyDeps) log(level, format string, args ...any) {
+	d.Obs.logged(level)
+	fmt.Fprintf(d.Stderr, "time=%s level=%s msg=%s\n",
+		d.now().UTC().Format("15:04:05"), level,
+		strconv.Quote(fmt.Sprintf(format, args...)))
 }
 
 // loadHandoffConfig reads $HANDOFF_SOCKET, whose presence depends on which
@@ -194,7 +251,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	tg, err := loadTelegram(dir)
+	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -235,6 +292,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		NewTofu: func(env []string) tofuRunner {
 			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: stderr, Env: env}
 		},
+		NewRender:         newRenderFactory(getenv, stderr),
 		Now:               time.Now,
 		Stderr:            stderr,
 		VaultConfig:       vcfg,
@@ -266,6 +324,13 @@ type applyResult struct {
 // drift, the expiry sweep, then ALWAYS a heartbeat and an alert (§2 item
 // 8) -- there is no return path out of this function that skips them.
 func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
+	// The recorder is installed here and nowhere else, so every function
+	// this pass calls shares one -- d is passed by value and Obs is a
+	// pointer, which is the same shape credCache already uses to be
+	// "at most once per pass".
+	started := d.now()
+	d.Obs = newPassObs()
+
 	var (
 		appliedCount, noopCount int
 		failure                 string
@@ -281,16 +346,25 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		rotationApplied  bool
 		drifted, errored []string
 		driftRun         = d.Cfg.DriftOnly
+		queueAdvanced    bool
 		driftSkipped     string
 	)
 
 	gateOK := false
 	var problems []string
 	prot, err := d.Forge.Protection(ctx, "main")
+	protProblems := 0
 	if err != nil {
 		problems = append(problems, fmt.Sprintf("could not read branch protection for main: %v", err))
+		protProblems++
 	} else {
-		problems = append(problems, gates.CheckProtection(prot, d.Cfg.RequiredCheck)...)
+		found := gates.CheckProtection(prot, d.Cfg.RequiredCheck)
+		problems = append(problems, found...)
+		protProblems += len(found)
+	}
+	d.Obs.gate("protection", protProblems == 0)
+	if protProblems > 0 {
+		d.Obs.failed(classProtection)
 	}
 	// ⚠️ RULESETS ARE READ AND CHECKED ALONGSIDE PROTECTION, NEVER INSTEAD OF
 	// IT -- the two are independent controls and either can be the one
@@ -304,10 +378,18 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// and alerts" behaviour -- joined into the one sentence below rather
 	// than a second, easier-to-miss failure path.
 	rulesets, rsErr := d.Forge.Rulesets(ctx, "main")
+	rsProblems := 0
 	if rsErr != nil {
 		problems = append(problems, fmt.Sprintf("could not read rulesets for main: %v", rsErr))
+		rsProblems++
 	} else {
-		problems = append(problems, gates.CheckRulesets(rulesets)...)
+		found := gates.CheckRulesets(rulesets)
+		problems = append(problems, found...)
+		rsProblems += len(found)
+	}
+	d.Obs.gate("rulesets", rsProblems == 0)
+	if rsProblems > 0 {
+		d.Obs.failed(classRulesets)
 	}
 	if len(problems) > 0 {
 		failure = "branch protection on main does not meet the bar: " + strings.Join(problems, "; ")
@@ -343,6 +425,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		tok, _, err := d.Forge.InstallationToken(ctx)
 		if err != nil {
 			failure = fmt.Sprintf("could not mint an installation token: %v", err)
+			d.Obs.failed(classForge)
 			gateOK = false
 		} else {
 			// Every git call from here on carries the token -- the clone is
@@ -353,9 +436,11 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 			repoURL := "https://github.com/" + d.Cfg.Repo + ".git"
 			if err := d.Git.EnsureClone(ctx, repoURL); err != nil {
 				failure = fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err)
+				d.Obs.failed(classRepo)
 				gateOK = false
 			} else if err := d.Git.Fetch(ctx, "origin", "main"); err != nil {
 				failure = fmt.Sprintf("could not fetch origin main: %v", err)
+				d.Obs.failed(classRepo)
 				gateOK = false
 			}
 		}
@@ -377,6 +462,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		rotationSummary = summary
 		rotatedChanges = changes
 		rotationApplied = applied && rotErr == nil
+		d.Obs.rotated(applied, rotErr == nil)
 		if rotErr != nil {
 			reason := fmt.Sprintf("rotation of credentials at %s: %v", last, rotErr)
 
@@ -401,14 +487,18 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 			// that becomes the alert. The key already says it was rotation.
 			rotKey := "rotation-" + d.now().UTC().Format("20060102T150405Z")
 			if err := d.Journal.PutFailed(ctx, rotKey, rotErr.Error()); err != nil {
-				fmt.Fprintf(d.Stderr, "truss: could not file %s: %v\n", rotKey, err)
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
+				d.errorf("could not file %s: %v", rotKey, err)
 			}
 
+			d.Obs.failed(classRotation)
 			if failure == "" {
 				failure = reason
 			}
 		}
 
+		d.Obs.drifting()
 		drifted, errored, driftSkipped = runDrift(ctx, d, last)
 		if driftSkipped != "" {
 			driftSummary = map[string]string{"skipped": driftSkipped}
@@ -421,7 +511,11 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// sends no failure alert and leaves HEAD unmoved, which
 		// runCommitLoop already guarantees by returning an empty failure
 		// and the pre-contention HEAD.
-		newLast, applied, noop, loopFailure, _ := runCommitLoop(ctx, d, last, cc)
+		newLast, applied, noop, loopFailure, contended := runCommitLoop(ctx, d, last, cc)
+		if contended {
+			d.Obs.contended()
+		}
+		queueAdvanced = newLast != last
 		last = newLast
 		appliedCount = applied
 		noopCount = noop
@@ -439,6 +533,30 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// heartbeat.
 		rotationSummary = map[string]string{"skipped": "rotation runs on the daily pass"}
 		driftSummary = map[string]string{"skipped": "not a drift run"}
+	}
+
+	// Publishing the delivery ref is the last thing the queue does, and only
+	// when the queue is clean: a reconciler tracking this ref must never see
+	// a commit this pass refused.
+	//
+	// ⚠️ NOT ON EVERY PASS, AND THE REASON IS A BUDGET RATHER THAN TIDINESS.
+	// Reading the rulesets that protect the ref is a forge call, and the
+	// frequent pass runs every five minutes -- asking 288 times a day to
+	// re-answer a question that only changes when somebody edits repository
+	// settings is the shape of spending that exhausted a service account's
+	// hourly allowance on 2026-09-07. So it runs when the queue actually
+	// moved, plus once on the daily pass, which is what makes a ref left
+	// behind by an earlier failure heal itself rather than wait for the next
+	// commit to arrive.
+	//
+	// A push that fails is a pass failure: the commits applied, and the
+	// cluster was not told. HEAD has already advanced, so nothing will retry
+	// those commits -- the daily publish is what closes that, and the alert
+	// is what makes somebody look before then.
+	if failure == "" && (queueAdvanced || driftRun) {
+		if reason := publishDeliveryRef(ctx, d, last); reason != "" {
+			failure = reason
+		}
 	}
 
 	// The publisher handoff (design publisher-identity-design.md §3, §9):
@@ -462,6 +580,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// THIS attempt failed, would publish a value nothing here has just
 		// verified against Cloudflare.
 		req := handoff.Request{PublishValue: rotationApplied}
+		d.Obs.publishAttempted()
 		if pubFailure := runHandoff(ctx, d, req, last); pubFailure != "" {
 			// Filed under its own key for the same reason a rotation
 			// failure already is (see the rotKey comment above): not a
@@ -469,8 +588,11 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 			// minutes later.
 			rotKey := "rotation-" + d.now().UTC().Format("20060102T150405Z")
 			if err := d.Journal.PutFailed(ctx, rotKey, pubFailure); err != nil {
-				fmt.Fprintf(d.Stderr, "truss: could not file %s: %v\n", rotKey, err)
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
+				d.errorf("could not file %s: %v", rotKey, err)
 			}
+			d.Obs.failed(classPublish)
 			if failure == "" {
 				failure = pubFailure
 			}
@@ -543,12 +665,16 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	// here: a failure to WRITE it must not stop the alert from being sent,
 	// because the alert is the one channel that still reaches somebody
 	// when the ledger itself is the thing that broke.
-	if err := d.Journal.PutHeartbeat(ctx, hb); err != nil && failure == "" {
-		failure = fmt.Sprintf("writing the heartbeat: %v", err)
+	if err := d.Journal.PutHeartbeat(ctx, hb); err != nil {
+		d.Obs.ledgerError()
+		d.Obs.failed(classLedger)
+		if failure == "" {
+			failure = fmt.Sprintf("writing the heartbeat: %v", err)
+		}
 	}
 
 	report := notify.Report{
-		Subject:           "platform applier",
+		Subject:           defaultAlertSubject,
 		LastSHA:           last,
 		Applied:           appliedCount,
 		Noop:              noopCount,
@@ -594,7 +720,7 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 	pinged := false
 	if d.Cfg.HeartbeatPingURL != "" {
 		if err := deadman.Ping(ctx, d.Cfg.HeartbeatPingURL); err != nil {
-			d.logf("heartbeat ping failed (non-fatal): %v", err)
+			d.warnf("heartbeat ping failed (non-fatal): %v", err)
 		}
 		pinged = true
 	}
@@ -631,7 +757,23 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		// error it returns (internal/notify/telegram.go, redactToken), so the URL
 		// carrying it cannot arrive here.
 		if err := d.Telegram.Send(ctx, text); err != nil {
-			d.logf("telegram send failed (non-fatal): %v", err)
+			d.warnf("telegram send failed (non-fatal): %v", err)
+		}
+	}
+
+	// The metrics push is the pass's LAST act, after the alert, so the set
+	// it renders includes the warning a failed send just produced. Same
+	// non-fatal contract as the ping and the send above, and for a stronger
+	// reason: a monitoring endpoint that is down must never be able to fail
+	// a pass that applied infrastructure correctly.
+	//
+	// Safe to log the error: metrics.Push never returns one carrying the
+	// gateway URL (see its own doc), and metrics.Render's errors name a
+	// metric, not a value.
+	if d.Cfg.MetricsPushURL != "" {
+		set := passMetrics(d.now(), d.now().Sub(started), driftRun, report, d.Obs, buildInfo())
+		if err := pushPassMetrics(ctx, d.Cfg.MetricsPushURL, driftRun, set); err != nil {
+			d.warnf("metrics push failed (non-fatal): %v", err)
 		}
 	}
 
@@ -674,33 +816,94 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	// AGENTS.md already has a standing rule against.
 	commits, err := d.Git.Commits(ctx, last, "origin/main")
 	if err != nil {
+		d.Obs.failed(classRepo)
 		return last, 0, 0, fmt.Sprintf("could not list commits from %s to origin/main: %v", last, err), false
 	}
 
+	// Recorded before anything is applied, so it is the depth the pass FOUND
+	// rather than what it left behind. A pass that applies three of five
+	// commits and then fails reports 5, which is the number somebody wants.
+	d.Obs.queued(len(commits))
+
 	baseEnv, err := buildBaseEnv(d, d.Token)
 	if err != nil {
+		d.Obs.failed(classCredentials)
 		return last, 0, 0, err.Error(), false
 	}
 
 	for _, sha := range commits {
 		d.logf("considering %s", sha)
 
+		// ⚠️ THE GATE RUNS BEFORE THE ROOTS ARE DERIVED, AND THE ORDER IS THE
+		// POINT. It used to run after: a commit whose touched-root set came
+		// back empty was recorded as a noop and HEAD advanced past it without
+		// the approval, the merged-PR check or the merge-commit signature ever
+		// being asked for.
+		//
+		// That was harmless only for as long as truss was the sole reader of
+		// this repository, because a commit touching no root changes nothing
+		// truss applies. It is not a statement that nothing was done -- a noop
+		// record says TRUSS did nothing -- so the moment anything else reads
+		// the tree (a reconciler tracking a ref this applier advances, or a
+		// human trusting `applied/` as the record of what reached main), an
+		// unreviewed commit was being waved through and filed as uneventful.
+		//
+		// The cost is three forge calls for every commit, including the ones
+		// that touch only docs. That is the honest price of the queue's
+		// records meaning what they say.
+		headSHA, _, reason, gateErr := checkCommitGate(ctx, d.Forge, d.Cfg.Approver, sha)
+		if gateErr != nil {
+			reason = gateErr.Error()
+		}
+		if reason != "" {
+			// ⚠️ classCommit, NOT classProtection. Protection is what the
+			// branch requires; this is what one commit actually did --
+			// merged by exactly one pull request, approved at that precise
+			// head sha, signed by the forge. A dashboard that showed them
+			// as one number could not tell "somebody weakened the rules"
+			// from "somebody got a commit past them".
+			d.Obs.failed(classCommit)
+			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
+				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+			}
+			return last, applied, noop, reason, false
+		}
+
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
+			d.Obs.failed(classRepo)
 			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), false
 		}
 		treeRoots, err := d.Git.TreeRoots(ctx, sha)
 		if err != nil {
+			d.Obs.failed(classRepo)
 			return last, applied, noop, fmt.Sprintf("could not read the tree for %s: %v", sha, err), false
 		}
 		roots := repo.TouchedRoots(changedFiles, treeRoots)
 
-		if len(roots) == 0 {
+		// The render units are derived separately, from their own tree
+		// listing, because TouchedRoots reproduces the bash's
+		// derive_touched_roots exactly and internal/parity compares it
+		// against recordings of that function. Widening it would change what
+		// the pass plans for commits the corpus already has answers for.
+		treeRenderUnits, err := d.Git.TreeRenderUnits(ctx, sha)
+		if err != nil {
+			return last, applied, noop, fmt.Sprintf("could not read the render units for %s: %v", sha, err), false
+		}
+		renderUnits := renderUnitsFor(changedFiles, treeRenderUnits)
+
+		if len(roots) == 0 && len(renderUnits) == 0 {
 			d.logf("noop: %s touches no root", sha)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
 				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), false
 			}
 			if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
 				return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
 			}
 			last = sha
@@ -708,20 +911,13 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			continue
 		}
 
-		headSHA, _, reason, gateErr := checkCommitGate(ctx, d.Forge, d.Cfg.Approver, sha)
-		if gateErr != nil {
-			reason = gateErr.Error()
-		}
-		if reason != "" {
-			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
-				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
-			}
-			return last, applied, noop, reason, false
-		}
-
 		if err := d.Git.Checkout(ctx, headSHA); err != nil {
 			reason := fmt.Sprintf("could not check out %s: %v", headSHA, err)
-			_ = d.Journal.PutFailed(ctx, sha, reason)
+			d.Obs.failed(classRepo)
+			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
+			}
 			return last, applied, noop, reason, false
 		}
 
@@ -734,18 +930,50 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				return last, applied, noop, "", true
 			}
 			if reason != "" {
+				d.Obs.rootFailed(root)
+				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+					d.Obs.ledgerError()
+					d.Obs.failed(classLedger)
+					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+				}
+				return last, applied, noop, reason, false
+			}
+			if summary.ResourceChanges != nil {
+				d.Obs.rootChanged(root, *summary.ResourceChanges)
+			}
+			summaries[root] = summary
+		}
+
+		// ⚠️ RENDERS RUN AFTER EVERY ROOT AND BEFORE THE COMMIT IS RECORDED.
+		// The order between kinds is fixed -- credentials, then tofu, then
+		// render -- and it is the natural one: infrastructure makes the
+		// cluster, delivery ships onto it. Rendering first would verify
+		// manifests against a namespace or a secret that the same commit's
+		// OpenTofu has not created yet.
+		//
+		// Nothing is applied here. The applier renders, compares against
+		// what CI filed, and refuses on a mismatch; a reconciler is what
+		// actually applies the manifests, from a ref this pass advances only
+		// once every unit has passed.
+		for _, unit := range renderUnits {
+			d.logf("rendering %s at %s (head %s)", unit, sha, headSHA)
+			_, reason := renderOneUnit(ctx, d, d.NewRender(renderEnv(d)), headSHA, unit)
+			if reason != "" {
 				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
 					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
 				}
 				return last, applied, noop, reason, false
 			}
-			summaries[root] = summary
 		}
 
 		if err := d.Journal.PutApplied(ctx, sha, summaries); err != nil {
+			d.Obs.ledgerError()
+			d.Obs.failed(classLedger)
 			return last, applied, noop, fmt.Sprintf("could not record %s as applied: %v", sha, err), false
 		}
 		if err := d.Journal.AdvanceHead(ctx, sha); err != nil {
+			d.Obs.ledgerError()
+			d.Obs.failed(classLedger)
 			return last, applied, noop, fmt.Sprintf("could not advance head to %s: %v", sha, err), false
 		}
 		last = sha
@@ -933,13 +1161,26 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 // for that case.
 func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []string, headSHA, root string) (summary ledger.RootSummary, lockBusy bool, reason string) {
 	if !d.Git.HasDir(root) {
+		d.Obs.failed(classConfig)
 		return ledger.RootSummary{}, false, fmt.Sprintf("root %s does not exist at %s", root, headSHA)
 	}
 	rootDir := filepath.Join(d.Cfg.Workdir, root)
 
+	// timed runs one step of this root's apply and records how long it took,
+	// whether it succeeded or not. A failed step's duration is the
+	// interesting one: it is how a `tofu apply` that died after nine minutes
+	// is told apart from one that was refused instantly.
+	timed := func(phase string, f func() error) error {
+		start := d.now()
+		err := f()
+		d.Obs.rootTook(root, phase, d.now().Sub(start).Seconds())
+		return err
+	}
+
 	env := append([]string{}, baseEnv...)
 	google, err := cc.googleCreds()
 	if err != nil {
+		d.Obs.failed(classCredentials)
 		return ledger.RootSummary{}, false, err.Error()
 	}
 	env = append(env, "GOOGLE_CREDENTIALS="+google)
@@ -947,24 +1188,29 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	if root == "credentials" {
 		mint, err := cc.mintToken()
 		if err != nil {
+			d.Obs.failed(classCredentials)
 			return ledger.RootSummary{}, false, err.Error()
 		}
 		pass, err := cc.passphraseVal()
 		if err != nil {
+			d.Obs.failed(classCredentials)
 			return ledger.RootSummary{}, false, err.Error()
 		}
 		env = append(env, "CLOUDFLARE_API_TOKEN="+mint, "TF_VAR_encryption_passphrase="+pass)
 	} else {
 		declares, err := rootDeclaresCloudflare(d.Cfg.Workdir, root)
 		if err != nil {
+			d.Obs.failed(classConfig)
 			return ledger.RootSummary{}, false, err.Error()
 		}
 		if declares {
 			infra, ok, err := loadCFInfraAdminToken(cc.dir)
 			if err != nil {
+				d.Obs.failed(classCredentials)
 				return ledger.RootSummary{}, false, err.Error()
 			}
 			if !ok {
+				d.Obs.failed(classCredentials)
 				return ledger.RootSummary{}, false, fmt.Sprintf(
 					"cf-infra-admin is not mounted: it is minted by credentials/, so that root must be applied before %s can be", root)
 			}
@@ -975,27 +1221,35 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	runner := d.NewTofu(env)
 	const planFile = "tfplan"
 
-	if err := runner.Init(ctx, rootDir); err != nil {
+	if err := timed("init", func() error { return runner.Init(ctx, rootDir) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
 			return ledger.RootSummary{}, true, ""
 		}
+		d.Obs.failed(classPlan)
 		return ledger.RootSummary{}, false, fmt.Sprintf("tofu init failed for %s: %v", root, err)
 	}
-	if err := runner.Plan(ctx, rootDir, planFile); err != nil {
+	if err := timed("plan", func() error { return runner.Plan(ctx, rootDir, planFile) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
 			return ledger.RootSummary{}, true, ""
 		}
+		d.Obs.failed(classPlan)
 		return ledger.RootSummary{}, false, fmt.Sprintf("tofu plan failed for %s: %v", root, err)
 	}
 
 	// §2 item 10: only credentials is exempt from the digest gate, because
 	// CI never plans it.
 	if root != "credentials" {
-		planJSON, err := runner.ShowJSON(ctx, rootDir, planFile)
+		var planJSON []byte
+		err := timed("show", func() error {
+			var showErr error
+			planJSON, showErr = runner.ShowJSON(ctx, rootDir, planFile)
+			return showErr
+		})
 		if err != nil {
 			if errors.Is(err, plan.ErrLockBusy) {
 				return ledger.RootSummary{}, true, ""
 			}
+			d.Obs.failed(classPlan)
 			return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
 		}
 		// ⚠️ A PLAN THAT CHANGES NOTHING IS NOT GATED, BECAUSE THERE IS
@@ -1047,6 +1301,7 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		} else {
 			mine, err := plan.Digest(planJSON)
 			if err != nil {
+				d.Obs.failed(classPlan)
 				return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
 			}
 			approved, err := d.Journal.ApprovedDigest(ctx, headSHA, root)
@@ -1055,20 +1310,30 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 				if errors.Is(err, ledger.ErrNotFound) {
 					approvedFound = false
 				} else {
+					d.Obs.ledgerError()
+					d.Obs.failed(classLedger)
 					return ledger.RootSummary{}, false, fmt.Sprintf("could not read the approved plan digest for %s at %s: %v", root, headSHA, err)
 				}
 			}
 			if problems := gates.CheckPlanDigest(root, headSHA, d.Journal.Layout.DigestKey(headSHA, root), mine, approved, approvedFound); len(problems) > 0 {
+				// ⚠️ THE SERIES THIS PROJECT EXISTS TO PRODUCE. A refusal
+				// here means the plan truss was about to run did not hash to
+				// the plan a human read. It is recorded before the return so
+				// that a refusal is counted even though the pass is over.
+				d.Obs.digestChecked(true)
+				d.Obs.failed(classDigest)
 				return ledger.RootSummary{}, false, strings.Join(problems, "; ")
 			}
+			d.Obs.digestChecked(false)
 			d.logf("plan for %s matches the one approved at %s", root, headSHA)
 		}
 	}
 
-	if err := runner.Apply(ctx, rootDir, planFile); err != nil {
+	if err := timed("apply", func() error { return runner.Apply(ctx, rootDir, planFile) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
 			return ledger.RootSummary{}, true, ""
 		}
+		d.Obs.failed(classApply)
 		return ledger.RootSummary{}, false, fmt.Sprintf("tofu apply failed for %s: %v", root, err)
 	}
 
@@ -1272,6 +1537,9 @@ func runRotation(ctx context.Context, d applyDeps, last string, cc *credCache) (
 	}
 	d.logf("rotation: re-planning credentials at %s", last)
 	result, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, last, "credentials")
+	if result.ResourceChanges != nil {
+		d.Obs.rootChanged("credentials", *result.ResourceChanges)
+	}
 	if lockBusy {
 		d.logf("rotation: state lock held elsewhere; next pass will re-plan")
 		return map[string]string{"skipped": "state lock held elsewhere"}, 0, false, nil
@@ -1376,12 +1644,22 @@ func runDrift(ctx context.Context, d applyDeps, last string) (drifted, errored [
 		}
 
 		runner := d.NewTofu(env)
+		start := d.now()
 		if err := runner.Init(ctx, rootDir); err != nil {
+			d.Obs.rootTook(root, "drift", d.now().Sub(start).Seconds())
+			d.warnf("drift: could not init %s: %v", root, err)
 			errored = append(errored, root)
 			continue
 		}
 		changed, err := runner.PlanDetailed(ctx, rootDir)
+		d.Obs.rootTook(root, "drift", d.now().Sub(start).Seconds())
 		if err != nil {
+			// ⚠️ A WARNING, AND THE DISTINCTION IT PRESERVES IS THE POINT.
+			// This root goes into `errored`, never into `drifted`: we looked
+			// and could not tell, which is not the same claim as "this
+			// drifted". The heartbeat already keeps them apart; without a
+			// level on this line the pod log did not.
+			d.warnf("drift: could not plan %s: %v", root, err)
 			errored = append(errored, root)
 			continue
 		}
@@ -1435,7 +1713,12 @@ func runHandoff(ctx context.Context, d applyDeps, req handoff.Request, last stri
 	d.logf("publish: contacting the publisher")
 	resp, err := d.Handoff(ctx, d.HandoffSocket, handoffTimeout, req)
 	if err != nil {
-		d.logf("publish: no publisher answered: %v", err)
+		// ⚠️ A WARNING EVEN WHEN IT IS NOT A FAILURE. A pass with nothing
+		// to publish returns "" below and the pass succeeds -- but the
+		// publisher sidecar not answering is still the thing that would
+		// have swallowed a real rotation had one happened, and it left no
+		// trace anywhere before this line had a level on it.
+		d.warnf("publish: no publisher answered: %v", err)
 		if req.PublishValue {
 			return fmt.Sprintf(
 				"credentials applied at %s; publishing to vault failed: %v. Vault still holds the previous value; the next daily pass republishes.",
@@ -1444,7 +1727,8 @@ func runHandoff(ctx context.Context, d applyDeps, req handoff.Request, last stri
 		return ""
 	}
 	if resp.Error != "" {
-		d.logf("publish: %s (expiries=%d skipped=%v): %s", resp.Value, resp.Expiries, resp.Skipped, resp.Error)
+		d.Obs.publishResult(false, resp.Expiries)
+		d.warnf("publish: %s (expiries=%d skipped=%v): %s", resp.Value, resp.Expiries, resp.Skipped, resp.Error)
 		if req.PublishValue {
 			return fmt.Sprintf(
 				"credentials applied at %s; publishing to vault failed: %v. Vault still holds the previous value; the next daily pass republishes.",
@@ -1452,6 +1736,7 @@ func runHandoff(ctx context.Context, d applyDeps, req handoff.Request, last stri
 		}
 		return ""
 	}
+	d.Obs.publishResult(true, resp.Expiries)
 	d.logf("publish: %s (expiries=%d)", resp.Value, resp.Expiries)
 	return ""
 }

@@ -14,12 +14,32 @@ type Telegram struct {
 	BotToken string
 	ChatID   string
 	HTTP     *http.Client
+
+	// BaseURL overrides the API host. Empty is the real one.
+	//
+	// ⚠️ ITS ABSENCE IS A BUG RATHER THAN A MISSING CONVENIENCE, AND THIS
+	// PROJECT HAS ALREADY PAID FOR THE LESSON ONCE. internal/secrets' probe
+	// had no such override and every test run therefore posted to the real
+	// Cloudflare API (see the note on runExpirySweep). A command that builds
+	// its own Telegram -- `truss skip` does, because it must announce before
+	// it acts -- has no other seam a test can reach, so without this the
+	// choice is between an untested announcement and a test suite that
+	// messages a real chat.
+	BaseURL string
+}
+
+// apiBase is the host Send posts to.
+func (t Telegram) apiBase() string {
+	if t.BaseURL != "" {
+		return t.BaseURL
+	}
+	return "https://api.telegram.org"
 }
 
 // Send posts the text to Telegram, form-encoded. A send failure is non-fatal
 // and returns an error; the token is never included in that error.
 func (t Telegram) Send(ctx context.Context, text string) error {
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", t.BotToken)
+	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", t.apiBase(), t.BotToken)
 
 	data := url.Values{}
 	data.Set("chat_id", t.ChatID)

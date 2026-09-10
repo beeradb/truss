@@ -552,6 +552,25 @@ downstream of the plan can prevent them; catching them there refuses the apply
 but does not stop the execution that already happened. Those two halves want
 different mechanisms and should not be built as one gate.
 
+## `helm_release` has no enforcer
+
+The render gate refuses `--enable-helm` (`internal/render`) and kustomize
+refuses a `helmCharts` field itself when the flag is absent — that half is
+real. Nothing refuses the same escape taken from the tofu side: a
+`helm_release` resource in an OpenTofu root reaches a chart repository at
+*apply* time exactly the way `--enable-helm` reaches one at render time, and
+no gate in this tree looks for one.
+
+What closing it would take is the same shape as the deferred provisioner
+gate above: `tofu show -json`'s plan JSON names each resource's provider and
+type, so `helm_release` is a field-level check over
+`configuration.root_module.resources[]`, needing no HCL parser — the same
+reasoning that splits the provisioner gate cleanly from a source-level check.
+It is deferred for the same reason that one is: there is no `tofu` binary in
+this environment to confirm the shape against, and this codebase's standard,
+stated there, is to verify against a real `tofu show -json` before depending
+on one.
+
 ## The ledger records history it cannot prove
 
 `Put` has no precondition, no `Delete` exists, and nothing links one record
@@ -620,6 +639,14 @@ carries only refusals, drift and expiries. Liveness stays provable and the
 channel becomes worth reading. ⚠️ This adds a dependency whose *absence* is
 the alarm, which is the one kind of dependency that fails safe.
 
+⚠️ **The pushed-metric half of that parenthesis now exists.** Every pass
+pushes `truss_pass_timestamp_seconds`, and the first rule in
+`observability/alerts/truss.rules.yml` is the staleness check on it.
+`HEARTBEAT_PING_URL` stays the mechanism for a deployment with no Prometheus
+of its own, and the two are NOT a fallback for each other: one answers "is it
+still running" to somebody else's monitor, the other to yours, and neither is
+consulted when the other is absent.
+
 **Per-root change counts in the alert.** The counts are already computed.
 `platform: +0/~2/-1` per root reads better than one aggregate number, and
 costs the breakdown rather than a new mechanism.
@@ -628,6 +655,20 @@ costs the breakdown rather than a new mechanism.
 commits behind an unresolved failure until somebody goes looking. "Report the
 counter that moves" argues for it directly, and until the local CLI exists
 the heartbeat is the only place it could show up.
+
+DONE, as `truss_queue_depth`, and it went exactly where this entry said it
+would: `runCommitLoop` knew `len(commits)` before it started and now says so.
+`TrussQueueIsNotDraining` alerts on the wedge -- deep and not moving -- rather
+than on depth alone, because a deep queue that is draining is a busy afternoon.
+
+⚠️ **It is emitted only when the pass actually reached the queue, and the
+absence is load-bearing.** A pass refused at the branch-protection gate knows
+nothing about how much work is waiting; reporting 0 would be a claim it did
+not earn and would read identically to a genuinely empty queue.
+
+⚠️ **It is still not in the heartbeat**, which is what this entry asked for
+literally. The heartbeat is read by a human opening an object in a bucket; the
+metric is read by a rule. Both are worth having and only one exists.
 
 **Plan-comment length.** Atlantis chunks its PR comment fence-aware because
 GitHub truncates. A `platform` plan touching hundreds of resources is the
@@ -650,16 +691,302 @@ To verify an artifact, run: `gh attestation verify <artifact> --repo <owner>/<re
 `ci.yml`. It reports only reachable vulnerabilities, so it does not bring the
 noise a scanner would.
 
-**`log/slog`.** The pass logs with `d.logf`. Structured attributes (commit,
-root, duration) make a CronJob's logs greppable across passes, which is the
-state every incident in `docs/` started from.
+**`log/slog`.** PARTLY DONE, and the remaining half is the half this entry
+was about. The pass now narrates in logfmt with a level -- `time=… level=warn
+msg="…"` -- so "every warning this week" is a field selector instead of a grep
+for whichever words a message happened to use, and the counts reach
+`truss_pass_log_events{level=…}` so the error and warning panels work with no
+log pipeline at all.
 
-## `ci.yml` runs `go test ./...` without `-count=1`
+⚠️ **The structured ATTRIBUTES are still not there.** The message remains one
+quoted prose value; `commit=`, `root=` and `duration=` per call site are what
+this entry asked for and are not what landed. The duration part has a partial
+answer elsewhere -- `truss_root_duration_seconds{root,phase}` times every step
+of every root -- which weakens the case for `duration=` on a log line but not
+for the other two.
 
-`release.yml` has it, `ci.yml` does not, and AGENTS.md says it is not
-optional. `actions/setup-go` caches by default and that cache includes
-`GOCACHE`, which is where test results live — so a PR that does not touch
-`go.mod` can restore cached results. One flag.
+## `ci.yml` runs `go test ./...` without `-count=1` — DONE
+
+Both `ci.yml` and `release.yml` carry it now, on every test step including
+the fuzz one. `actions/setup-go` caches by default and that cache includes
+`GOCACHE`, which is where test results live — so without the flag a PR that
+does not touch `go.mod` can restore cached results and pass tests it never
+ran.
+
+## Nothing can complete a change from outside the cluster
+
+**Raised 2026-09-09 by the question "can't truss itself generate this? why
+would I do it".** It is the right question and the answer is a gap.
+
+truss mints GitHub App installation tokens — that is what `truss token` and
+`forge.Client.InstallationToken` are — so the system does hold a real GitHub
+credential and does refresh it on a clock. But it exists **only inside the
+cluster**: the App private key arrives through the mounted credential mirror,
+which is populated from the applier's vault using a 1Password service-account
+token. A checkout on any other machine has none of that.
+
+So an agent or a maintainer working on this repository from outside can push a
+branch — the deploy keys allow it — and can do nothing else. Opening a pull
+request, reading a check's status, or merging one all need the API, and the
+only identity with API access is a pod that runs for ninety seconds every five
+minutes and has no reason to be doing any of it.
+
+⚠️ **The applier is emphatically the wrong thing to reach for here.** Its App
+is the identity that reads branch protection and applies approved changes; a
+token minted from it merging a pull request would be the applier approving its
+own work, which is the inversion this whole project exists to refuse. Whatever
+closes this gap has to be a *different* identity with a *smaller* grant.
+
+The shape of an answer, none of it started:
+
+- **A scoped token for the working machine**, minted by `credentials/` like
+  everything else and rotated on the same 45-day clock — `pull_requests:
+  write` and `checks: read`, nothing more. It is a credential, so it wants
+  seeding, sweeping and an entry in the expiry table; that is the whole cost
+  and it is the ordinary cost of every other credential here.
+- **Or accept it**, and say so where somebody hits it rather than leaving them
+  to rediscover it. A branch that is ready and a human who clicks merge is a
+  legitimate design; what is not legitimate is it being an accident.
+
+⚠️ **It is worth measuring before building.** This repository requires
+`required_approving_review_count: 0` (scripts/repo-protection, and its comment
+explains why: one maintainer cannot approve their own pull request). So a merge
+here needs green CI and nothing else, and the gap costs one click. In
+`../platform`, where code-owner review IS required, the same gap costs nothing
+at all — a human has to look regardless. That asymmetry is the argument for
+recording this rather than building it today.
+
+Related in kind: `../platform`'s `docs/decisions/tailnet-as-code.md`, which is
+the same shape — a control this platform depends on and does not manage.
+
+## `scripts/check` is weaker than it looks on work that is not staged yet
+
+`scripts/leakscan` enumerates with `git ls-files` (`scripts/leakscan:26`), so
+it scans **tracked files only**. New work sits untracked until `git add`, which
+means a full `scripts/check` run over a branch's worth of new files reports
+`check: clean` without having read any of them.
+
+Measured 2026-09-10: three 32+ character hex literals in two new test files
+survived several clean `scripts/check` runs and were refused by the very next
+run, immediately after the commit that tracked them. Nothing leaked — they were
+a fabricated sha and the sha256 of no bytes — but the scan that would have
+caught a real one had not looked.
+
+The commit path is not itself broken: by the time anything is committed the
+files are tracked, so the scan before the *next* commit sees them. What is
+misleading is the habit the checklist encourages — run `scripts/check`, read
+`clean`, then commit — because on a first commit of new files those are the
+wrong way round.
+
+⚠️ **Do not "fix" this by scanning the working tree.** `git ls-files` is also
+what keeps the scan from reading build output, editor droppings and anything
+else `.gitignore` covers, and a scanner that refuses a file nobody is
+publishing trains people to ignore it. The candidates are: scan `git ls-files`
+plus `git diff --cached --name-only`, so staged-but-new files are included; or
+have `scripts/check` say out loud how many files it scanned, so "clean" over
+zero new files is visibly not the same as "clean" over forty. The second is
+smaller and does not change what is refused.
+
+## The delivery ref is built, and what it does not prove
+
+Decided by the owner 2026-09-10: the applier publishes to `refs/heads/queued`
+after gating a commit and matching every render, and refuses unless an active
+ruleset blocks `non_fast_forward` and `deletion` on that ref. A reconciler
+tracks that ref and never `main`, so it can only ever see commits the applier
+has already gated.
+
+⚠️ **IT DOES NOT PROVE THAT ONLY THE APPLIER CAN MOVE THE REF, AND THAT IS A
+DECISION RATHER THAN AN OVERSIGHT.** Blocking force pushes and deletion leaves
+an ordinary fast-forward open to anyone with write access — deliberately,
+because the applier needs exactly that and needs no bypass actor to do it.
+Restricting the pusher would need an `update` rule whose sole bypass actor is
+the applier's App, and the effect of that combination could not be measured
+here: it needs a ruleset that exists to read back, and creating one was refused
+as a write to repository configuration.
+
+The trade was accepted because `docs/threat-model.md` already places the
+approver's own accounts out of scope, so on a repository whose only writers are
+the approver and the applier, push-exclusivity defends against a party the
+model has already excluded.
+
+⚠️ **THAT CEASES TO BE TRUE THE MOMENT A SECOND HUMAN OR A CI JOB GETS WRITE
+ACCESS TO THE APPLIED REPOSITORY, AND NOTHING NOTICES WHEN IT DOES.** Closing
+it needs the measurement above. Until then this is the one place where a
+property is held by who has access rather than by a gate.
+
+Two smaller things the same work left behind. A deployment with no delivery
+units is never asked to protect a ref it does not use — the tree decides, so a
+pure-OpenTofu tree owes nothing here — and the failure direction is a ref that
+stays put rather than one that advances unwatched. And the ref is `queued`
+rather than `delivered`, because advancing it means truss handed the manifests
+over, not that a cluster has them; a second ref advanced from observed
+reconciler status would be the honest answer to "what is actually running",
+and is not built.
+
+### Superseded: why it was deferred
+
+
+Measured 2026-09-10, which narrows this from "unverified" to one specific
+unanswered question.
+
+**The rule vocabulary is known.** `rules[].type` is one of `creation`,
+`update`, `deletion`, `required_linear_history`, `merge_queue`,
+`required_deployments`, `required_signatures`, `pull_request`,
+`required_status_checks`, `non_fast_forward`, and a set of pattern and
+file rules. `bypass_actors[].actor_type` is one of `Integration`,
+`OrganizationAdmin`, `RepositoryRole`, `Team`, `DeployKey`, `User`;
+`bypass_mode` is `always`, `pull_request` or `exempt`. `internal/forge`
+now carries the per-ref rule types through to `gates.Ruleset.Rules`, so
+the fact a gate would need is available.
+
+**⚠️ NEITHER REPOSITORY USES RULESETS AT ALL.** `GET /rulesets` returns an
+empty list for both this repository and the one the applier applies; both
+are governed by classic branch protection. So `gates.CheckRulesets` is
+today a gate over an empty set — it refuses nothing, not because it is
+wrong but because the control it guards is unused. That was written to
+close a hole somebody could open, and nobody had measured that the hole
+is currently shut by disuse. Worth knowing before reading a green pass as
+evidence that rulesets were checked.
+
+**What is still unanswered, and it is the whole blocker.** Blocking force
+pushes and deletion is expressible and checkable, but it does not stop
+somebody with write access from pushing to the ref — and a ref a
+reconciler applies from is a path to production. What would stop them is
+an `update` rule whose only bypass actor is the applier's App. Whether
+that combination has exactly that effect could not be confirmed here: it
+needs a ruleset that exists, and creating one to read its live shape was
+refused by this environment as a write to repository configuration.
+
+⚠️ **Being wrong here is not symmetric, which is why it is not shipped on
+a best guess.** Demanding a ruleset that turns out to be unnecessary
+costs friction: the applier refuses to advance the ref until somebody
+reads the message. Accepting one that turns out not to restrict pushes
+costs the property — the ref advances while unprotected, silently, and
+the reconciler applies whatever reached it. A gate that can fail open on
+a path to production is the thing this project refuses by construction.
+
+Closing it needs one of: a live ruleset to read back, so the effect of
+`update` plus an `Integration` bypass actor is measured rather than
+assumed; or a decision that the delivery ref does not need
+push-exclusivity because repository write access is already equivalent to
+it in this deployment -- which may well be true here, and is the owner's
+call rather than an engine default.
+
+### Original entry
+
+
+
+The applier renders every delivery unit a commit touches and refuses unless the
+bytes match what CI filed. What it does **not** do yet is publish the result: a
+reconciler still has nothing to track, so the render gate today refuses bad
+manifests without yet being the thing that ships good ones.
+
+The design is a ref only the applier advances — `refs/heads/queued`, fast
+forwarded after every unit of a commit has passed, with a reconciler tracking
+that ref and never `main`. Advancing it is a few lines: `git push` refuses a
+non-fast-forward on its own, so the ordering property is the tool's.
+
+The gate is what is missing. A ref a reconciler applies from is a path to
+production, and publishing one without proving it is protected would add an
+ungated route — anyone with write access could push to it directly. Proving it
+needs a check that the ruleset covering that ref blocks force pushes and
+deletion and restricts who may update it, and `gates.Rulesets` carries only
+enforcement and bypass actors today; the rule *types* are not decoded, and the
+field semantics could not be verified here against a real forge.
+
+⚠️ **The rule is the same one that deferred the `provisioner` gate twice: a
+gate nobody can prove is worse than a gap somebody has written down.** The
+gap is here. Closing it means decoding `rules[].type` in
+`internal/forge/rulesets.go` and adding the sibling of `CheckRulesets` for a
+non-branch ref, verified against a repository that actually has the ruleset.
+
+## The kind layer classifies directories the pass never executes
+
+`internal/repo/units.go` defines `KindTofu` for `clusters/<name>` and
+`hosts/<name>`, and `KindAnsible` for `ansible/plays/<name>`, and its own
+doc says a kind is "how the applier treats it: what binary renders or plans
+it". `runCommitLoop` reads only `KindRender` out of `TouchedUnits`
+(`renderUnitsFor`, `cmd/truss/render_unit.go`); tofu work still comes from
+`TouchedRoots` alone, which only ever names `credentials`, `platform` and
+`projects/<name>`. So a commit touching only `clusters/beta/main.tf` is
+recorded as a noop and HEAD advances past it, while this repository's own
+kind layer says that path is an OpenTofu root that should have been planned
+and applied.
+
+⚠️ **The behaviour is unchanged from before the kind layer existed — what is
+new is a comment claiming otherwise.** `KindTofu` covering clusters and hosts
+was added to `KindOf` without the pass gaining a second reader for it, so the
+doc comment now describes a capability the code does not have.
+
+`TouchedRoots` cannot simply be widened to cover them: `internal/parity`
+compares it, byte for byte, against recordings of the bash it ports, and
+widening it changes what the pass plans for commits the corpus already has
+answers for. Closing this needs a second consumer of `TouchedUnits`'s
+`KindTofu` entries — planning and applying clusters and hosts the way
+`applyOneRoot` already does for `TouchedRoots`'s entries — not a change to
+`TouchedRoots` itself.
+
+## ~~The two sides of the render digest do not share a derivation~~ (closed)
+
+`cmd/truss/render_unit.go`'s doc comment on `renderUnitsFor` used to claim
+"CI derives the units with this same function, so both sides agree on the
+set". It could not: `repo.TouchedUnits` lives under `internal/`, which a
+consumer's CI job cannot import, and no subcommand exposed the touched-unit
+set for a commit — `truss render-digest` takes a single directory
+(`cmd/truss/render_digest_cmd.go`), never a commit range.
+
+Worse, the rule a consumer's CI actually mirrored was asymmetric with the one
+the applier runs. `unitSharedInput` (`internal/repo/units.go`) fires on
+`inventory/`, `.kustomize-version` and `.ansible-version` in addition to
+`modules/`, `providers.allow` and `.opentofu-version`; `sharedInput`, the
+tofu-side rule, has only the latter three. So a commit that only touches
+`inventory/` makes the applier demand a filed digest for every render unit in
+the tree — including units whose CI had no rule telling it to render them,
+because CI was mirroring the narrower, tofu-side pattern. The refusal that
+comes out says "refusing to deliver a manifest nobody reviewed", which names
+the wrong cause: the manifest may have been reviewed, but the two sides
+derived different sets of units to check.
+
+What closed it: `truss units <sha>` (`cmd/truss/units_cmd.go`) prints the
+units a commit touches — `<kind>\t<path>` per line, in `repo.TouchedUnits`'
+own kind-then-path order — by feeding the same `ChangedFiles` and
+`TreeRenderUnits` (`cmd/truss/git.go`) into the same `repo.TouchedUnits` the
+apply pass calls. `--kind render` is what a consumer's CI actually runs, so
+its render-digest step derives the exact set `unitSharedInput` produces
+instead of reimplementing the rule. The subcommand takes no
+`config.Config`, no `getenv` and no credential — a git checkout (`--dir`,
+default `.`) is all it needs, so CI's read-only posture is unaffected.
+`cmd/truss/units_cmd_test.go` covers the asymmetric case directly: a commit
+touching `inventory/x.json` alongside several render units in the tree
+returns every one of them, in the same fixture shape that made the two sides
+disagree before.
+
+## `internal/inventory` declares fields nothing reads back
+
+Three fields on `Host` and `Cluster` are documented as paths into the rest of
+the tree and never checked against it: `Host.ProvisionedBy` ("a tofu unit
+path, e.g. \"hosts/dev-beta\""), `Host.Config` ("an ansible unit path, or
+explicit null" — `checkHost` only ever tests it for nilness, never resolves
+the string it holds), and `Cluster.Baseline` ("a `baselines/<name>`
+directory"). `repo.KindOf` is the function that would tell a real unit path
+from a typo or a directory that was renamed out from under it, and nothing in
+`internal/inventory` calls it.
+
+Three more fields are read by nothing in the binary at all: `Host.Frozen`,
+`Host.Decommissioned`, and `Environment.Frozen`. `Check` never tests any of
+the three, so a decommissioned host and a frozen environment pass `Check`
+identically to a live one — the same environment could be reconciled,
+rendered and delivered to exactly as if nothing had been declared about it.
+
+⚠️ **That is absent-read-as-compliant, inside the one package whose own
+comments name that as the failure to avoid** — `decode`'s comment says a record
+that "looks fully read but was not is worse than one that visibly failed to
+parse", and these fields fail exactly that way: they parse, they are named in
+the schema's own doc comments, and nothing downstream ever looks at them
+again.
+
+Also unrecorded anywhere else: the package itself, and `truss inventory
+validate`, are described in no document in `docs/`.
 
 ## Checked and deliberately not wanted
 
@@ -694,7 +1021,16 @@ Recorded so the next survey does not re-derive them.
   solve a multi-team or multi-repo problem this does not have, or contradict
   a stated line.
 - **OpenTelemetry.** No collector here, no context to propagate across
-  services, and a short-lived process is the case it serves worst.
+  services, and a short-lived process is the case it serves worst. Still true
+  after metrics landed: what shipped is a Prometheus exposition written by
+  hand into a Pushgateway (`internal/metrics`, no dependency), because a batch
+  job that exits before any scrape reaches it is exactly the case the
+  Pushgateway exists for and exactly the case a tracing SDK serves worst.
+  ⚠️ The cost of that choice is written down where it bites: a gateway serves
+  the last push forever, so an applier that has stopped reports its final
+  healthy state indefinitely, and every alert is anchored on
+  `time() - truss_pass_timestamp_seconds` for that reason. See
+  `observability/README.md`.
 - **A notification abstraction (`shoutrrr`, `notify`).** One transport is
   one way to do things. Revisit only if a second is actually wanted.
 

@@ -11,12 +11,27 @@
     internal/repo        which roots a commit actually touches
     internal/gates       every refusal, as pure functions over fetched state
     internal/notify      alerting
+    internal/metrics     the Prometheus exposition format, and the push
+    observability/       dashboards and alerting rules for what it emits
 
 `internal/gates` takes fetched state and returns refusals. It performs no I/O,
 and that's the whole point of the package: every decision that can stop a
 change is a pure function, so *"an approval on an earlier push does not
 count"* is a test that calls a function and reads its answer, rather than one
 that drives the whole pass and inspects a ledger object afterward.
+
+`internal/metrics` is split the same way and for the same reason:
+`render.go` turns a set of samples into the exposition format and does no
+I/O, so "is this push even valid" is a test that calls a function. It matters
+more here than it looks -- a Pushgateway answers a malformed body with one
+400 for the WHOLE push, so a single bad label would discard every other
+metric in the request and leave a status code in a log line nobody reads.
+
+⚠️ **The dashboards and rules in `observability/` name metrics this code
+emits, and `cmd/truss/metrics_contract_test.go` fails the build when they
+disagree** -- in both directions. Renaming a metric without moving the
+dashboard is the `internal/plan/digest.go` hazard again: the panel renders
+"No data", which looks exactly like a quiet week.
 
 `internal/secrets` is not a vault client. It reads the applier's credentials
 from a mounted mirror, and its one network path lists items and reads a single
@@ -55,6 +70,7 @@ watched rather than assumed. See [toolchain.md](toolchain.md).
 
 CI runs the same script. A chain stated in two places drifts, and the reason
 for each step is written beside the command rather than here.
+
 
 This repository is public and the platform it manages is not — that's the whole
 risk. A live deployment has real account ids, bucket names, hostnames and vault

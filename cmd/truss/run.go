@@ -7,7 +7,17 @@ import (
 	"os"
 )
 
-// subcommands is the documented set from docs/port-plan.md §4.9, exactly.
+// subcommands is the documented set from docs/port-plan.md §4.9, plus
+// status, why and skip -- the local operator CLI docs/work-items.md:86-133
+// asks for, which post-dates that table (§4.9 has been updated to say so) --
+// plus render-digest and inventory, the CI-side render gate and the
+// inventory consistency check, neither of which existed when either table
+// was written. `inventory` collapses `inventory validate` to one top-level
+// verb, the same way `ledger` and `gate` already collapse their own verbs.
+// `units` post-dates all of those: it prints the units a commit touches, so
+// CI and the applier derive the set from one implementation instead of a
+// consumer's CI reimplementing the rule (docs/work-items.md, "The two sides
+// of the render digest do not share a derivation").
 // TestSubcommandsAreExactlyTheDocumentedSet reads this slice directly rather
 // than re-deriving it, so adding a subcommand here is the one place that
 // needs to change for that test to see it.
@@ -20,6 +30,12 @@ var subcommands = []string{
 	"notify",
 	"apply",
 	"publish",
+	"status",
+	"why",
+	"skip",
+	"render-digest",
+	"inventory",
+	"units",
 }
 
 func isSubcommand(name string) bool {
@@ -50,6 +66,23 @@ subcommands:
   apply                 run the applier pass
   publish                serve one publish request over a Unix socket
                          (internal; runs only in the publisher container)
+  status                summarise the queue: HEAD, heartbeat age, failure,
+                         expiring credentials -- ledger-only, no cluster
+  why <sha>              explain what happened to one commit (exit 2 if
+                         the queue has not reached it yet)
+  skip <sha> --reason <text>
+                         advance HEAD past a commit that cannot apply;
+                         refuses without a failed record, a stated reason
+                         and TRUSS_SKIP_I_UNDERSTAND=<sha>
+  render-digest <dir>    render a Kustomize directory twice and print its
+                         digest (CI witness side of the delivery gate)
+  inventory validate [dir] [--json]
+                         check the inventory tree for dangling references
+                         and orphaned delivery units
+  units <sha> [--dir <path>] [--kind <kind>]
+                         print the units a commit touches, one per line as
+                         "<kind>\t<path>" in execution order (credentials,
+                         tofu, ansible, render); --kind filters to one kind
 `
 
 // run is the binary's only entry point besides main, and main's only job
@@ -85,6 +118,18 @@ func runEnv(ctx context.Context, args []string, getenv func(string) string, stdi
 		return cmdApply(ctx, rest, getenv, stdout, stderr)
 	case "publish":
 		return cmdPublish(ctx, rest, getenv, stdout, stderr)
+	case "status":
+		return cmdStatus(ctx, rest, getenv, stdout, stderr)
+	case "why":
+		return cmdWhy(ctx, rest, getenv, stdout, stderr)
+	case "skip":
+		return cmdSkip(ctx, rest, getenv, stdout, stderr)
+	case "render-digest":
+		return cmdRenderDigest(ctx, rest, getenv, stdout, stderr)
+	case "inventory":
+		return cmdInventory(rest, stdout, stderr)
+	case "units":
+		return cmdUnits(ctx, rest, stdout, stderr)
 	default:
 		// Unreachable: isSubcommand already filtered args[0]. Kept as an
 		// explicit refusal rather than a panic so a future subcommand

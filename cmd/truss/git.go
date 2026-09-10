@@ -20,6 +20,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"github.com/beeradb/truss/internal/repo"
 	"strings"
 	"unicode"
 )
@@ -55,8 +57,21 @@ type gitDriver interface {
 	Commits(ctx context.Context, from, to string) ([]string, error)
 	ChangedFiles(ctx context.Context, sha string) ([]string, error)
 	TreeRoots(ctx context.Context, sha string) ([]string, error)
+
+	// TreeRenderUnits lists every Kustomize unit present in a commit's tree.
+	// It is separate from TreeRoots rather than folded into it because
+	// TreeRoots reproduces the bash's `ls-tree -d ... -- platform projects/`
+	// exactly and internal/parity compares against recordings of that; a
+	// widened listing there would change what the pass plans for commits the
+	// corpus already has answers for.
+	TreeRenderUnits(ctx context.Context, sha string) ([]string, error)
+
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
+
+	// PushRef fast-forwards a remote ref to sha. It is the only write this
+	// driver performs, and the only thing truss publishes anywhere.
+	PushRef(ctx context.Context, sha, ref string) error
 }
 
 // execGit drives the real git binary. The installation token is passed in
@@ -163,6 +178,59 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 // in sha's own tree, reproducing derive_touched_roots' shared-input branch
 // (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
 // '^(platform|projects/[^/]+)$'`), filter included.
+// TreeRenderUnits lists the render units in a commit's tree: every
+// baselines/<name> and deliveries/<cluster>/<unit> directory.
+//
+// ⚠️ IT IS -r AND NOT PLAIN -d, BECAUSE THE TWO KINDS SIT AT DIFFERENT
+// DEPTHS. A baseline is one level under its prefix and a delivery is two,
+// so a single non-recursive listing can reach one or the other but never
+// both. Recursing and then asking repo.KindOf about each line is what keeps
+// the depths in one place -- the same function the commit diff is matched
+// against, so a listing and a diff can never disagree about what a directory
+// is.
+// PushRef fast-forwards refs/heads/<ref> on the remote to sha.
+//
+// ⚠️ NO --force AND NO LEASE, DELIBERATELY: THE ORDERING PROPERTY IS GIT'S,
+// NOT OURS. A plain push refuses a non-fast-forward on its own, so a ref that
+// somebody has moved elsewhere makes this fail loudly rather than overwrite
+// whatever they did. Adding --force-with-lease would be the reflex and would
+// be wrong -- it would make truss the thing that resolves the disagreement,
+// when a delivery ref disagreeing with the applier is a fact somebody needs
+// to look at.
+//
+// The refspec names the destination in full so a local branch of the same
+// name can never be what is pushed.
+func (g execGit) PushRef(ctx context.Context, sha, ref string) error {
+	if err := checkRef(sha); err != nil {
+		return err
+	}
+	if err := checkRef(ref); err != nil {
+		return err
+	}
+	spec := fmt.Sprintf("%s:refs/heads/%s", sha, ref)
+	if _, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "push", "origin", spec}); err != nil {
+		return fmt.Errorf("git push origin %s: %w", spec, err)
+	}
+	return nil
+}
+
+func (g execGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "-r", "--name-only", sha, "--", "baselines", "deliveries"})
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree -d -r %s: %w", sha, err)
+	}
+	var units []string
+	for _, line := range splitLines(out) {
+		if kind, ok := repo.KindOf(line); ok && kind == repo.KindRender {
+			units = append(units, line)
+		}
+	}
+	return units, nil
+}
+
 func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 	if err := checkRef(sha); err != nil {
 		return nil, err
