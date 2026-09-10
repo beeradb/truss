@@ -29,9 +29,11 @@ type renderFactory func(env []string) renderRunner
 // fed from gitDriver.TreeRenderUnits, and only the render half of the result
 // is read, so the shared-input branch of TouchedUnits -- which returns
 // everything in the tree -- returns exactly the render units that exist.
-// The tofu half of a commit is still derived by TouchedRoots, untouched,
-// because internal/parity compares that function against recordings of the
-// bash.
+// tofuUnitsFor (apply_cmd.go) is the sibling that reads the
+// credentials/tofu half of the very same repo.TouchedUnits call, from its
+// own tree listing (gitDriver.TreeTofuUnits). Neither call touches
+// repo.TouchedRoots, which internal/parity still compares against
+// recordings of the bash unchanged.
 //
 // A shared input therefore re-renders every unit rather than only the ones
 // whose own files changed, and that is accepted cost rather than an
