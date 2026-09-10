@@ -46,6 +46,26 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # ⚠️ tofu IS A TEST DEPENDENCY HERE FOR THE SAME REASON IT IS IN ci.yml,
+      # AND THIS WORKFLOW DID NOT INSTALL IT. internal/plan's declaration tests
+      # generate real plan JSON and read it back; they FAIL rather than skip
+      # when tofu is absent, deliberately. #12 installed it in ci.yml and not
+      # here, so every release since has been broken and nothing noticed,
+      # because nothing was tagged in between. v0.1.4 found it:
+      #
+      #     --- FAIL: TestDeclarationsFindsARootProvisioner
+      #         tofu is required for TestDeclarations* and was not found on PATH
+      #
+      # ⚠️ THE SAME TWO LINES AS ci.yml, WHICH IS THE PROBLEM RATHER THAN THE
+      # FIX. Two workflows now state one fact, and the next dependency added to
+      # one will be missing from the other in exactly this way. Both should run
+      # scripts/check instead; that is a larger change than a broken release
+      # should carry, and it is recorded in docs/work-items.md.
+      - run: |
+          scripts/toolchain install tofu
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: tofu version
+
       # ⚠️ THE TAG IS TESTED AGAIN, NOT TRUSTED BECAUSE main WAS GREEN. A tag
       # can point at any commit, including one that never sat on main and
       # never passed ci.yml. A release is the artefact people run.
