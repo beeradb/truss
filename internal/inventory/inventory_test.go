@@ -72,6 +72,7 @@ func validSnapshot() Snapshot {
 				Placement: Placement{Cluster: strPtr("prod"), Namespace: strPtr("wren-prod")},
 				Requires:  []string{"ingress"},
 				Vault:     VaultRef{Mount: "secret", Prefix: "wren/prod"},
+				Stateful:  boolPtr(false),
 			},
 			"juni/prod": {
 				Schema:    environmentSchema,
@@ -80,6 +81,7 @@ func validSnapshot() Snapshot {
 				Shape:     "vm",
 				Placement: Placement{Host: strPtr("beta")},
 				Vault:     VaultRef{Mount: "secret", Prefix: "juni/prod"},
+				Stateful:  boolPtr(false),
 			},
 		},
 		DeliveryUnits: []string{"prod/wren-prod"},
@@ -260,6 +262,7 @@ func defects() []defect {
 					Shape:     "kubernetes",
 					Placement: Placement{Cluster: strPtr("prod"), Namespace: strPtr("wren-prod")},
 					Vault:     VaultRef{Mount: "secret", Prefix: "wren/staging"},
+					Stateful:  boolPtr(false),
 				}
 				// No DeliveryUnits change needed: deliveryUnit derives the
 				// directory from the NAMESPACE, and both environments claim
@@ -397,6 +400,16 @@ func defects() []defect {
 			},
 			wantFile:  "inventory/environments/wren/prod.json",
 			wantWords: []string{"vault.prefix", "empty", "set vault.prefix"},
+		},
+		{
+			name: "EnvironmentStatefulUnset",
+			mutate: func(s *Snapshot) {
+				e := s.Environments["wren/prod"]
+				e.Stateful = nil
+				s.Environments["wren/prod"] = e
+			},
+			wantFile:  "inventory/environments/wren/prod.json",
+			wantWords: []string{"unstated", "true or false", "state stateful"},
 		},
 		{
 			name: "ClusterHasHAVaultUnset",
@@ -614,11 +627,13 @@ func TestTwoEnvironmentsCannotShareADerivedDeliveryUnit(t *testing.T) {
 		Schema: environmentSchema, Project: "wren-api", Name: "prod", Shape: "kubernetes",
 		Placement: Placement{Cluster: strPtr("prod"), Namespace: strPtr("api")},
 		Requires:  []string{"ingress"}, Vault: VaultRef{Mount: "secret", Prefix: "wren-api/prod"},
+		Stateful: boolPtr(false),
 	}
 	s.Environments["wren/api-prod"] = Environment{
 		Schema: environmentSchema, Project: "wren", Name: "api-prod", Shape: "kubernetes",
 		Placement: Placement{Cluster: strPtr("prod"), Namespace: strPtr("web")},
 		Requires:  []string{"ingress"}, Vault: VaultRef{Mount: "secret", Prefix: "wren/api-prod"},
+		Stateful: boolPtr(false),
 	}
 	s.DeliveryUnits = append(s.DeliveryUnits, "prod/api", "prod/web")
 

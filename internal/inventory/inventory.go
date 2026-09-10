@@ -269,6 +269,16 @@ func checkEnvironment(s Snapshot, key string, e Environment) []string {
 			"%s: vault.prefix is empty — set vault.prefix", path))
 	}
 
+	// Unstated is not "no": a workload nobody has recorded an answer for
+	// must not read as stateless by default, since that is exactly the
+	// reading that lets CheckMoves wave a data-losing move through. Both
+	// true and false are answers Check accepts; only nil is refused.
+	if e.Stateful == nil {
+		problems = append(problems, fmt.Sprintf(
+			"%s: stateful is unstated — state stateful as true or false; an unanswered field must not be read as either",
+			path))
+	}
+
 	return problems
 }
 

@@ -988,6 +988,31 @@ again.
 Also unrecorded anywhere else: the package itself, and `truss inventory
 validate`, are described in no document in `docs/`.
 
+## `CheckMoves` exists and is not wired
+
+`internal/inventory.CheckMoves(before, after Snapshot) []string` refuses a
+stateful environment whose `placement.cluster`, `placement.host` or `shape`
+changed between two snapshots -- the one moment a workload's data would be
+silently orphaned, since PVCs do not follow a placement change and nothing in
+this system makes them. `Check` cannot see this on its own: it takes one
+`Snapshot`, so a move is invisible to it -- the new placement is all that is
+left to look at, with nothing recording that it changed from something else.
+
+Nothing calls it. `cmd/truss` has no `inventory` verb that loads two trees,
+and the applier -- the one caller with both sides in hand, the commit and its
+parent -- does not call it either. It is a function nobody calls, and until
+that changes this is a claim, not a check: an operator could move a stateful
+workload's cluster today and nothing here would refuse it.
+
+What closing it takes: the applier already resolves a commit's parent to
+diff plans; loading `inventory.Load` against both trees (parent as `before`,
+head as `after`) and running `CheckMoves` alongside the existing `Check` is
+the same shape of call already made for the single-snapshot case in
+`cmd/truss/inventory_cmd.go`. The parent tree has to come from the same
+checkout the applier already has -- `git show <parent>:inventory/...` via an
+`fs.FS` adapter, not a second clone -- since `inventory.Load` takes an
+`fs.FS` and performs no I/O of its own.
+
 ## Checked and deliberately not wanted
 
 Recorded so the next survey does not re-derive them.
