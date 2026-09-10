@@ -485,7 +485,22 @@ actors, check `GET /repos/{o}/{r}/rules/branches/main` and each ruleset it
 names for a non-empty `bypass_actors` -- the gate will otherwise announce it
 the hard way, by refusing the next pass.
 
-## The provisioner / `helm_release` gate is built; `data "external"` is not, and cannot be from here
+## The provisioner / `helm_release` gate is built and wired; `data "external"` is not, and cannot be from here
+
+⚠️ **THE PARITY CORPUS CANNOT REACH THIS GATE, AND THAT IS WORTH KNOWING
+BEFORE READING 43 GREEN SCENARIOS AS COVERAGE.** The recordings predate the
+gate, so none carries a `configuration` key, and `plan.Declarations` refuses a
+document without one. `internal/parity/fakebin` therefore backfills an empty
+`configuration` for every recorded `tofu show`, which is the honest answer --
+none of those scenarios is about a provisioner -- but it means the fake hands
+this gate "declares nothing" every time and could not tell a broken parser from
+a working one.
+
+What actually exercises it is `internal/plan`'s own tests, which generate real
+plan JSON with a real `tofu` and read it back, including the module-nested case
+the root-only reading misses. That is where a regression would surface; parity
+would stay green through it.
+
 
 `docs/threat-model.md` used to credit a grep for `provisioner` blocks and
 `external` data sources that lived only in the consumer's CI — "and CI is not
@@ -510,12 +525,25 @@ machine holding write credentials for four clouds, with no diff of what it
 will do) and any `helm_release` resource (closing the gap recorded below),
 naming the address and type of every offender, not just the first.
 
-⚠️ **This is not yet wired into the applier's pass.** `internal/gates` and
-`internal/plan` are built and tested (including against real plan JSON
-generated with `tofu init`/`plan`/`show -json`, at zero, one and two module
-levels of nesting), but nothing in `cmd/truss` calls `CheckDeclarations` yet.
-Until it is, the row in `docs/threat-model.md` describes a check that exists
-in this tree, not one the running pass performs.
+**Wired.** `applyOneRoot` (`cmd/truss/apply_cmd.go`) fetches the plan JSON once
+per root — the same `tofu show -json` it already read for the digest gate,
+reused rather than run twice — and calls `plan.Declarations` then
+`gates.CheckDeclarations` for every root before it applies, credentials
+included. Any problem refuses the commit, joined and filed the same shape the
+digest refusal already uses beside it. Two things differ deliberately from the
+digest gate: it runs even when the plan changes nothing (`changes == 0`) —
+because a provisioner is a configuration fact ready to fire the next time
+anything touches the resource carrying it, not something the "nothing to
+gate" argument for an empty plan applies to — and `credentials` is NOT exempt
+here, because the digest gate's exemption is about who could have reviewed
+the plan (CI cannot plan that root), which says nothing about whether the
+root may run arbitrary commands. `cmd/truss/apply_declarations_test.go`
+exercises all four cases end to end: a provisioner refused by address, a
+provisioner refused even with zero resource changes (proven by moving the
+check inside the `changes > 0` branch and watching that specific test go
+red), a clean plan applying, and `credentials` refused exactly like any other
+root. The row in `docs/threat-model.md` now describes a check the running
+pass performs.
 
 **`data "external"` and `data "http"` remain unaddressed, and this gate
 cannot be extended to cover them.** Terraform and OpenTofu read a data source
@@ -544,8 +572,8 @@ nothing in this tree looking for it. `internal/gates.CheckDeclarations`
 above now refuses it, by the same field-level check over
 `configuration.root_module.resources[]` (and every module beneath it) that
 closes the provisioner gate — no HCL parser needed, since `type` is a plain
-field in the plan JSON. It carries the same wiring caveat as the entry above:
-built and tested, not yet called from `cmd/truss`.
+field in the plan JSON. It carries the same wiring as the entry above: called
+from `applyOneRoot` for every root, on every plan.
 
 ## The ledger records history it cannot prove
 
@@ -964,7 +992,7 @@ again.
 Also unrecorded anywhere else: the package itself, and `truss inventory
 validate`, are described in no document in `docs/`.
 
-## `CheckMoves` exists and is not wired
+## `internal/inventory.Check` and `CheckMoves` are wired into every commit
 
 `internal/inventory.CheckMoves(before, after Snapshot) []string` refuses a
 stateful environment whose `placement.cluster`, `placement.host` or `shape`
@@ -974,20 +1002,42 @@ this system makes them. `Check` cannot see this on its own: it takes one
 `Snapshot`, so a move is invisible to it -- the new placement is all that is
 left to look at, with nothing recording that it changed from something else.
 
-Nothing calls it. `cmd/truss` has no `inventory` verb that loads two trees,
-and the applier -- the one caller with both sides in hand, the commit and its
-parent -- does not call it either. It is a function nobody calls, and until
-that changes this is a claim, not a check: an operator could move a stateful
-workload's cluster today and nothing here would refuse it.
+**Wired.** `checkInventoryAtCommit` (`cmd/truss/apply_inventory.go`) runs in
+`runCommitLoop`, once per commit, before any root is derived or any unit
+rendered -- so a commit touching only `inventory/` (which would otherwise
+carry no root and no render unit, and be recorded as an uneventful noop) is
+still checked. It reads the head tree through `execGit.TreeFS` (`cmd/truss/git.go`,
+a read-only `fs.FS` over one commit backed by `git ls-tree`/`git show`, added
+for exactly this so the parent tree can be read without a second checkout
+trampling the one the pass is about to apply from), loads it with
+`inventory.Load`, and runs `inventory.Check`. It then resolves the commit's
+first parent with the new `gitDriver.Parent` (`git rev-parse <sha>^`) and, when
+one exists and its own inventory loads cleanly, loads the parent's tree the
+same way and runs `inventory.CheckMoves(parent, head)`. Either check's problems
+refuse the commit; `PutFailed` files the reason and HEAD does not advance,
+the same shape every other per-commit gate already uses.
 
-What closing it takes: the applier already resolves a commit's parent to
-diff plans; loading `inventory.Load` against both trees (parent as `before`,
-head as `after`) and running `CheckMoves` alongside the existing `Check` is
-the same shape of call already made for the single-snapshot case in
-`cmd/truss/inventory_cmd.go`. The parent tree has to come from the same
-checkout the applier already has -- `git show <parent>:inventory/...` via an
-`fs.FS` adapter, not a second clone -- since `inventory.Load` takes an
-`fs.FS` and performs no I/O of its own.
+Two skips, both deliberate, both the same shape `publishDeliveryRef` already
+uses for "this deployment does not use the feature": a tree with no
+`inventory/` directory is not refused -- `inventory.Load` reports that as a
+problem, which is right for `truss inventory validate` pointed at a platform
+checkout and wrong here, where it would refuse every commit from a deployment
+that has never adopted the inventory (`internal/parity`'s 43 recorded
+scenarios carry no `inventory/` directory at all, and this skip is what keeps
+them green -- removing it was watched failing 11 of them). A commit with no
+parent, or a parent whose own inventory does not load cleanly, skips
+`CheckMoves` only; `Check` on the head still runs regardless.
+
+`cmd/truss/apply_inventory_test.go` drives all of it end to end: a consistent
+inventory applies, a dangling cluster reference is refused by the
+environment's own file name, a stateful move between clusters is refused
+naming both clusters, the same move with `stateful: false` applies, a tree
+with no `inventory/` directory applies (the parity-protecting case, asserted
+directly), and a commit with no parent applies with `CheckMoves` skipped.
+`cmd/truss/git_treefs_test.go` tests `execGit.TreeFS` directly against a real
+temporary git repository, proving it reads a committed file without checking
+anything out and that an absent path fails in the `fs.ErrNotExist` shape
+callers of an `fs.FS` are entitled to assume.
 
 ## Checked and deliberately not wanted
 

@@ -871,6 +871,24 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			return last, applied, noop, reason, false
 		}
 
+		// ⚠️ THE INVENTORY GATE RUNS HERE, BEFORE ANY ROOT IS DERIVED OR ANY
+		// UNIT RENDERED, FOR THE SAME REASON THE COMMIT GATE MOVED AHEAD OF
+		// THEM: an inventory-only commit -- one that touches inventory/ or
+		// deliveries/ and nothing under platform/ or projects/ -- touches no
+		// root and no render unit, so running this after the noop check below
+		// would let it be recorded as uneventful and waved through unchecked.
+		// See checkInventoryAtCommit's own doc for what it refuses and the
+		// two cases it deliberately skips rather than refuses.
+		if reason := checkInventoryAtCommit(ctx, d, headSHA); reason != "" {
+			d.Obs.failed(classConfig)
+			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+				d.Obs.ledgerError()
+				d.Obs.failed(classLedger)
+				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+			}
+			return last, applied, noop, reason, false
+		}
+
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
 			d.Obs.failed(classRepo)
@@ -1236,22 +1254,63 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 		return ledger.RootSummary{}, false, fmt.Sprintf("tofu plan failed for %s: %v", root, err)
 	}
 
+	// ⚠️ THE PLAN JSON IS FETCHED ONCE, HERE, FOR EVERY ROOT -- CREDENTIALS
+	// INCLUDED -- AND SHARED BY BOTH GATES BELOW. It used to be fetched only
+	// for a non-credentials root, inside the digest-gate branch, because the
+	// digest gate is what credentials is exempt from (§2 item 10: CI never
+	// plans that root, so there is nothing for a human to have approved).
+	// The declarations gate below is a different question -- does this plan
+	// run a provisioner or a forbidden resource type -- and credentials can
+	// run tofu exactly like any other root, so it is not exempt from that.
+	// Fetching once and sharing it is also just not running tofu twice.
+	var planJSON []byte
+	err = timed("show", func() error {
+		var showErr error
+		planJSON, showErr = runner.ShowJSON(ctx, rootDir, planFile)
+		return showErr
+	})
+	if err != nil {
+		if errors.Is(err, plan.ErrLockBusy) {
+			return ledger.RootSummary{}, true, ""
+		}
+		d.Obs.failed(classPlan)
+		return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
+	}
+
+	// The declarations gate: refuse a plan that would run a provisioner or a
+	// forbidden resource type, whether or not this pass has any resource
+	// change to apply.
+	//
+	// ⚠️ RUN UNCONDITIONALLY, NOT INSIDE THE "changes == 0" SKIP BELOW. The
+	// digest gate skips an empty plan because there is nothing to gate --
+	// what would change was never shown to anyone, so there is nothing to
+	// have deviated from what was approved. A provisioner is a different
+	// kind of fact: it is a configuration fact that will run the next time
+	// ANYTHING touches the resource carrying it, whether or not THIS plan
+	// changes that resource. A plan with zero resource changes still
+	// declares it, ready to fire later, so this gate is not narrowed by the
+	// same "nothing to gate" argument the digest gate makes for itself.
+	//
+	// ⚠️ CREDENTIALS IS NOT EXEMPT HERE. §2 item 10 exempts credentials from
+	// the DIGEST gate specifically, because CI cannot plan that root -- a
+	// fact about who could have reviewed it, not about whether it may run
+	// arbitrary commands at apply time. Copying the exemption across would
+	// make credentials/ the one root where a provisioner could run
+	// unreviewed forever.
+	decls, err := plan.Declarations(planJSON)
+	if err != nil {
+		d.Obs.failed(classPlan)
+		return ledger.RootSummary{}, false, fmt.Sprintf(
+			"could not read our own plan's declarations for %s: %v", root, err)
+	}
+	if problems := gates.CheckDeclarations(root, decls); len(problems) > 0 {
+		d.Obs.failed(classPlan)
+		return ledger.RootSummary{}, false, strings.Join(problems, "; ")
+	}
+
 	// §2 item 10: only credentials is exempt from the digest gate, because
 	// CI never plans it.
 	if root != "credentials" {
-		var planJSON []byte
-		err := timed("show", func() error {
-			var showErr error
-			planJSON, showErr = runner.ShowJSON(ctx, rootDir, planFile)
-			return showErr
-		})
-		if err != nil {
-			if errors.Is(err, plan.ErrLockBusy) {
-				return ledger.RootSummary{}, true, ""
-			}
-			d.Obs.failed(classPlan)
-			return ledger.RootSummary{}, false, fmt.Sprintf("could not digest our own plan for %s: %v", root, err)
-		}
 		// ⚠️ A PLAN THAT CHANGES NOTHING IS NOT GATED, BECAUSE THERE IS
 		// NOTHING TO GATE. The digest proves that what we are about to
 		// change is what the approver read. A plan with no changes in it
