@@ -1279,6 +1279,24 @@ func buildBaseEnv(d applyDeps, token string) ([]string, error) {
 			env = append(env, "TAILSCALE_TAILNET="+net)
 		}
 	}
+
+	// The Hetzner project token, for a consumer whose machines live there.
+	// Optional and read the same way, so a deployment with no Hetzner
+	// project mounts nothing and plans exactly as before.
+	//
+	// ⚠️ ONE TOKEN, READ-WRITE, AND THERE IS NO NARROWER SCOPE TO ASK FOR.
+	// Hetzner Cloud tokens are per-project and are either read or
+	// read-write; there is no per-resource permission and no way to grant
+	// "may resize, may not delete". So the thing standing between a bad
+	// plan and a deleted machine is not the credential -- it is the plan
+	// digest a human approved, plus `prevent_destroy` on the server
+	// resources themselves, which makes tofu refuse the destroy at plan
+	// time rather than at apply time.
+	if token, ok, err := d.Dir.FieldIfPresent(itemHetzner, fieldHetznerToken); err != nil {
+		return nil, err
+	} else if ok {
+		env = append(env, "HCLOUD_TOKEN="+token)
+	}
 	return env, nil
 }
 

@@ -11,7 +11,8 @@
 # Verified by grepping every exec.Command in non-test code: `tofu` (plan and
 # apply), `git` (clone and read the approved commit), `op` (the publisher's
 # 1Password reads), `kustomize` (rendering a delivery unit's manifests so they
-# can be fingerprinted; internal/render.Runner.Build). Truss talks to GitHub
+# can be fingerprinted; internal/render.Runner.Build), `ansible-playbook`
+# (configuring a managed machine; internal/ansible.Runner). Truss talks to GitHub
 # and to S3 over HTTP in Go, so it needs no `gh` and no `aws` -- both of which
 # the hand-built image carried.
 #
@@ -79,6 +80,59 @@ RUN set -eux; \
     tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin kustomize; \
     rm -f /tmp/kustomize.tar.gz /tmp/kustomize.sums; \
     chmod 0755 /usr/local/bin/kustomize
+
+# ⚠️ ONE ANSIBLE VERSION, AND THE PIN IS WEAKER THAN THE TWO ABOVE IT --
+# SAID PLAINLY RATHER THAN IMPLIED BY THE SHAPE. tofu and kustomize are
+# checksum-verified because a digest gate has TWO SIDES that must agree about
+# the tool: the consumer's CI plans or renders with one, the applier re-does
+# it with this one, and a mismatch refuses every apply. A play has no second
+# side (internal/ansible's package doc: CI cannot reach the hosts, so nothing
+# CI could file about a play is a check that can fail), so what a pin buys
+# here is reproducibility of the image, not agreement between two parties.
+#
+# What that costs, exactly: pip resolves ansible-core's transitive
+# dependencies -- resolvelib, PyYAML, Jinja2, cryptography -- at build time
+# and this does not hash-pin them. Closing that means a --require-hashes
+# requirements file per architecture, because cryptography ships arch-
+# specific wheels. Worth doing; not done, and not pretended.
+ARG ANSIBLE_VERSION
+RUN test -n "$ANSIBLE_VERSION" || { echo "ANSIBLE_VERSION build-arg is required" >&2; exit 1; }
+
+# ⚠️ openssh-client IS NOT OPTIONAL AND IS EASY TO FORGET. Ansible's default
+# connection plugin does not speak SSH itself -- it execs the local `ssh`
+# binary -- so without this every play fails at the first host with a
+# connection error naming no cause anyone can act on. The applier reaches a
+# managed machine over Tailscale SSH and carries no private key of its own
+# (cmd/truss/ansible_unit.go, ansibleEnv), but it still needs the client.
+#
+# ansible-core, not the `ansible` metapackage: the metapackage bundles
+# roughly a hundred collections nobody here has read, and this image's
+# standing rule is that what is in it is decided by what truss executes.
+# Collections come from ansible-collections beside this file, one per line,
+# each pinned -- an unpinned collection is a third party changing what runs
+# as root on somebody else's machine, between two builds of the same commit.
+COPY ansible-collections /tmp/ansible-collections
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-venv openssh-client; \
+    python3 -m venv /opt/ansible; \
+    /opt/ansible/bin/pip install --no-cache-dir --upgrade pip; \
+    /opt/ansible/bin/pip install --no-cache-dir "ansible-core==${ANSIBLE_VERSION}"; \
+    ln -s /opt/ansible/bin/ansible-playbook /usr/local/bin/ansible-playbook; \
+    while IFS= read -r line; do \
+      case "$line" in ''|\#*) continue ;; esac; \
+      ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections \
+        /opt/ansible/bin/ansible-galaxy collection install "$line"; \
+    done < /tmp/ansible-collections; \
+    rm -f /tmp/ansible-collections; \
+    rm -rf /var/lib/apt/lists/*
+
+# ⚠️ THE COLLECTIONS LIVE OUTSIDE THE DEFAULT SEARCH PATH, so this variable
+# is what makes them findable. Without it ansible looks in ~/.ansible and
+# /usr/share/ansible, finds neither, and reports the play's modules as
+# missing -- which reads as a broken play rather than a broken image.
+ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
 
 # The 1Password CLI, used only by the publisher. Its apt repo is per-arch, so
 # the component below is TARGETARCH rather than a hardcoded amd64 -- which is
