@@ -16,10 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"time"
 
 	"github.com/beeradb/truss/internal/repo"
 	"strings"
@@ -72,6 +76,22 @@ type gitDriver interface {
 	// PushRef fast-forwards a remote ref to sha. It is the only write this
 	// driver performs, and the only thing truss publishes anywhere.
 	PushRef(ctx context.Context, sha, ref string) error
+
+	// TreeFS returns a read-only fs.FS over sha's own tree, so
+	// inventory.Load can read a commit's inventory WITHOUT checking it out
+	// -- see execGit.TreeFS's own doc for why the apply pass needs exactly
+	// that.
+	TreeFS(ctx context.Context, sha string) (fs.FS, error)
+
+	// Parent returns sha's first parent, and false when sha has none -- a
+	// root commit -- or the parent could not be determined. The commit-loop
+	// inventory gate uses this to fetch the PARENT's tree via TreeFS and
+	// compare it against the head's, so a stateful workload's move between
+	// clusters is caught (inventory.CheckMoves needs both snapshots at
+	// once). false is deliberately not an error: a root commit is not a
+	// failure to be propagated, it is the one case CheckMoves has nothing to
+	// compare against.
+	Parent(ctx context.Context, sha string) (string, bool)
 }
 
 // execGit drives the real git binary. The installation token is passed in
@@ -332,4 +352,212 @@ func splitLines(s string) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+// treeFS is a read-only fs.FS over one commit's tree, backed by git itself
+// rather than by a checkout.
+//
+// ⚠️ IT EXISTS BECAUSE THE PASS NEEDS TWO COMMITS AT ONCE. Detecting that a
+// workload MOVED means comparing a commit's inventory against its parent's,
+// and the pass has the head checked out. Checking the parent out to read it
+// would trample the tree it is about to apply from, so the parent is read
+// through git plumbing instead and nothing on disk moves.
+//
+// Only the prefixes the inventory actually needs are listed, because a
+// recursive listing of a whole platform repository costs more than the
+// question is worth and the answer would be discarded anyway.
+type treeFS struct {
+	g    execGit
+	ctx  context.Context
+	sha  string
+	once bool
+	// files maps a path to its content, filled on first use. A tree does
+	// not change under us -- the sha names it -- so reading it once is safe
+	// and reading it lazily keeps a pass that never asks from paying.
+	files map[string]string
+	dirs  map[string]bool
+	err   error
+}
+
+// treeFSPrefixes are the paths treeFS enumerates. Narrow on purpose; see the
+// type's doc.
+var treeFSPrefixes = []string{"inventory", "deliveries"}
+
+func (t *treeFS) load() error {
+	if t.once {
+		return t.err
+	}
+	t.once = true
+	t.files = map[string]string{}
+	t.dirs = map[string]bool{}
+
+	args := append([]string{"-C", t.g.Dir, "ls-tree", "-r", "--name-only", t.sha, "--"}, treeFSPrefixes...)
+	out, err := t.g.run(t.ctx, t.g.Dir, args)
+	if err != nil {
+		t.err = fmt.Errorf("git ls-tree -r %s: %w", t.sha, err)
+		return t.err
+	}
+	for _, name := range splitLines(out) {
+		if name == "" {
+			continue
+		}
+		t.files[name] = ""
+		for d := path.Dir(name); d != "." && d != "/"; d = path.Dir(d) {
+			t.dirs[d] = true
+		}
+	}
+	return nil
+}
+
+func (t *treeFS) Open(name string) (fs.File, error) {
+	if err := t.load(); err != nil {
+		return nil, err
+	}
+	if _, ok := t.dirs[name]; ok {
+		return &treeDir{fsys: t, name: name}, nil
+	}
+	if _, ok := t.files[name]; !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	body, err := t.g.run(t.ctx, t.g.Dir, []string{"-C", t.g.Dir, "show", t.sha + ":" + name})
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+	return &treeFile{name: path.Base(name), r: strings.NewReader(body), size: int64(len(body))}, nil
+}
+
+// ReadDir lets fs.ReadDir and fs.WalkDir work, which is what inventory.Load
+// uses to enumerate records.
+func (t *treeFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if err := t.load(); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []fs.DirEntry
+	add := func(base string, dir bool) {
+		if seen[base] {
+			return
+		}
+		seen[base] = true
+		out = append(out, treeEntry{name: base, dir: dir})
+	}
+	prefix := name + "/"
+	if name == "." {
+		prefix = ""
+	}
+	for f := range t.files {
+		if !strings.HasPrefix(f, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(f, prefix)
+		if i := strings.Index(rest, "/"); i >= 0 {
+			add(rest[:i], true)
+		} else {
+			add(rest, false)
+		}
+	}
+	if len(out) == 0 && name != "." && !t.dirs[name] {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out, nil
+}
+
+// Stat lets fs.Stat answer for a directory, which inventory.Load uses to ask
+// whether inventory/ exists at all.
+func (t *treeFS) Stat(name string) (fs.FileInfo, error) {
+	if err := t.load(); err != nil {
+		return nil, err
+	}
+	if t.dirs[name] {
+		return treeEntry{name: path.Base(name), dir: true}, nil
+	}
+	if _, ok := t.files[name]; ok {
+		return treeEntry{name: path.Base(name)}, nil
+	}
+	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+}
+
+type treeEntry struct {
+	name string
+	dir  bool
+}
+
+func (e treeEntry) Name() string { return e.name }
+func (e treeEntry) IsDir() bool  { return e.dir }
+func (e treeEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e treeEntry) Info() (fs.FileInfo, error) { return e, nil }
+func (e treeEntry) Size() int64                { return 0 }
+func (e treeEntry) Mode() fs.FileMode          { return e.Type() }
+func (e treeEntry) ModTime() time.Time         { return time.Time{} }
+func (e treeEntry) Sys() any                   { return nil }
+
+type treeFile struct {
+	name string
+	r    *strings.Reader
+	size int64
+}
+
+func (f *treeFile) Stat() (fs.FileInfo, error) { return treeFileInfo{f}, nil }
+func (f *treeFile) Read(p []byte) (int, error) { return f.r.Read(p) }
+func (f *treeFile) Close() error               { return nil }
+
+type treeFileInfo struct{ f *treeFile }
+
+func (i treeFileInfo) Name() string       { return i.f.name }
+func (i treeFileInfo) Size() int64        { return i.f.size }
+func (i treeFileInfo) Mode() fs.FileMode  { return 0 }
+func (i treeFileInfo) ModTime() time.Time { return time.Time{} }
+func (i treeFileInfo) IsDir() bool        { return false }
+func (i treeFileInfo) Sys() any           { return nil }
+
+type treeDir struct {
+	fsys *treeFS
+	name string
+}
+
+func (d *treeDir) Stat() (fs.FileInfo, error) {
+	return treeEntry{name: path.Base(d.name), dir: true}, nil
+}
+func (d *treeDir) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: fs.ErrInvalid}
+}
+func (d *treeDir) Close() error { return nil }
+
+// TreeFS returns a read-only fs.FS over sha's tree. See treeFS.
+func (g execGit) TreeFS(ctx context.Context, sha string) (fs.FS, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
+	return &treeFS{g: g, ctx: ctx, sha: sha}, nil
+}
+
+// Parent runs `git rev-parse <sha>^` and reports sha's first parent.
+//
+// ⚠️ A ROOT COMMIT MAKES THAT FAIL, AND THAT IS "NO PARENT", NOT AN ERROR TO
+// PROPAGATE. rev-parse on a ref with no parent exits non-zero with "unknown
+// revision or path not in the working tree" on stderr; there is nothing
+// malformed about the request, there is simply nothing there. Any other
+// failure to resolve the parent (git itself misbehaving, an unreadable
+// object) is folded into the same false: the caller's contract is "skip the
+// comparison", never "refuse the commit for a git problem reading its own
+// history" -- see the caller's own doc for why.
+func (g execGit) Parent(ctx context.Context, sha string) (string, bool) {
+	if err := checkRef(sha); err != nil {
+		return "", false
+	}
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "rev-parse", sha + "^"})
+	if err != nil {
+		return "", false
+	}
+	lines := splitLines(out)
+	if len(lines) != 1 || lines[0] == "" {
+		return "", false
+	}
+	return lines[0], true
 }

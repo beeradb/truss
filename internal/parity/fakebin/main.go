@@ -111,6 +111,14 @@ func tofu(f fixtures, args []string) int {
 		if len(show) == 0 {
 			show = json.RawMessage(`{"resource_changes":[]}`)
 		}
+		// plan.Declarations refuses a document with no "configuration" key
+		// outright -- real `tofu show -json` always carries one -- and the
+		// corpus was recorded before that gate existed, so no fixture in it
+		// carries one either. None of these recordings are about a
+		// provisioner or a forbidden resource type, so the honest answer for
+		// every one of them is "declares nothing", supplied here rather than
+		// by editing 43 recorded fixtures to say the same thing by hand.
+		show = ensureConfiguration(show)
 		os.Stdout.Write(show)
 		fmt.Println()
 		return 0
@@ -155,6 +163,26 @@ func git(f fixtures, args []string) int {
 	default: // clone, fetch, checkout: nothing reads their output
 		return 0
 	}
+}
+
+// ensureConfiguration adds an empty "configuration" key to raw when it does
+// not already carry one, leaving every other key untouched. Used only to
+// backfill the recorded corpus's `tofu show` fixtures -- see the ⚠️ at the
+// one call site.
+func ensureConfiguration(raw json.RawMessage) json.RawMessage {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return raw
+	}
+	if _, ok := doc["configuration"]; ok {
+		return raw
+	}
+	doc["configuration"] = json.RawMessage(`{"root_module":{}}`)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 func has(args []string, want string) bool { return index(args, want) >= 0 }

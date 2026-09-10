@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"encoding/xml"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/beeradb/truss/internal/gates"
@@ -759,6 +761,21 @@ type fakeGit struct {
 	// TreeRoots reproduces the bash's exact ls-tree and must not widen.
 	TreeRenderUnitsByCommit map[string][]string
 
+	// TreeFSBySha is the tree a commit exposes to inventory.Load. An absent
+	// entry is an EMPTY filesystem rather than an error, which is what a
+	// deployment that has not adopted the inventory looks like -- the pass
+	// must skip, not refuse, and a fixture that errored instead would hide
+	// that distinction.
+	TreeFSBySha map[string]fs.FS
+	TreeFSErr   error
+
+	// ParentBySha answers Parent: a key present means sha has that parent, a
+	// key absent means "no parent" -- the same "absence is the ordinary
+	// default" shape as TreeFSBySha, and it is what every existing test gets
+	// for free by never setting it: no test here claims a commit has a
+	// parent unless it is exercising CheckMoves.
+	ParentBySha map[string]string
+
 	// PushedRefs records every PushRef as "<ref>=<sha>". Whether the
 	// delivery ref moved AT ALL is the property the ref gate exists to
 	// control, so a test asserting a refusal has to be able to see it --
@@ -846,6 +863,21 @@ func (g *fakeGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 
 func (g *fakeGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
 	return g.TreeRenderUnitsByCommit[sha], nil
+}
+
+func (g *fakeGit) TreeFS(ctx context.Context, sha string) (fs.FS, error) {
+	if g.TreeFSErr != nil {
+		return nil, g.TreeFSErr
+	}
+	if f, ok := g.TreeFSBySha[sha]; ok {
+		return f, nil
+	}
+	return fstest.MapFS{}, nil
+}
+
+func (g *fakeGit) Parent(ctx context.Context, sha string) (string, bool) {
+	p, ok := g.ParentBySha[sha]
+	return p, ok
 }
 
 func (g *fakeGit) PushRef(ctx context.Context, sha, ref string) error {
@@ -954,14 +986,24 @@ func (f *fakeTofu) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, 
 // exercising the gate on the one input it does not apply to. The fixture was
 // the bug, so the default is now a plan with a real change in it and the
 // empty one is asked for explicitly by the tests that mean it.
-var changingPlanJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["create"],"before":null,"after":{}}}]}`)
+//
+// ⚠️ "configuration" IS PRESENT AND DECLARES NOTHING, AND THAT IS NOT
+// DECORATION. plan.Declarations refuses a document with no "configuration"
+// key outright -- real `tofu show -json` always carries one -- so once
+// applyOneRoot started calling it on every plan, this fixture (and every
+// test that never overrides ShowJSONBytes) would have been refused by the
+// declarations gate instead of exercising whatever it actually means to
+// test. A fixture that does not carry what a real plan carries is the bug
+// here, not the gate; see AGENTS.md, "when a fixture and production
+// disagree, the fixture is the bug."
+var changingPlanJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["create"],"before":null,"after":{}}}],"configuration":{"root_module":{}}}`)
 
 // noopPlanJSON is a plan whose resource_changes is empty -- the shape a
 // clean, no-op apply produces, and what a root that has ALREADY been applied
 // re-plans to.
-var noopPlanJSON = []byte(`{"resource_changes":[]}`)
+var noopPlanJSON = []byte(`{"resource_changes":[],"configuration":{"root_module":{}}}`)
 
 // noopAfterApplyJSON is the same resource as changingPlanJSON once that plan
 // has been applied: OpenTofu still emits the entry, with actions ["no-op"],
 // which Canonical drops and countResourceChanges does not count.
-var noopAfterApplyJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["no-op"],"before":{},"after":{}}}]}`)
+var noopAfterApplyJSON = []byte(`{"resource_changes":[{"address":"null_resource.a","change":{"actions":["no-op"],"before":{},"after":{}}}],"configuration":{"root_module":{}}}`)

@@ -329,8 +329,11 @@ func TestAPlanWithTheChangesKeyOmittedIsNotRefused(t *testing.T) {
 	const sha = "emptyplansha"
 	deps, _, _, tofu := gateDeps(t, sha, sha)
 	// No approved digest is filed on purpose: a plan that changes nothing
-	// has nothing to gate, so it must not need one.
-	tofu.ShowJSONBytes = []byte(`{"format_version":"1.2","errored":false}`)
+	// has nothing to gate, so it must not need one. "configuration" is
+	// still present, matching a real `tofu show -json` document -- see the
+	// note on changingPlanJSON for why an absent one is now refused by the
+	// declarations gate rather than read as "changes nothing".
+	tofu.ShowJSONBytes = []byte(`{"format_version":"1.2","errored":false,"configuration":{"root_module":{}}}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
