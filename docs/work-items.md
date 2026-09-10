@@ -966,14 +966,65 @@ regression test. `TestExecGitTreeTofuUnitsAgainstARealRepo`
 (`cmd/truss/git_tofu_units_test.go`) is the direct test of the new tree
 listing against a real git binary.
 
-⚠️ **`KindAnsible` is still an unwidened gap.** `runCommitLoop` has no
+⚠️ **`KindAnsible` is still an unwidened gap, and now the gate shape it needs
+exists without being wired to anything.** `runCommitLoop` still has no
 reader for `ansible/plays/<name>` at all — nothing plans or applies an
 ansible unit, so the kind layer's own claim ("how the applier treats it:
-what binary renders or plans it") is still false for that one kind.
+what binary renders or plans it") is still false for that one kind. An
+unwired kind is a claim, not a capability, and it stays one until something
+in `cmd/truss` actually calls the two packages below.
+
+**Built 2026-09-10, deliberately not wired:** `internal/ansible.Runner`
+drives `ansible-playbook` — `Check` in check mode, `Apply` for real — the
+same shape `render.Runner` and `plan.Runner` use: `Bin` required with no
+default, `Env` the exact child environment (nil means empty, never
+inherited), every byte of stderr forwarded to `Stderr` and never into a
+returned error. It refuses an empty `hosts` slice before exec, because a
+play run with no `--limit` targets every host in the inventory rather than
+the ones named in the diff, and it parses per-host changed counts from
+ansible's `ANSIBLE_STDOUT_CALLBACK=json` output — a field, per AGENTS.md's
+standing rule, never the human-readable PLAY RECAP, which reflows between
+versions. `internal/gates.CheckAnsibleTargets` is the target-side gate: it
+refuses any play whose declared host set is empty (nothing declared must
+never silently become "run against everything", the identical rule
+`Runner`'s own empty-hosts refusal states on the execution side), any
+declared host the tailnet reports unreachable (absent is not "fine"), and
+any device carrying the managed tag with no inventory record — and that
+last case is written to demand refusing **every play in the pass**, not
+only the one that happened to name the intruder, though the function itself
+can only refuse one play's worth of `AnsibleTargets` at a time; enforcing
+"one unknown device stops everything" is the caller's job once wiring
+exists. `internal/gates`' own import allowlist (`fmt`, `strings`, `time` —
+no `sort`) is unchanged; the gate builds its lists in the order its caller
+hands them rather than sorting.
+
+**What wiring needs, none of it started:**
+
+- **A play-to-host mapping**, read from `inventory.Host.Config` (the field
+  is already there — "an ansible unit path, or explicit null" — but nothing
+  inverts it into "this play's declared hosts are every host naming it").
+- **The tailnet sweep's findings**, fed into `AnsibleTargets.Unknown` and
+  `.Unreachable` from `tailnet.Reconcile`'s own `Findings.UnknownTagged` and
+  `.Unreachable` — built, unwired, the same as this.
+- **`ansible-playbook` in the applier's image.** Nothing installs it today;
+  `internal/ansible.Runner.Bin` has no default for the same reason
+  `render.Runner.Bin` does not — a version the two sides of a comparison
+  might disagree about has to be pinned in the image, not resolved from
+  whatever is first on `PATH`, though here there is no second side to agree
+  with, only the reviewed diff.
+- **The applier holding a tailnet identity.** Reaching a host to configure
+  it needs network access to that host, which the applier does not have
+  today — it reaches a forge and a ledger bucket, not a private network.
+  `internal/tailnet` can already read the tailnet's device list to build
+  `Findings`; running a play against a host is a second, larger grant this
+  work item does not scope.
+
 `KindAnsible`'s own doc comment gives the reason it cannot simply reuse
 `applyOneRoot`: ansible has no plan digest, because CI cannot reach the
-hosts a play would run against, so whatever closes this needs a different
-gate shape than the digest gate tofu and render both use.
+hosts a play would run against, so review is the diff itself
+(`docs/credentials.md`'s precedent for the credentials root) plus the
+target check above — a different gate shape than the digest gate tofu and
+render both use, and now built.
 
 ## ~~The two sides of the render digest do not share a derivation~~ (closed)
 
