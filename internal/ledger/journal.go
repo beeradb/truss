@@ -108,6 +108,25 @@ type failedRecord struct {
 // (apply.sh:773) -- no trailing newline, no other keys.
 const noopBody = `{"noop":true}`
 
+// skippedRecord is the body written for a commit skipped through `truss
+// skip` (docs/work-items.md:86-133): skipped, reason, at, in that field
+// order. It lives under the APPLIED prefix, not a prefix of its own --
+// applied/<sha> already means "what happened to this commit in the
+// queue", and `truss why` reads exactly that one key (falling back to
+// failed/<sha>) to answer, so a second prefix would mean two keys to
+// check for the same question. The `"skipped":true` tag is what stops a
+// reader from mistaking this for appliedRecord's `{"roots":...}` shape.
+//
+// Deliberately no `by` field: recording an unverified $USER is theatre --
+// nothing here authenticates it, and a recorded identity nobody checked is
+// worse than an absent one, because it invites trust an unauthenticated
+// string cannot earn.
+type skippedRecord struct {
+	Skipped bool   `json:"skipped"`
+	Reason  string `json:"reason"`
+	At      string `json:"at"`
+}
+
 // failedAtLayout is `date -u +%Y-%m-%dT%H:%M:%SZ` (apply.sh:358).
 const failedAtLayout = "2006-01-02T15:04:05Z"
 
@@ -157,6 +176,24 @@ func (j *Journal) PutApplied(ctx context.Context, sha string, roots map[string]R
 // (apply.sh:773).
 func (j *Journal) PutNoop(ctx context.Context, sha string) error {
 	return j.Store.Put(ctx, j.Layout.AppliedKey(sha), []byte(noopBody))
+}
+
+// PutSkipped records that an operator skipped sha via `truss skip`,
+// advancing HEAD past a commit the applier never applied. Unlike
+// PutFailed's reason -- tofu's own error text, which can run to kilobytes
+// -- reason here is typed by a person at a terminal for exactly this
+// record, so there is nothing worth trimming.
+func (j *Journal) PutSkipped(ctx context.Context, sha, reason string) error {
+	rec := skippedRecord{
+		Skipped: true,
+		Reason:  reason,
+		At:      j.now().UTC().Format(failedAtLayout),
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("ledger: encoding skipped record for %s: %w", sha, err)
+	}
+	return j.Store.Put(ctx, j.Layout.AppliedKey(sha), body)
 }
 
 // PutFailed records why sha failed. The reason is trimmed here,

@@ -20,6 +20,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"github.com/beeradb/truss/internal/repo"
 	"strings"
 	"unicode"
 )
@@ -55,6 +57,15 @@ type gitDriver interface {
 	Commits(ctx context.Context, from, to string) ([]string, error)
 	ChangedFiles(ctx context.Context, sha string) ([]string, error)
 	TreeRoots(ctx context.Context, sha string) ([]string, error)
+
+	// TreeRenderUnits lists every Kustomize unit present in a commit's tree.
+	// It is separate from TreeRoots rather than folded into it because
+	// TreeRoots reproduces the bash's `ls-tree -d ... -- platform projects/`
+	// exactly and internal/parity compares against recordings of that; a
+	// widened listing there would change what the pass plans for commits the
+	// corpus already has answers for.
+	TreeRenderUnits(ctx context.Context, sha string) ([]string, error)
+
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
 }
@@ -163,6 +174,33 @@ func (g execGit) ChangedFiles(ctx context.Context, sha string) ([]string, error)
 // in sha's own tree, reproducing derive_touched_roots' shared-input branch
 // (`git ls-tree -d --name-only <sha> -- platform projects/ | grep -E
 // '^(platform|projects/[^/]+)$'`), filter included.
+// TreeRenderUnits lists the render units in a commit's tree: every
+// baselines/<name> and deliveries/<cluster>/<unit> directory.
+//
+// ⚠️ IT IS -r AND NOT PLAIN -d, BECAUSE THE TWO KINDS SIT AT DIFFERENT
+// DEPTHS. A baseline is one level under its prefix and a delivery is two,
+// so a single non-recursive listing can reach one or the other but never
+// both. Recursing and then asking repo.KindOf about each line is what keeps
+// the depths in one place -- the same function the commit diff is matched
+// against, so a listing and a diff can never disagree about what a directory
+// is.
+func (g execGit) TreeRenderUnits(ctx context.Context, sha string) ([]string, error) {
+	if err := checkRef(sha); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "ls-tree", "-d", "-r", "--name-only", sha, "--", "baselines", "deliveries"})
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree -d -r %s: %w", sha, err)
+	}
+	var units []string
+	for _, line := range splitLines(out) {
+		if kind, ok := repo.KindOf(line); ok && kind == repo.KindRender {
+			units = append(units, line)
+		}
+	}
+	return units, nil
+}
+
 func (g execGit) TreeRoots(ctx context.Context, sha string) ([]string, error) {
 	if err := checkRef(sha); err != nil {
 		return nil, err

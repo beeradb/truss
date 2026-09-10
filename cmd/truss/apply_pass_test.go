@@ -110,7 +110,12 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 		},
 		Git:     git,
 		NewTofu: newTofu,
-		Now:     func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
+		// A fixture that reaches the render path without saying what the
+		// renderer should produce is a fixture with a hole in it, so the
+		// default refuses by name rather than returning empty bytes. A test
+		// that exercises delivery sets deps.NewRender itself.
+		NewRender: func(env []string) renderRunner { return unconfiguredRender{} },
+		Now:       func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
 		VaultConfig: secrets.KVConfig{
 			Addr: vaultSrv.URL, Mount: "platform", Role: "applier", JWTPath: testJWTFile(t),
 		},

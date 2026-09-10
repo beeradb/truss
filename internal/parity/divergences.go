@@ -265,6 +265,28 @@ var Divergences = []Divergence{
 	// INTENDED
 	// -----------------------------------------------------------------
 	{
+		ID:     "UNROOTED-COMMIT-IS-STILL-GATED",
+		Status: StatusIntended,
+		Scenarios: []string{
+			"test_merge_touching_no_root_is_a_noop",
+		},
+		Bash:  "derives the touched roots first, and records `{\"noop\":true}` and advances HEAD for a commit whose root set is empty -- without ever asking the forge how that commit reached main",
+		Truss: "runs the commit gate first, so the same commit is refused: `expected exactly one PR for sha1, found 0`, filed under failed/, HEAD unmoved",
+		Why: "The bash checked the approval, the merged PR and the merge-commit signature only for commits that " +
+			"touched a root. A commit touching anything else -- docs, a CI workflow, a delivery directory -- was " +
+			"filed as a noop and walked past ungated. This scenario's own fixture is the proof: sha1 has no pull " +
+			"request at all, and the bash advances HEAD over it. " +
+			"⚠️ THE RECORD IS THE POINT, NOT THE APPLY. A noop record says TRUSS did nothing; it has never meant " +
+			"nothing was done. For as long as truss was the only reader of the repository the difference was " +
+			"invisible, because an unrooted commit changes nothing truss applies. It stops being invisible the " +
+			"moment anything else reads the tree -- a reconciler tracking a ref this applier advances would apply " +
+			"the very commit truss filed as uneventful, and `applied/` would say main had been clean. " +
+			"The cost is three forge calls per commit, including docs-only ones. That is the price of the queue's " +
+			"records meaning what they say.",
+		Ref: "cmd/truss/apply_cmd.go's \u26a0 on the gate ordering in runCommitLoop; " +
+			"cmd/truss/apply_unrooted_commit_gate_test.go, which reproduces the bash's behaviour as a failure",
+	},
+	{
 		ID:     "EXPIRY-ONE-VAULT-MOUNT",
 		Status: StatusIntended,
 		Scenarios: []string{

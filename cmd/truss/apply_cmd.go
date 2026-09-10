@@ -59,13 +59,18 @@ var _ forgeGateway = (*forge.Client)(nil)
 // applyDeps bundles everything the pass needs, real or faked. cmdApply
 // builds the real set; tests build their own.
 type applyDeps struct {
-	Cfg         config.Config
-	Dir         secrets.Dir
-	Journal     *ledger.Journal
-	Forge       forgeGateway
-	Telegram    notify.Telegram
-	Git         gitDriver
-	NewTofu     tofuFactory
+	Cfg      config.Config
+	Dir      secrets.Dir
+	Journal  *ledger.Journal
+	Forge    forgeGateway
+	Telegram notify.Telegram
+	Git      gitDriver
+	NewTofu  tofuFactory
+	// NewRender builds the Kustomize runner for a delivery unit. Separate
+	// from NewTofu because the two kinds are different executors with
+	// different environments -- a render gets no credentials at all, since
+	// rendering reads nothing but the tree.
+	NewRender   renderFactory
 	Now         func() time.Time
 	Stderr      io.Writer
 	VaultConfig secrets.KVConfig
@@ -235,6 +240,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		NewTofu: func(env []string) tofuRunner {
 			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: stderr, Env: env}
 		},
+		NewRender:         newRenderFactory(getenv, stderr),
 		Now:               time.Now,
 		Stderr:            stderr,
 		VaultConfig:       vcfg,
@@ -685,6 +691,34 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	for _, sha := range commits {
 		d.logf("considering %s", sha)
 
+		// ⚠️ THE GATE RUNS BEFORE THE ROOTS ARE DERIVED, AND THE ORDER IS THE
+		// POINT. It used to run after: a commit whose touched-root set came
+		// back empty was recorded as a noop and HEAD advanced past it without
+		// the approval, the merged-PR check or the merge-commit signature ever
+		// being asked for.
+		//
+		// That was harmless only for as long as truss was the sole reader of
+		// this repository, because a commit touching no root changes nothing
+		// truss applies. It is not a statement that nothing was done -- a noop
+		// record says TRUSS did nothing -- so the moment anything else reads
+		// the tree (a reconciler tracking a ref this applier advances, or a
+		// human trusting `applied/` as the record of what reached main), an
+		// unreviewed commit was being waved through and filed as uneventful.
+		//
+		// The cost is three forge calls for every commit, including the ones
+		// that touch only docs. That is the honest price of the queue's
+		// records meaning what they say.
+		headSHA, _, reason, gateErr := checkCommitGate(ctx, d.Forge, d.Cfg.Approver, sha)
+		if gateErr != nil {
+			reason = gateErr.Error()
+		}
+		if reason != "" {
+			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+			}
+			return last, applied, noop, reason, false
+		}
+
 		changedFiles, err := d.Git.ChangedFiles(ctx, sha)
 		if err != nil {
 			return last, applied, noop, fmt.Sprintf("could not read changed files for %s: %v", sha, err), false
@@ -695,7 +729,18 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		}
 		roots := repo.TouchedRoots(changedFiles, treeRoots)
 
-		if len(roots) == 0 {
+		// The render units are derived separately, from their own tree
+		// listing, because TouchedRoots reproduces the bash's
+		// derive_touched_roots exactly and internal/parity compares it
+		// against recordings of that function. Widening it would change what
+		// the pass plans for commits the corpus already has answers for.
+		treeRenderUnits, err := d.Git.TreeRenderUnits(ctx, sha)
+		if err != nil {
+			return last, applied, noop, fmt.Sprintf("could not read the render units for %s: %v", sha, err), false
+		}
+		renderUnits := renderUnitsFor(changedFiles, treeRenderUnits)
+
+		if len(roots) == 0 && len(renderUnits) == 0 {
 			d.logf("noop: %s touches no root", sha)
 			if err := d.Journal.PutNoop(ctx, sha); err != nil {
 				return last, applied, noop, fmt.Sprintf("could not record noop for %s: %v", sha, err), false
@@ -706,17 +751,6 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 			last = sha
 			noop++
 			continue
-		}
-
-		headSHA, _, reason, gateErr := checkCommitGate(ctx, d.Forge, d.Cfg.Approver, sha)
-		if gateErr != nil {
-			reason = gateErr.Error()
-		}
-		if reason != "" {
-			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
-				reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
-			}
-			return last, applied, noop, reason, false
 		}
 
 		if err := d.Git.Checkout(ctx, headSHA); err != nil {
@@ -740,6 +774,28 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 				return last, applied, noop, reason, false
 			}
 			summaries[root] = summary
+		}
+
+		// ⚠️ RENDERS RUN AFTER EVERY ROOT AND BEFORE THE COMMIT IS RECORDED.
+		// The order between kinds is fixed -- credentials, then tofu, then
+		// render -- and it is the natural one: infrastructure makes the
+		// cluster, delivery ships onto it. Rendering first would verify
+		// manifests against a namespace or a secret that the same commit's
+		// OpenTofu has not created yet.
+		//
+		// Nothing is applied here. The applier renders, compares against
+		// what CI filed, and refuses on a mismatch; a reconciler is what
+		// actually applies the manifests, from a ref this pass advances only
+		// once every unit has passed.
+		for _, unit := range renderUnits {
+			d.logf("rendering %s at %s (head %s)", unit, sha, headSHA)
+			_, reason := renderOneUnit(ctx, d, d.NewRender(renderEnv(d)), headSHA, unit)
+			if reason != "" {
+				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
+					reason = reason + fmt.Sprintf(" (and could not record the failure: %v)", err)
+				}
+				return last, applied, noop, reason, false
+			}
 		}
 
 		if err := d.Journal.PutApplied(ctx, sha, summaries); err != nil {

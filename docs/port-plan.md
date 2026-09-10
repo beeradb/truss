@@ -827,6 +827,12 @@ one job at a time, which requires subcommands. One binary also keeps the image a
 | `apply` | all of `apply.sh` | 5 |
 | `publish` | new, no bash equivalent -- the Vault write-back half of the separate publisher identity (`.recovered/plans/publisher-identity-design.md` §3, §6) | 5 |
 
+`status`, `why <sha>` and `skip <sha>` are not in this table because they post-date it: they are
+the local operator CLI `docs/work-items.md:86-133` asks for ("a binary on my computer I can use
+to inspect the queue and unstick things"), added after this decision record, over the same ledger
+machinery the rows above already built -- no new bash to replace and no new capability besides
+reading and, for `skip` alone, writing what the applier itself already reads and writes.
+
 **Exit-code contract.** `ledger get`: 0 found, **2 absent**, 1 any other error — this is what
 lets `apply.sh` keep `|| die` for HEAD and refuse-with-a-true-reason for a digest (§3.2).
 `gate *`: 0 pass, 1 refuse with the reason on stdout, 2 could-not-ask. `apply`: 0 unless

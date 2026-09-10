@@ -129,11 +129,11 @@ flowchart TD
     P -- no --> TAIL
     P -- yes --> C{a new commit<br/>on main?}
     C -- no --> ROT
-    C -- yes --> N{touches a root?}
+    C -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
+    G1 -- passes --> N{touches a root?}
     N -- no --> ADV[record noop,<br/>advance HEAD] --> C
-    N -- yes --> G1{exactly one merged PR for it ·<br/>approved by the approver at its head sha ·<br/>merge commit signed by the forge itself}
     G1 -- fails any of those --> STOP[stop the queue here:<br/>refuse this commit, alert]
-    G1 -- passes --> PL[plan every root it touched]
+    N -- yes --> PL[plan every root it touched]
     PL --> G2{each plan's digest matches<br/>what CI filed<br/>credentials root is exempt}
     G2 -- no --> STOP
     G2 -- yes --> AP2[apply · record applied,<br/>advance HEAD] --> C
@@ -141,6 +141,16 @@ flowchart TD
     ROT[daily pass only:<br/>re-plan credentials at HEAD, rotate if a boundary passed,<br/>sweep every credential's expiry<br/>skipped if protection failed] --> TAIL
     TAIL[write the heartbeat,<br/>send the alert] --> E([done])
 ```
+
+**Every commit is gated, including the ones that touch no root.** The gate used
+to run only after the touched-root set came back non-empty, so a commit that
+changed only documentation, a CI workflow or anything else outside the roots
+was recorded as a noop and HEAD advanced past it — without the approval, the
+merged pull request or the merge-commit signature ever being asked for. A noop
+record says *truss* did nothing; it has never meant nothing was done, and the
+difference matters the moment anything else reads the same repository. The
+price is three forge calls for every commit rather than only the ones that
+apply something.
 
 Only the very first refusal is a true dead end — no ledger entry to start from
 means there's nothing yet to run a pass against. Every other outcome, whether
