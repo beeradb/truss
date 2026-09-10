@@ -106,9 +106,15 @@ func renderOneUnit(ctx context.Context, d applyDeps, r renderRunner, headSHA, un
 
 	key := d.Journal.Layout.DigestKey(headSHA, unit)
 	if problems := gates.CheckRenderDigest(unit, headSHA, key, mine, approved, approvedFound); len(problems) > 0 {
+		// Recorded before the return, the same way the plan digest gate
+		// records its own refusal before returning: a refusal is a checked
+		// gate, not a skipped one, and truss_render_units/truss_render_refusals
+		// must count it.
+		d.Obs.rendered(true)
 		return "", strings.Join(problems, "; ")
 	}
 
+	d.Obs.rendered(false)
 	d.logf("render for %s matches the one approved at %s", unit, headSHA)
 	return mine, ""
 }
@@ -191,6 +197,13 @@ func publishDeliveryRef(ctx context.Context, d applyDeps, sha string) string {
 		return fmt.Sprintf("could not read the render units at %s: %v", sha, err)
 	}
 	if len(units) == 0 {
+		// ⚠️ NOT PUBLISHED, AND DELIBERATELY NOT UNPROTECTED. A tree with no
+		// delivery units never asks the forge about the ref at all, so it has
+		// no basis to report on its protection. Recording it as unprotected
+		// here would be exactly the conflation truss_delivery_ref_unprotected
+		// exists to prevent: "this deployment does not use delivery" reading
+		// as "delivery is broken and gated commits are stuck".
+		d.Obs.delivered(false)
 		return ""
 	}
 
@@ -199,11 +212,13 @@ func publishDeliveryRef(ctx context.Context, d applyDeps, sha string) string {
 		return fmt.Sprintf("could not read the rulesets protecting %s: %v", deliveryRef, err)
 	}
 	if problems := gates.CheckDeliveryRef(deliveryRef, rs); len(problems) > 0 {
+		d.Obs.deliveryRefIsUnprotected()
 		return strings.Join(problems, "; ")
 	}
 	if err := d.Git.PushRef(ctx, sha, deliveryRef); err != nil {
 		return fmt.Sprintf("could not publish %s to %s: %v", sha, deliveryRef, err)
 	}
+	d.Obs.delivered(true)
 	d.logf("published %s to %s", sha, deliveryRef)
 	return ""
 }

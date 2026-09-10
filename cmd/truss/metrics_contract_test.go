@@ -43,6 +43,7 @@ func fullMetricSet(t *testing.T) metrics.Set {
 	o.rootFailed("platform")
 	o.queued(3)
 	o.digestChecked(true)
+	o.rendered(true)
 	o.contended()
 	o.drifting()
 	o.rotated(true, true)
@@ -50,6 +51,8 @@ func fullMetricSet(t *testing.T) metrics.Set {
 	o.publishResult(true, 3)
 	o.logged(levelWarn)
 	o.ledgerError()
+	o.delivered(true)
+	o.deliveryRefIsUnprotected()
 
 	days := 5
 	return passMetrics(time.Unix(1775779200, 0), time.Minute, true, notify.Report{

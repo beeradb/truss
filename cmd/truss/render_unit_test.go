@@ -488,3 +488,140 @@ func TestAPassWithNoDeliveryUnitsNeverTouchesTheRef(t *testing.T) {
 		t.Errorf("PushedRefs = %v, want nothing pushed", git.PushedRefs)
 	}
 }
+
+// --- the delivery metrics --------------------------------------------------
+
+// TestAPublishedDeliveryReportsItself is truss_delivery_published and
+// truss_render_units/truss_render_refusals seen end to end: a clean publish
+// says so, and says nothing refused it.
+func TestAPublishedDeliveryReportsItself(t *testing.T) {
+	g := newGateway(t)
+	deps, _, git, sha, head := deliveryPass(t, map[string]gates.Rulesets{deliveryRef: protectedDeliveryRulesets()})
+	git.TreeRenderUnitsByCommit[sha] = []string{"deliveries/beta/web"}
+	deps.Cfg.MetricsPushURL = g.srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, head); result.failure != "" {
+		t.Fatalf("result.failure = %q, want none", result.failure)
+	}
+
+	body := g.only(t).body
+	if got := sampleValue(t, body, "truss_delivery_published"); got != "1" {
+		t.Errorf("truss_delivery_published = %s, want 1", got)
+	}
+	if got := sampleValue(t, body, "truss_delivery_ref_unprotected"); got != "0" {
+		t.Errorf("truss_delivery_ref_unprotected = %s, want 0 -- nothing refused this publish", got)
+	}
+	if got := sampleValue(t, body, "truss_render_units"); got != "1" {
+		t.Errorf("truss_render_units = %s, want 1", got)
+	}
+	if got := sampleValue(t, body, "truss_render_refusals"); got != "0" {
+		t.Errorf("truss_render_refusals = %s, want 0", got)
+	}
+}
+
+// TestAnUnprotectedDeliveryRefReportsItself is the metric
+// truss_delivery_ref_unprotected exists for: gated commits piling up with
+// nothing telling a cluster about them. truss_delivery_published must stay
+// 0 -- the pass refused, it did not publish.
+func TestAnUnprotectedDeliveryRefReportsItself(t *testing.T) {
+	g := newGateway(t)
+	deps, _, git, _, head := deliveryPass(t, map[string]gates.Rulesets{})
+	deps.Cfg.MetricsPushURL = g.srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, head)
+	if result.failure == "" {
+		t.Fatal("the pass published onto a ref nothing protects")
+	}
+	if len(git.PushedRefs) != 0 {
+		t.Errorf("PushedRefs = %v, want nothing pushed", git.PushedRefs)
+	}
+
+	body := g.only(t).body
+	if got := sampleValue(t, body, "truss_delivery_ref_unprotected"); got != "1" {
+		t.Errorf("truss_delivery_ref_unprotected = %s, want 1", got)
+	}
+	if got := sampleValue(t, body, "truss_delivery_published"); got != "0" {
+		t.Errorf("truss_delivery_published = %s, want 0 -- refused, not published", got)
+	}
+}
+
+// TestANoDeliveryUnitsPassDoesNotClaimTheRefIsUnprotected is the conflation
+// truss_delivery_ref_unprotected exists to prevent. A deployment that never
+// uses delivery never asks the forge about the ref at all, so it must not
+// report the ref as unprotected -- that would tell somebody who never asked
+// for the feature that gated commits are stuck, when the truth is there is
+// nothing to deliver.
+func TestANoDeliveryUnitsPassDoesNotClaimTheRefIsUnprotected(t *testing.T) {
+	const sha, head = "commitsha3", "headsha1"
+	g := newGateway(t)
+	forgeFake := compliantCommitGate("alice", sha, head)
+	git := &fakeGit{
+		CommitsList:     []string{sha},
+		ChangedByCommit: map[string][]string{sha: {"docs/README.md"}},
+		HasDirFn:        func(string) bool { return true },
+	}
+	deps, _, _ := buildTestDeps(t, forgeFake, git, func([]string) tofuRunner { return &fakeTofu{} })
+	deps.Cfg.MetricsPushURL = g.srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if result := runApplyPass(ctx, deps, head); result.failure != "" {
+		t.Fatalf("result.failure = %q, want none", result.failure)
+	}
+
+	body := g.only(t).body
+	if got := sampleValue(t, body, "truss_delivery_ref_unprotected"); got != "0" {
+		t.Errorf("truss_delivery_ref_unprotected = %s, want 0: a tree with no delivery units never asked the forge about the ref", got)
+	}
+	if got := sampleValue(t, body, "truss_delivery_published"); got != "0" {
+		t.Errorf("truss_delivery_published = %s, want 0: nothing to publish", got)
+	}
+}
+
+// TestARenderRefusalIsCountedSeparatelyFromTheDigestGate is
+// truss_render_refusals seen end to end: a mismatched render must move that
+// series and must NOT move truss_digest_refusals, which is a different gate
+// over a different artefact -- the OpenTofu plan, not the rendered manifest.
+func TestARenderRefusalIsCountedSeparatelyFromTheDigestGate(t *testing.T) {
+	const sha = "commitsha3"
+	const head = "headsha1"
+
+	g := newGateway(t)
+	forgeFake := compliantCommitGate("alice", sha, head)
+	forgeFake.RulesetsByBranch = map[string]gates.Rulesets{deliveryRef: protectedDeliveryRulesets()}
+	git := &fakeGit{
+		CommitsList:             []string{sha},
+		ChangedByCommit:         map[string][]string{sha: {"deliveries/beta/web/kustomization.yaml"}},
+		TreeRenderUnitsByCommit: map[string][]string{sha: {"deliveries/beta/web"}},
+		HasDirFn:                func(string) bool { return true },
+	}
+	newTofu := func(env []string) tofuRunner { return &fakeTofu{} }
+
+	deps, fl, _ := buildTestDeps(t, forgeFake, git, newTofu)
+	deps.Cfg.MetricsPushURL = g.srv.URL
+	deps.NewRender = func(env []string) renderRunner { return fakeRender{out: []byte("ours\n")} }
+	fl.put(deps.Journal.Layout.DigestKey(head, "deliveries/beta/web"),
+		[]byte(render.Digest([]byte("what CI rendered\n"))))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := runApplyPass(ctx, deps, head)
+	if result.failure == "" {
+		t.Fatal("a delivery whose render did not match was allowed through")
+	}
+
+	body := g.only(t).body
+	if got := sampleValue(t, body, "truss_render_units"); got != "1" {
+		t.Errorf("truss_render_units = %s, want 1", got)
+	}
+	if got := sampleValue(t, body, "truss_render_refusals"); got != "1" {
+		t.Errorf("truss_render_refusals = %s, want 1", got)
+	}
+	if got := sampleValue(t, body, "truss_digest_refusals"); got != "0" {
+		t.Errorf("truss_digest_refusals = %s, want 0: the plan gate never ran, only the render gate did", got)
+	}
+}
