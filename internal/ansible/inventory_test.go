@@ -1,6 +1,7 @@
 package ansible
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -234,5 +235,57 @@ func TestRunAlwaysPinsTheGroupNameTransform(t *testing.T) {
 	}
 	if last != "ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS=never" {
 		t.Fatalf("effective setting is %q, so a caller can rename our groups", last)
+	}
+}
+
+// TestRunEmitsTheCallbackOutputWhenTheRunFails is the regression for a
+// failure that explained itself into a buffer nobody read. A real pass ended
+// with two DEPRECATION WARNINGs, "exit status 4" and no error line anywhere,
+// because ANSIBLE_STDOUT_CALLBACK=json -- pinned by this package -- puts the
+// run's detail on STDOUT, which was captured for parseChanged and discarded
+// on the failure path.
+func TestRunEmitsTheCallbackOutputWhenTheRunFails(t *testing.T) {
+	// Writes a recognisable line to stdout, then exits non-zero -- the shape
+	// of an ansible run that says what went wrong and then fails.
+	bin, _, _, _ := fakeAnsiblePlaybookWithInventory(t, `printf '%s' '{"the-task-that-failed":"apt_repository is deprecated"}'; exit 4`)
+	var stderr bytes.Buffer
+	_, err := (Runner{Bin: bin, Stderr: &stderr}).Apply(context.Background(), newPlay(t),
+		[]Target{{Name: "dev-agent", Address: "alpha.invalid"}})
+	if err == nil {
+		t.Fatal("Apply reported success for a run that exited 4")
+	}
+	if !strings.Contains(stderr.String(), "the-task-that-failed") {
+		t.Fatalf("the callback output was discarded; stderr was:\n%s", stderr.String())
+	}
+}
+
+// TestTheErrorStillCarriesNoTranscript pins the half that must NOT change.
+// An error string reaches the ledger and a Telegram message, and a play's
+// transcript can carry a hostname, a task's output or a path on somebody's
+// machine. The detail belongs in the operator's logs, not in the alert.
+func TestTheErrorStillCarriesNoTranscript(t *testing.T) {
+	bin, _, _, _ := fakeAnsiblePlaybookWithInventory(t, `printf '%s' '{"secret-looking":"host detail"}'; exit 4`)
+	_, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), newPlay(t),
+		[]Target{{Name: "dev-agent", Address: "alpha.invalid"}})
+	if err == nil {
+		t.Fatal("Apply reported success for a run that exited 4")
+	}
+	if strings.Contains(err.Error(), "secret-looking") || strings.Contains(err.Error(), "host detail") {
+		t.Fatalf("the transcript leaked into the error, which reaches the ledger and Telegram: %v", err)
+	}
+}
+
+// TestRunSaysNothingExtraWhenTheRunSucceeds keeps the new write off the happy
+// path: a successful run's output is parsed, not printed, and an operator
+// reading logs should not have a JSON document per pass to scroll past.
+func TestRunSaysNothingExtraWhenTheRunSucceeds(t *testing.T) {
+	bin, _, _, _ := fakeAnsiblePlaybookWithInventory(t, `printf '%s' '`+jsonCallback+`'`)
+	var stderr bytes.Buffer
+	if _, err := (Runner{Bin: bin, Stderr: &stderr}).Apply(context.Background(), newPlay(t),
+		[]Target{{Name: "dev-agent", Address: "alpha.invalid"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if strings.Contains(stderr.String(), "JSON callback output follows") {
+		t.Fatalf("a successful run printed the callback dump:\n%s", stderr.String())
 	}
 }
