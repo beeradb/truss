@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -102,18 +103,37 @@ const playEntrypoint = "site.yml"
 // string. The JSON callback's `stats` object is the field.
 const ansibleStdoutCallback = "ANSIBLE_STDOUT_CALLBACK=json"
 
+// ansibleGroupChars pins the group names in the generated inventory to the
+// names truss wrote, and is appended after the caller's Env for the same
+// reason ansibleStdoutCallback is.
+//
+// ⚠️ AN AMBIENT ENVIRONMENT VARIABLE CAN OTHERWISE RENAME OUR GROUPS, AND
+// SILENTLY. Groups are derived from a host's role, and this deployment's
+// roles carry hyphens -- "dev-workstation" -- which ansible considers an
+// invalid character in a group name. Measured against ansible 2.16.3:
+// unset, the group is "dev-workstation" and a warning is printed; with
+// ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS=always it becomes
+// "dev_workstation" with no warning at all, so group_vars/dev-workstation/
+// would quietly stop resolving and a play would run with variables it had
+// always had until somebody exported a variable on the applier.
+//
+// "never" is also the current default, which is exactly why it is written
+// down: a default is a thing that can change, and a behaviour this file
+// depends on should be stated rather than inherited.
+const ansibleGroupChars = "ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS=never"
+
 // Check runs the play in check mode and reports what it WOULD change. It
 // makes no change on any host.
-func (r Runner) Check(ctx context.Context, playDir string, hosts []string) (Result, error) {
-	return r.run(ctx, playDir, hosts, true)
+func (r Runner) Check(ctx context.Context, playDir string, targets []Target) (Result, error) {
+	return r.run(ctx, playDir, targets, true)
 }
 
 // Apply runs the play for real.
-func (r Runner) Apply(ctx context.Context, playDir string, hosts []string) (Result, error) {
-	return r.run(ctx, playDir, hosts, false)
+func (r Runner) Apply(ctx context.Context, playDir string, targets []Target) (Result, error) {
+	return r.run(ctx, playDir, targets, false)
 }
 
-func (r Runner) run(ctx context.Context, playDir string, hosts []string, check bool) (Result, error) {
+func (r Runner) run(ctx context.Context, playDir string, targets []Target, check bool) (Result, error) {
 	if r.Bin == "" {
 		return Result{}, fmt.Errorf("ansible: no ansible-playbook binary configured")
 	}
@@ -130,7 +150,7 @@ func (r Runner) run(ctx context.Context, playDir string, hosts []string, check b
 	// that could produce that flag by accident (strings.Join of nothing is
 	// the empty string, which would build "--limit" with no argument
 	// rather than dropping the flag).
-	if len(hosts) == 0 {
+	if len(targets) == 0 {
 		return Result{}, fmt.Errorf("ansible: refuses to run with no hosts: a play with no --limit runs against every host in the inventory")
 	}
 
@@ -146,7 +166,41 @@ func (r Runner) run(ctx context.Context, playDir string, hosts []string, check b
 		return Result{}, fmt.Errorf("ansible: %s has no %s: a play is a directory and %s is its entrypoint", playDir, playEntrypoint, playEntrypoint)
 	}
 
-	args := []string{play, "--limit", strings.Join(hosts, ",")}
+	// ⚠️ THE INVENTORY IS GENERATED PER RUN, AND WITHOUT ONE THE --limit
+	// ABOVE NARROWS AN EMPTY SET. Before this, no -i was passed at all, so
+	// ansible parsed no inventory, found only the implicit localhost, and
+	// answered a play with "Could not match supplied host pattern,
+	// ignoring: dev-agent" -- a WARNING, not an error, on the way to
+	// reporting a run that configured nothing. Every host truss knows about
+	// lives in its own inventory/ records; this is the bridge between that
+	// and ansible's idea of an inventory, and it is derived rather than
+	// committed so the two cannot disagree.
+	//
+	// ⚠️ WRITTEN 0600 AND REMOVED AFTERWARDS, IN A DIRECTORY ONLY THIS RUN
+	// OWNS. It names every machine in the play and the account each is
+	// logged into as, which is a map of the fleet even though no line of it
+	// is a credential.
+	invDir, err := os.MkdirTemp("", "truss-ansible-inventory")
+	if err != nil {
+		return Result{}, fmt.Errorf("ansible: creating an inventory directory: %v", err)
+	}
+	defer os.RemoveAll(invDir)
+	inv, err := renderInventory(targets)
+	if err != nil {
+		return Result{}, err
+	}
+	invPath := filepath.Join(invDir, "hosts.yml")
+	if err := os.WriteFile(invPath, inv, 0o600); err != nil {
+		return Result{}, fmt.Errorf("ansible: writing the inventory: %v", err)
+	}
+
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, t.Name)
+	}
+	sort.Strings(names)
+
+	args := []string{play, "-i", invPath, "--limit", strings.Join(names, ",")}
 	if check {
 		args = append(args, "--check")
 	}
@@ -215,7 +269,7 @@ func (r Runner) explicitEnv() []string {
 	if r.Env != nil {
 		env = append(env, r.Env...)
 	}
-	return append(env, ansibleStdoutCallback)
+	return append(env, ansibleStdoutCallback, ansibleGroupChars)
 }
 
 // exitOnly reduces an exec error to its status, mirroring

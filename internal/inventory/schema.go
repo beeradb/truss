@@ -108,6 +108,25 @@ type Access struct {
 	// machine up: a name here that only the tailnet resolves is a record
 	// that says "address" and means "tailscale".
 	Address string `json:"address"`
+	// User is the account a play logs in as, rendered into the generated
+	// ansible inventory as ansible_user. Empty means "unstated", and an
+	// unstated user is left out of the inventory entirely so ansible's own
+	// default applies -- a play's remote_user, or the invoking account.
+	//
+	// ⚠️ IT IS ORTHOGONAL TO Via, WHICH IS WHY IT SITS BESIDE Address
+	// RATHER THAN INSIDE THE ADDRESS CASE. How a machine is RESOLVED and
+	// who you log in AS are different questions: a tailnet host is reached
+	// by name and still has an account, and the pair would have to be
+	// restated the day a host moves from an address to the tailnet --
+	// which is precisely the transition this deployment performs on every
+	// machine it builds.
+	//
+	// ⚠️ AND IT IS THE ONE PLACE THE SSH ACCOUNT IS WRITTEN DOWN. Before
+	// this field the account existed only in somebody's shell history:
+	// `root` on one host, `deploy` on another, and nothing in the tree
+	// recording which. A record that says how a machine is reached but not
+	// who reaches it is half an answer.
+	User string `json:"user"`
 }
 
 // Cluster is one Kubernetes cluster.

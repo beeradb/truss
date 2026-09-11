@@ -20,8 +20,8 @@ import (
 // convergence check -- without an ansible-playbook binary or a machine to
 // point it at.
 type ansibleRunner interface {
-	Check(ctx context.Context, playDir string, hosts []string) (ansible.Result, error)
-	Apply(ctx context.Context, playDir string, hosts []string) (ansible.Result, error)
+	Check(ctx context.Context, playDir string, targets []ansible.Target) (ansible.Result, error)
+	Apply(ctx context.Context, playDir string, targets []ansible.Target) (ansible.Result, error)
 }
 
 // ansibleFactory builds a runner for one pass, mirroring tofuFactory and
@@ -120,12 +120,19 @@ func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA 
 
 		playDir := d.Cfg.Workdir + "/" + plan.play
 
+		// ⚠️ BUILT FROM THE SAME NAMES THE GATE JUST VOUCHED FOR, never
+		// from a second walk of the snapshot. plan.declared is what the
+		// evidence was gathered about; a target list assembled any other
+		// way could name a machine no provider was asked about, which is
+		// the one thing the gate above exists to prevent.
+		dial := ansibleTargets(snap, plan.declared)
+
 		// ⚠️ CHECK MODE FIRST, AND ITS FAILURE REFUSES BEFORE ANYTHING
 		// CHANGES. This is the closest thing a play has to a plan: an error
 		// here -- an unreachable host, a task that cannot evaluate, a
 		// missing variable -- is found while every machine is still
 		// untouched, rather than on host four of six.
-		before, err := r.Check(ctx, playDir, plan.declared)
+		before, err := r.Check(ctx, playDir, dial)
 		if err != nil {
 			return fmt.Sprintf("check mode refused %s at %s before anything ran: %v", plan.play, headSHA, err)
 		}
@@ -133,7 +140,7 @@ func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA 
 			d.logf("ansible: %s would change %d task(s) on %s", plan.play, before.ChangedByHost[h], h)
 		}
 
-		if _, err := r.Apply(ctx, playDir, plan.declared); err != nil {
+		if _, err := r.Apply(ctx, playDir, dial); err != nil {
 			return fmt.Sprintf("could not run %s at %s: %v", plan.play, headSHA, err)
 		}
 
@@ -144,7 +151,7 @@ func runAnsibleUnits(ctx context.Context, d applyDeps, r ansibleRunner, headSHA 
 		// failing the pass here would wedge the queue behind a change that
 		// worked. This is the drift posture the whole project keeps: name,
 		// never reconcile, and never punish the commit for what it revealed.
-		after, err := r.Check(ctx, playDir, plan.declared)
+		after, err := r.Check(ctx, playDir, dial)
 		if err != nil {
 			d.logf("ansible: could not re-check %s at %s after applying it, so its convergence is unknown: %v", plan.play, headSHA, err)
 			continue
@@ -167,6 +174,47 @@ type playPlan struct {
 	// still in the list: an empty declared set is a refusal
 	// (CheckAnsibleTargets), not something to quietly skip.
 	declared []string
+}
+
+// ansibleTargets turns host NAMES into everything ansible needs to reach
+// each machine, reading each one's own inventory record.
+//
+// ⚠️ A NAME WITH NO RECORD YIELDS A TARGET WITH NO ADDRESS, WHICH IS
+// CORRECT AND NOT A HOLE. Only playHosts produces these names, and it
+// produces them BY iterating the snapshot, so a missing record is
+// unreachable here; if a future caller manages it anyway, a nameless
+// address means ansible connects to the name -- the same behaviour a
+// tailnet host gets, and a connection failure naming the host, rather than
+// a silent omission from the inventory that would read as "configured".
+func ansibleTargets(s inventory.Snapshot, names []string) []ansible.Target {
+	out := make([]ansible.Target, 0, len(names))
+	for _, n := range names {
+		t := ansible.Target{Name: n}
+		if h, ok := s.Hosts[n]; ok && h.Access != nil {
+			// Address only for a host reached AT one. A tailnet host's
+			// address is its name, which the renderer writes by writing
+			// no ansible_host at all -- see ansible.Target.Address.
+			if h.Access.Via == inventory.AccessAddress {
+				t.Address = h.Access.Address
+			}
+			t.User = h.Access.User
+		}
+		// ⚠️ GROUPS ARE READ OFF THE RECORD, NEVER AUTHORED SEPARATELY.
+		// A group list maintained beside the inventory is a second copy of
+		// "which machines are dev workstations" and would be the stale one.
+		// role is always present; cluster is optional and nil for a machine
+		// that is in none.
+		if h, ok := s.Hosts[n]; ok {
+			if h.Role != "" {
+				t.Groups = append(t.Groups, h.Role)
+			}
+			if h.Cluster != nil && *h.Cluster != "" {
+				t.Groups = append(t.Groups, *h.Cluster)
+			}
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // playNames is the plays of a plan list, for a message that has to name
