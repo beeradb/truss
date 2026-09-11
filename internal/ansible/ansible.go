@@ -25,7 +25,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -66,6 +68,26 @@ type Result struct {
 	// returns, which a caller hashes or files as it sees fit.
 	Raw []byte
 }
+
+// playEntrypoint is the file INSIDE a play directory that ansible-playbook
+// is actually handed. Callers pass the directory, because everywhere else in
+// this system a play IS a directory.
+//
+// ⚠️ AND THE OBVIOUS WORKAROUND -- POINTING A HOST RECORD AT THE FILE --
+// FAILS SILENTLY, WHICH IS WHY THE JOIN LIVES HERE AND NOT IN THE
+// INVENTORY. git.TreeAnsibleUnits lists plays with `ls-tree -d`, so only a
+// directory can ever BE a unit; repo.KindOf classifies ansible/plays/<name>/
+// and rejects the directory above it; and playHosts matches a host's
+// `config` against the unit path by EXACT equality. A record saying
+// ansible/plays/<name>/site.yml therefore matches no unit at all: the play
+// runs against zero hosts, reports applied=0, and reads as a clean pass.
+// That silent no-op is strictly worse than the error this constant fixes,
+// so the directory stays the unit and the entrypoint is named right here.
+//
+// Measured 2026-09-10: a real pass failed with ansible's own "the playbook:
+// /work/repo/ansible/plays/dev-workstation does not appear to be a file",
+// which names the path we built and not the convention it broke.
+const playEntrypoint = "site.yml"
 
 // ansibleStdoutCallback pins the run to ansible's own JSON callback plugin.
 // It is appended to the child's environment after the caller's own Env, so
@@ -112,7 +134,19 @@ func (r Runner) run(ctx context.Context, playDir string, hosts []string, check b
 		return Result{}, fmt.Errorf("ansible: refuses to run with no hosts: a play with no --limit runs against every host in the inventory")
 	}
 
-	args := []string{playDir, "--limit", strings.Join(hosts, ",")}
+	// ⚠️ STATTED BEFORE EXEC so the refusal names the convention rather
+	// than the path. ansible's own message for this is "does not appear to
+	// be a file", which sends a reader looking at the path we constructed
+	// instead of at the missing site.yml -- it cost a debugging pass in
+	// the wrong layer on 2026-09-10. IsRegular, not merely "exists": a
+	// directory named site.yml would satisfy a bare Stat and then fail
+	// inside ansible with that same unhelpful sentence.
+	play := filepath.Join(playDir, playEntrypoint)
+	if info, err := os.Stat(play); err != nil || !info.Mode().IsRegular() {
+		return Result{}, fmt.Errorf("ansible: %s has no %s: a play is a directory and %s is its entrypoint", playDir, playEntrypoint, playEntrypoint)
+	}
+
+	args := []string{play, "--limit", strings.Join(hosts, ",")}
 	if check {
 		args = append(args, "--check")
 	}
