@@ -207,7 +207,7 @@ grouping key, on top of the labels below.
 | `truss_pass_commits_applied` | | commits this pass applied |
 | `truss_pass_commits_noop` | | commits recorded as touching no root |
 | `truss_queue_depth` | | commits waiting when the pass looked — **absent** when it never reached the queue |
-| `truss_pass_lock_contended` | | 1 when another holder had the state lock |
+| `truss_pass_lock_contended` | | 1 when another holder had the state lock — a lock held past `lockLeakAfter` is a `lock`-class failure instead, not contention |
 | `truss_pass_ledger_errors` | | ledger objects that could not be written |
 | `truss_pass_log_events` | `level` | lines logged at `warn` and `error` |
 | `truss_gate_ok` | `gate` | 1 when `protection` / `rulesets` met the bar |

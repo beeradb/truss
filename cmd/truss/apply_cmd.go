@@ -142,6 +142,44 @@ type applyDeps struct {
 // HTTP call -- the publisher's own work is at most a handful of those.
 const handoffTimeout = 30 * time.Second
 
+// lockLeakAfter is how long a state lock may be held before truss stops
+// reading it as another applier working and starts reading it as one that
+// died holding it.
+//
+// ⚠️ CONTENTION AND A LEAK LOOK IDENTICAL, AND THE WRONG READING COSTS DAYS.
+// A backend lock is an object with no lease and no expiry: nothing reclaims
+// it when the holder is killed. Deferring is right for a live holder and
+// wrong for a corpse -- measured 2026-09-07, a lock taken by a pod that no
+// longer existed blocked every pass for sixteen hours while each one
+// reported a plausible reason to wait and exited 0.
+//
+// Thirty minutes is longer than any pass this has been run against and far
+// shorter than that incident. Truss still never breaks a lock by itself:
+// deciding one is stale means deciding nobody is mid-apply, and being wrong
+// corrupts state. It says so, loudly, and leaves the breaking to a person.
+const lockLeakAfter = 30 * time.Minute
+
+// staleLockReason returns the failure for a lock held past lockLeakAfter, or
+// empty for contention that is still plausibly live -- including a lock whose
+// message carried no readable age, which must stay contention rather than
+// become a guess.
+func (d applyDeps) staleLockReason(root string, err error) string {
+	var busy *plan.LockBusyError
+	if !errors.As(err, &busy) || busy.Info.Created.IsZero() {
+		return ""
+	}
+	held := d.now().Sub(busy.Info.Created)
+	if held < lockLeakAfter {
+		return ""
+	}
+	// The holder goes to the log, not to the reason: the reason is written
+	// to the ledger and sent to a chat, and Who is a hostname.
+	d.logf("state lock on %s was taken by %s and has not been released for %s", root, busy.Info.Who, held.Round(time.Minute))
+	d.Obs.failed(classLock)
+	return fmt.Sprintf("the state lock for %s has been held for %s, far longer than a pass takes -- its holder is gone, not working. Confirm nothing is mid-apply, then clear lock %s with `tofu force-unlock`; the next pass applies it.",
+		root, held.Round(time.Minute), busy.Info.ID)
+}
+
 func (d applyDeps) now() time.Time {
 	if d.Now != nil {
 		return d.Now()
@@ -1433,6 +1471,9 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 
 	if err := timed("init", func() error { return runner.Init(ctx, rootDir) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
+			if reason := d.staleLockReason(root, err); reason != "" {
+				return ledger.RootSummary{}, false, reason
+			}
 			return ledger.RootSummary{}, true, ""
 		}
 		d.Obs.failed(classPlan)
@@ -1440,6 +1481,9 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	}
 	if err := timed("plan", func() error { return runner.Plan(ctx, rootDir, planFile) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
+			if reason := d.staleLockReason(root, err); reason != "" {
+				return ledger.RootSummary{}, false, reason
+			}
 			return ledger.RootSummary{}, true, ""
 		}
 		d.Obs.failed(classPlan)
@@ -1463,6 +1507,9 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 	})
 	if err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
+			if reason := d.staleLockReason(root, err); reason != "" {
+				return ledger.RootSummary{}, false, reason
+			}
 			return ledger.RootSummary{}, true, ""
 		}
 		d.Obs.failed(classPlan)
@@ -1582,6 +1629,9 @@ func applyOneRoot(ctx context.Context, d applyDeps, cc *credCache, baseEnv []str
 
 	if err := timed("apply", func() error { return runner.Apply(ctx, rootDir, planFile) }); err != nil {
 		if errors.Is(err, plan.ErrLockBusy) {
+			if reason := d.staleLockReason(root, err); reason != "" {
+				return ledger.RootSummary{}, false, reason
+			}
 			return ledger.RootSummary{}, true, ""
 		}
 		d.Obs.failed(classApply)
