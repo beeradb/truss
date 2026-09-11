@@ -112,6 +112,10 @@ type applyDeps struct {
 	// implicitly -- §2 item 9) can still find the tofu binary and its
 	// plugin cache.
 	PATH, HOME string
+	// CollectionsPath is ANSIBLE_COLLECTIONS_PATH, passed through to a
+	// play by name. See ansibleCollectionsPath for why an image's own ENV
+	// cannot do this job.
+	CollectionsPath string
 	// HandoffSocket is the path to the publisher's Unix socket
 	// (design publisher-identity-design.md §3). Set by loadHandoffConfig,
 	// which refuses to start rather than leave it empty on the one pass
@@ -338,6 +342,7 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		CloudflareBaseURL: getenv("CLOUDFLARE_API_BASE_URL"),
 		PATH:              getenv("PATH"),
 		HOME:              getenv("HOME"),
+		CollectionsPath:   ansibleCollectionsPath(getenv),
 		HandoffSocket:     handoffSocket,
 		Handoff:           handoff.Send,
 	}
