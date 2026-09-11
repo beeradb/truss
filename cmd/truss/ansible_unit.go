@@ -361,7 +361,11 @@ func sortedHosts(m map[string]int) []string {
 // in an arbitrary play the applier's cloud credentials, on someone else's
 // machine, which is the reach ansible.Runner.Env's own doc refuses.
 func ansibleEnv(d applyDeps) []string {
-	return []string{"PATH=" + d.PATH, "HOME=" + d.HOME}
+	env := []string{"PATH=" + d.PATH, "HOME=" + d.HOME}
+	if d.CollectionsPath != "" {
+		env = append(env, "ANSIBLE_COLLECTIONS_PATH="+d.CollectionsPath)
+	}
+	return env
 }
 
 // defaultAnsibleBin is what a deployment gets when it does not set
@@ -370,6 +374,33 @@ func ansibleEnv(d applyDeps) []string {
 // config_test.go pins the exact count of those and this knob is not the
 // applier's to grow.
 const defaultAnsibleBin = "/usr/local/bin/ansible-playbook"
+
+// ansibleCollectionsPath is where ansible-playbook should look for
+// collections, passed through from the process environment.
+//
+// ⚠️ AN IMAGE CANNOT SET THIS WITH `ENV` AND HAVE IT REACH THE PLAY, AND
+// truss's OWN SAFETY PROPERTY IS WHY. ansible.Runner builds the child's
+// environment EXPLICITLY -- "Nil means an empty environment, never an
+// inherited one", because inheriting would hand a play running as root on
+// somebody else's machine every cloud credential this process holds. So a
+// Dockerfile line like
+//
+//	ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
+//
+// is silently discarded, and a collection installed anywhere but ansible's
+// own default search path is invisible. Measured 2026-09-11: a pass failed
+// with "couldn't resolve module/action 'ansible.posix.mount'" while
+// ansible.posix:2.2.2 was pinned in `ansible-collections` and installed in
+// the image. The collection was there; nothing told ansible where.
+//
+// ⚠️ NAMED PASSTHROUGH, NOT INHERITANCE. This is one variable, read by
+// name, exactly as ANSIBLE_BIN already is -- it does not weaken the rule
+// above, which is about the WHOLE environment crossing into a play. Unset
+// means unset: ansible's own defaults apply, which is correct for a
+// deployment that installs collections where ansible already looks.
+func ansibleCollectionsPath(getenv func(string) string) string {
+	return getenv("ANSIBLE_COLLECTIONS_PATH")
+}
 
 func ansibleBin(getenv func(string) string) string {
 	if bin := getenv("ANSIBLE_BIN"); bin != "" {

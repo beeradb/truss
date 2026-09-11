@@ -582,3 +582,55 @@ func TestAnsibleTargetsReadsEverythingOffTheRecord(t *testing.T) {
 		t.Fatalf("role and cluster did not both become groups: %+v", got[1].Groups)
 	}
 }
+
+// TestAnsibleEnvCarriesTheCollectionsPath is the regression for a failure
+// that looked like a missing collection and was not one. A pass failed with
+//
+//	[ERROR]: couldn't resolve module/action 'ansible.posix.mount'
+//
+// while ansible.posix:2.2.2 was pinned in `ansible-collections` and installed
+// into the image at /opt/ansible/collections. The image also set
+//
+//	ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
+//
+// ⚠️ AND THAT LINE COULD NEVER HAVE WORKED, because ansible.Runner builds
+// the child's environment EXPLICITLY and inherits nothing -- a property that
+// exists so a play running as root on somebody else's machine does not
+// receive every cloud credential this process holds. The safety rule
+// silently ate the configuration.
+func TestAnsibleEnvCarriesTheCollectionsPath(t *testing.T) {
+	env := ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier", CollectionsPath: "/opt/ansible/collections"})
+	var got string
+	for _, e := range env {
+		if strings.HasPrefix(e, "ANSIBLE_COLLECTIONS_PATH=") {
+			got = e
+		}
+	}
+	if got != "ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections" {
+		t.Fatalf("ansibleEnv = %q; the collections path never reaches ansible-playbook", env)
+	}
+}
+
+// TestAnsibleEnvOmitsAnUnsetCollectionsPath pins that unset means UNSET, not
+// empty-string-set. ANSIBLE_COLLECTIONS_PATH="" is not the same as absent:
+// ansible would read it as a path list containing nothing and stop
+// consulting its own defaults, which would break a deployment that installs
+// collections where ansible already looks.
+func TestAnsibleEnvOmitsAnUnsetCollectionsPath(t *testing.T) {
+	for _, e := range ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier"}) {
+		if strings.HasPrefix(e, "ANSIBLE_COLLECTIONS_PATH") {
+			t.Fatalf("an unset collections path was passed through anyway: %q", e)
+		}
+	}
+}
+
+// TestAnsibleEnvStillInheritsNothingElse is the guard on the guard. The
+// change above adds ONE named passthrough; it must not have become a door
+// for the whole environment, which is the thing ansible.Runner.Env's doc
+// comment exists to prevent.
+func TestAnsibleEnvStillInheritsNothingElse(t *testing.T) {
+	env := ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier", CollectionsPath: "/opt/c"})
+	if len(env) != 3 {
+		t.Fatalf("ansibleEnv returned %d entries, want exactly PATH, HOME and the collections path: %q", len(env), env)
+	}
+}
