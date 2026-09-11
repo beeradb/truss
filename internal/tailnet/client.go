@@ -10,6 +10,14 @@
 // it, the same inversion this project already refuses for CI. So Client
 // only fetches and decodes; Reconcile only names disagreements. Neither
 // changes anything, here or on the tailnet.
+//
+// ⚠️ THIS IS ONE SOURCE OF EVIDENCE ABOUT HOSTS, NOT THE DEFINITION OF IT.
+// The applier's ansible target gate takes evidence through an interface
+// (cmd/truss/evidence.go), and a deployment that does not run Tailscale
+// reaches its machines at addresses their own inventory records state. What
+// this package uniquely provides is DISCOVERY -- it can name a machine
+// wearing the managed tag that nobody declared, which a provider limited to
+// the addresses the inventory already names can never do.
 package tailnet
 
 import (

@@ -15,19 +15,53 @@ import (
 // its environment to envFile, so a test can inspect what the child was
 // actually given rather than what the caller meant to give it.
 func fakeAnsiblePlaybook(t *testing.T, body string) (bin, argvFile, envFile string) {
+	b, a, e, _ := fakeAnsiblePlaybookWithInventory(t, body)
+	return b, a, e
+}
+
+// fakeAnsiblePlaybookWithInventory also hands back the path the fake binary
+// copies the generated inventory to.
+func fakeAnsiblePlaybookWithInventory(t *testing.T, body string) (bin, argvFile, envFile, invFile string) {
 	t.Helper()
 	dir := t.TempDir()
 	bin = filepath.Join(dir, "ansible-playbook")
 	argvFile = filepath.Join(dir, "argv")
 	envFile = filepath.Join(dir, "env")
+	invFile = filepath.Join(dir, "inventory")
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$@\" >> " + argvFile + "\n" +
 		"env >> " + envFile + "\n" +
+		// The generated inventory is removed as soon as run() returns, so
+		// a test that wants to read it has to be handed a copy by the only
+		// thing that sees it alive. $3 is its path -- see argv's shape in
+		// TestApplyBuildsExactArgvWithTheLimit.
+		"[ -f \"$3\" ] && cp \"$3\" " + invFile + "\n" +
 		body + "\n"
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 		t.Fatalf("writing fake ansible-playbook: %v", err)
 	}
-	return bin, argvFile, envFile
+	return bin, argvFile, envFile, invFile
+}
+
+// newPlay makes a REAL play directory, because run() now stats
+// <playDir>/site.yml before exec. A test that wants the argv must have one
+// on disk; a test that passes a path with no site.yml is testing the
+// refusal, not the argv, and says so.
+func newPlay(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "dev-beta")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("making play dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "site.yml"), []byte("- hosts: all\n"), 0o600); err != nil {
+		t.Fatalf("writing site.yml: %v", err)
+	}
+	return dir
+}
+
+// argvLines splits the fake binary's argv file into arguments.
+func argvLines(s string) []string {
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
 // jsonCallback is a minimal well-formed JSON callback document naming two
@@ -36,8 +70,9 @@ const jsonCallback = `{"stats":{"host1.invalid":{"changed":2},"host2.invalid":{"
 
 func TestApplyBuildsExactArgvWithTheLimit(t *testing.T) {
 	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	dir := newPlay(t)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	_, err := r.Apply(context.Background(), "ansible/plays/dev-beta", []string{"host1.invalid", "host2.invalid"})
+	_, err := r.Apply(context.Background(), dir, []Target{{Name: "host1.invalid", Address: "alpha.invalid"}, {Name: "host2.invalid", Address: "beta.invalid"}})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -45,9 +80,21 @@ func TestApplyBuildsExactArgvWithTheLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading argv: %v", err)
 	}
-	want := "ansible/plays/dev-beta\n--limit\nhost1.invalid,host2.invalid\n"
-	if got := string(argv); got != want {
-		t.Fatalf("argv = %q, want exactly %q", got, want)
+	got := argvLines(string(argv))
+	if len(got) != 5 {
+		t.Fatalf("argv = %q, want exactly 5 arguments", got)
+	}
+	if want := filepath.Join(dir, "site.yml"); got[0] != want {
+		t.Fatalf("argv[0] = %q, want %q", got[0], want)
+	}
+	if got[1] != "-i" {
+		t.Fatalf("argv[1] = %q, want %q", got[1], "-i")
+	}
+	if filepath.Base(got[2]) != "hosts.yml" {
+		t.Fatalf("argv[2] = %q, want a generated hosts.yml", got[2])
+	}
+	if got[3] != "--limit" || got[4] != "host1.invalid,host2.invalid" {
+		t.Fatalf("argv[3:] = %q, want --limit host1.invalid,host2.invalid", got[3:])
 	}
 }
 
@@ -56,8 +103,9 @@ func TestApplyBuildsExactArgvWithTheLimit(t *testing.T) {
 // binary, not a different argument order that could hide a divergence.
 func TestCheckAddsTheCheckFlagAndNothingElse(t *testing.T) {
 	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	dir := newPlay(t)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	_, err := r.Check(context.Background(), "ansible/plays/dev-beta", []string{"host1.invalid"})
+	_, err := r.Check(context.Background(), dir, []Target{{Name: "host1.invalid", Address: "alpha.invalid"}})
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
@@ -65,9 +113,12 @@ func TestCheckAddsTheCheckFlagAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading argv: %v", err)
 	}
-	want := "ansible/plays/dev-beta\n--limit\nhost1.invalid\n--check\n"
-	if got := string(argv); got != want {
-		t.Fatalf("argv = %q, want exactly %q", got, want)
+	got := argvLines(string(argv))
+	if len(got) != 6 || got[5] != "--check" {
+		t.Fatalf("argv = %q, want exactly the Apply argv plus a trailing --check", got)
+	}
+	if got[3] != "--limit" || got[4] != "host1.invalid" {
+		t.Fatalf("argv[3:5] = %q, want --limit host1.invalid", got[3:5])
 	}
 }
 
@@ -77,11 +128,12 @@ func TestCheckAddsTheCheckFlagAndNothingElse(t *testing.T) {
 // argvFile, so "argvFile was never created" is the proof exec never ran.
 func TestRunRefusesAnEmptyHostsSliceBeforeExec(t *testing.T) {
 	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	dir := newPlay(t)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	if _, err := r.Apply(context.Background(), "ansible/plays/dev-beta", nil); err == nil {
+	if _, err := r.Apply(context.Background(), dir, nil); err == nil {
 		t.Fatal("Apply accepted an empty hosts slice")
 	}
-	if _, err := r.Check(context.Background(), "ansible/plays/dev-beta", []string{}); err == nil {
+	if _, err := r.Check(context.Background(), dir, []Target{}); err == nil {
 		t.Fatal("Check accepted an empty hosts slice")
 	}
 	if _, err := os.Stat(argvFile); err == nil {
@@ -90,18 +142,18 @@ func TestRunRefusesAnEmptyHostsSliceBeforeExec(t *testing.T) {
 }
 
 func TestRunRefusesWithoutABinaryOrAPlayDir(t *testing.T) {
-	if _, err := (Runner{Stderr: io.Discard}).Apply(context.Background(), "d", []string{"host1.invalid"}); err == nil {
+	if _, err := (Runner{Stderr: io.Discard}).Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err == nil {
 		t.Error("Apply accepted an empty Bin")
 	}
 	bin, _, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
-	if _, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), "", []string{"host1.invalid"}); err == nil {
+	if _, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), "", []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err == nil {
 		t.Error("Apply accepted an empty play directory")
 	}
 }
 
 func TestRunRefusesANilStderr(t *testing.T) {
 	bin, _, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
-	if _, err := (Runner{Bin: bin}).Apply(context.Background(), "d", []string{"host1.invalid"}); err == nil {
+	if _, err := (Runner{Bin: bin}).Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err == nil {
 		t.Error("Apply accepted a nil Stderr")
 	}
 }
@@ -119,7 +171,7 @@ func TestRunDoesNotInheritTheEnvironment(t *testing.T) {
 	t.Setenv("TRUSS_ANSIBLE_CANARY", "must-not-be-inherited")
 	bin, _, envFile := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	if _, err := r.Apply(context.Background(), "d", []string{"host1.invalid"}); err != nil {
+	if _, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	env, err := os.ReadFile(envFile)
@@ -137,7 +189,7 @@ func TestRunDoesNotInheritTheEnvironment(t *testing.T) {
 func TestRunAlwaysSetsTheJSONCallback(t *testing.T) {
 	bin, _, envFile := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
 	r := Runner{Bin: bin, Env: []string{"ANSIBLE_STDOUT_CALLBACK=yaml"}, Stderr: io.Discard}
-	if _, err := r.Apply(context.Background(), "d", []string{"host1.invalid"}); err != nil {
+	if _, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	env, err := os.ReadFile(envFile)
@@ -157,7 +209,7 @@ func TestRunErrorDoesNotCarryTheTranscript(t *testing.T) {
 	bin, _, _ := fakeAnsiblePlaybook(t, `echo "sensitive-host-detail" >&2; exit 3`)
 	var stderr strings.Builder
 	r := Runner{Bin: bin, Stderr: &stderr}
-	_, err := r.Apply(context.Background(), "d", []string{"host1.invalid"})
+	_, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}})
 	if err == nil {
 		t.Fatal("Apply did not fail on a non-zero exit")
 	}
@@ -178,7 +230,7 @@ func TestRunErrorDoesNotCarryTheTranscript(t *testing.T) {
 func TestApplyParsesPerHostChangedCounts(t *testing.T) {
 	bin, _, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	result, err := r.Apply(context.Background(), "d", []string{"host1.invalid", "host2.invalid"})
+	result, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}, {Name: "host2.invalid", Address: "beta.invalid"}})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -200,7 +252,7 @@ func TestApplyParsesPerHostChangedCounts(t *testing.T) {
 func TestApplyRefusesMalformedOutput(t *testing.T) {
 	bin, _, _ := fakeAnsiblePlaybook(t, `printf 'not json at all'`)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	result, err := r.Apply(context.Background(), "d", []string{"host1.invalid"})
+	result, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}})
 	if err == nil {
 		t.Fatal("Apply accepted malformed output")
 	}
@@ -215,7 +267,65 @@ func TestApplyRefusesMalformedOutput(t *testing.T) {
 func TestApplyRefusesOutputWithNoStatsObject(t *testing.T) {
 	bin, _, _ := fakeAnsiblePlaybook(t, `printf '{"plays":[]}'`)
 	r := Runner{Bin: bin, Stderr: io.Discard}
-	if _, err := r.Apply(context.Background(), "d", []string{"host1.invalid"}); err == nil {
+	if _, err := r.Apply(context.Background(), newPlay(t), []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err == nil {
 		t.Fatal("Apply accepted output with no stats object")
+	}
+}
+
+// TestRunHandsAnsibleTheEntrypointAndNotTheDirectory is the regression. A
+// real pass on 2026-09-10 failed with ansible's "does not appear to be a
+// file" because argv[0] was the play DIRECTORY.
+func TestRunHandsAnsibleTheEntrypointAndNotTheDirectory(t *testing.T) {
+	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	dir := newPlay(t)
+	if _, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), dir, []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("reading argv: %v", err)
+	}
+	first := strings.SplitN(string(argv), "\n", 2)[0]
+	if first == dir {
+		t.Fatalf("argv[0] is the play directory %q -- ansible needs a file", first)
+	}
+	if want := filepath.Join(dir, "site.yml"); first != want {
+		t.Fatalf("argv[0] = %q, want %q", first, want)
+	}
+}
+
+// TestRunRefusesAPlayWithNoEntrypointBeforeExec pins that the refusal
+// happens in this package and not inside ansible: argvFile is written by the
+// fake binary on every invocation, so its absence proves exec never ran.
+func TestRunRefusesAPlayWithNoEntrypointBeforeExec(t *testing.T) {
+	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	empty := t.TempDir()
+	_, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), empty, []Target{{Name: "host1.invalid", Address: "alpha.invalid"}})
+	if err == nil {
+		t.Fatal("Apply accepted a play directory with no site.yml")
+	}
+	if !strings.Contains(err.Error(), "site.yml") {
+		t.Fatalf("error does not name the entrypoint: %v", err)
+	}
+	if _, err := os.Stat(argvFile); err == nil {
+		t.Fatal("the binary ran despite a missing entrypoint: argvFile exists")
+	}
+}
+
+// TestRunRefusesAnEntrypointThatIsNotARegularFile is why the check is
+// IsRegular rather than a bare Stat: a DIRECTORY named site.yml exists, and
+// would otherwise reach ansible and fail there with the same unhelpful
+// sentence this change exists to replace.
+func TestRunRefusesAnEntrypointThatIsNotARegularFile(t *testing.T) {
+	bin, argvFile, _ := fakeAnsiblePlaybook(t, `printf '%s' '`+jsonCallback+`'`)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "site.yml"), 0o700); err != nil {
+		t.Fatalf("making a directory named site.yml: %v", err)
+	}
+	if _, err := (Runner{Bin: bin, Stderr: io.Discard}).Apply(context.Background(), dir, []Target{{Name: "host1.invalid", Address: "alpha.invalid"}}); err == nil {
+		t.Fatal("Apply accepted a directory named site.yml")
+	}
+	if _, err := os.Stat(argvFile); err == nil {
+		t.Fatal("the binary ran despite a non-file entrypoint: argvFile exists")
 	}
 }

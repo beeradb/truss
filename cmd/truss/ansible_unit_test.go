@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"github.com/beeradb/truss/internal/ansible"
+	"github.com/beeradb/truss/internal/inventory"
 	"github.com/beeradb/truss/internal/tailnet"
 )
 
@@ -17,11 +19,11 @@ import (
 // rather than reporting a clean run, the same shape unconfiguredRender uses.
 type unconfiguredAnsible struct{}
 
-func (unconfiguredAnsible) Check(ctx context.Context, dir string, hosts []string) (ansible.Result, error) {
+func (unconfiguredAnsible) Check(ctx context.Context, dir string, targets []ansible.Target) (ansible.Result, error) {
 	return ansible.Result{}, errors.New("this fixture did not configure an ansible runner; set deps.NewAnsible")
 }
 
-func (unconfiguredAnsible) Apply(ctx context.Context, dir string, hosts []string) (ansible.Result, error) {
+func (unconfiguredAnsible) Apply(ctx context.Context, dir string, targets []ansible.Target) (ansible.Result, error) {
 	return ansible.Result{}, errors.New("this fixture did not configure an ansible runner; set deps.NewAnsible")
 }
 
@@ -29,6 +31,17 @@ func (unconfiguredAnsible) Apply(ctx context.Context, dir string, hosts []string
 // WHAT ran and WHETHER IT RAN AT ALL -- the second being the property most of
 // this file is about, because a gate that refuses after the play has already
 // configured six machines has not refused anything.
+// targetNames is the host names of a target list, so a fake can keep
+// recording calls as "check <dir> <host,host>" now that the runner is
+// handed addresses and groups as well as names.
+func targetNames(ts []ansible.Target) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.Name)
+	}
+	return out
+}
+
 type fakeAnsible struct {
 	// calls is one entry per invocation: "check <dir> <host,host>" or
 	// "apply <dir> <host,host>". A single ordered list rather than two
@@ -43,9 +56,9 @@ type fakeAnsible struct {
 	applyErr     error
 }
 
-func (f *fakeAnsible) Check(ctx context.Context, dir string, hosts []string) (ansible.Result, error) {
+func (f *fakeAnsible) Check(ctx context.Context, dir string, targets []ansible.Target) (ansible.Result, error) {
 	n := f.count("check")
-	f.calls = append(f.calls, "check "+dir+" "+strings.Join(hosts, ","))
+	f.calls = append(f.calls, "check "+dir+" "+strings.Join(targetNames(targets), ","))
 	if n < len(f.checkErrs) && f.checkErrs[n] != nil {
 		return ansible.Result{}, f.checkErrs[n]
 	}
@@ -58,8 +71,8 @@ func (f *fakeAnsible) Check(ctx context.Context, dir string, hosts []string) (an
 	return f.checkResults[n], nil
 }
 
-func (f *fakeAnsible) Apply(ctx context.Context, dir string, hosts []string) (ansible.Result, error) {
-	f.calls = append(f.calls, "apply "+dir+" "+strings.Join(hosts, ","))
+func (f *fakeAnsible) Apply(ctx context.Context, dir string, targets []ansible.Target) (ansible.Result, error) {
+	f.calls = append(f.calls, "apply "+dir+" "+strings.Join(targetNames(targets), ","))
 	if f.applyErr != nil {
 		return ansible.Result{}, f.applyErr
 	}
@@ -517,5 +530,107 @@ func TestAnsibleUnitsForReadsOnlyTheAnsibleHalf(t *testing.T) {
 	got := ansibleUnitsFor(changed, []string{"ansible/plays/dev-vm"})
 	if len(got) != 1 || got[0] != "ansible/plays/dev-vm" {
 		t.Fatalf("ansibleUnitsFor = %v, want exactly [ansible/plays/dev-vm]", got)
+	}
+}
+
+// TestAnsibleTargetsReadsEverythingOffTheRecord pins the bridge between
+// truss's inventory and ansible's: address, login and groups all come from
+// the host record, so there is no second place where "which machines are
+// dev workstations" is written down and no second place to go stale.
+func TestAnsibleTargetsReadsEverythingOffTheRecord(t *testing.T) {
+	cluster := "hub"
+	snap := inventory.Snapshot{Hosts: map[string]inventory.Host{
+		"dev-agent": {
+			Name: "dev-agent", Role: "dev-workstation",
+			Access: &inventory.Access{Via: inventory.AccessAddress, Address: "dev-agent.invalid:22", User: "root"},
+		},
+		"vaultbox": {
+			Name: "vaultbox", Role: "hub-node", Cluster: &cluster,
+			// ⚠️ AN ADDRESS ON A TAILSCALE RECORD IS INVALID AND IS HERE ON
+			// PURPOSE. inventory.Check refuses the pair, so a fixture that
+			// omitted it made this test VACUOUS -- deleting the Via guard
+			// below still assigned the empty string and every assertion
+			// passed. The guard is belt-and-braces against a record that
+			// reached this function anyway, and a test of it has to hand it
+			// exactly that.
+			Access: &inventory.Access{Via: inventory.AccessTailscale, Address: "vaultbox.invalid:22", User: "deploy"},
+		},
+	}}
+	got := ansibleTargets(snap, []string{"dev-agent", "vaultbox"})
+	if len(got) != 2 {
+		t.Fatalf("got %d targets, want 2: %+v", len(got), got)
+	}
+	if got[0].Address != "dev-agent.invalid:22" || got[0].User != "root" {
+		t.Fatalf("address host: %+v", got[0])
+	}
+	if !reflect.DeepEqual(got[0].Groups, []string{"dev-workstation"}) {
+		t.Fatalf("groups came from somewhere other than role: %+v", got[0].Groups)
+	}
+	// ⚠️ A TAILNET HOST GETS NO ADDRESS, AND THAT IS THE ANSWER, NOT A GAP.
+	// Its record states none -- truss refuses a record carrying both -- so
+	// the name IS the address, which the renderer expresses by writing no
+	// ansible_host and letting ansible connect to inventory_hostname.
+	// Fully-qualifying it against a tailnet domain here would compile one
+	// deployment's DNS into the engine.
+	if got[1].Address != "" {
+		t.Fatalf("a tailscale host was given an address: %+v", got[1])
+	}
+	if got[1].User != "deploy" {
+		t.Fatalf("a tailscale host lost its login, so user and via were wrongly coupled: %+v", got[1])
+	}
+	if !reflect.DeepEqual(got[1].Groups, []string{"hub-node", "hub"}) {
+		t.Fatalf("role and cluster did not both become groups: %+v", got[1].Groups)
+	}
+}
+
+// TestAnsibleEnvCarriesTheCollectionsPath is the regression for a failure
+// that looked like a missing collection and was not one. A pass failed with
+//
+//	[ERROR]: couldn't resolve module/action 'ansible.posix.mount'
+//
+// while ansible.posix:2.2.2 was pinned in `ansible-collections` and installed
+// into the image at /opt/ansible/collections. The image also set
+//
+//	ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
+//
+// ⚠️ AND THAT LINE COULD NEVER HAVE WORKED, because ansible.Runner builds
+// the child's environment EXPLICITLY and inherits nothing -- a property that
+// exists so a play running as root on somebody else's machine does not
+// receive every cloud credential this process holds. The safety rule
+// silently ate the configuration.
+func TestAnsibleEnvCarriesTheCollectionsPath(t *testing.T) {
+	env := ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier", CollectionsPath: "/opt/ansible/collections"})
+	var got string
+	for _, e := range env {
+		if strings.HasPrefix(e, "ANSIBLE_COLLECTIONS_PATH=") {
+			got = e
+		}
+	}
+	if got != "ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections" {
+		t.Fatalf("ansibleEnv = %q; the collections path never reaches ansible-playbook", env)
+	}
+}
+
+// TestAnsibleEnvOmitsAnUnsetCollectionsPath pins that unset means UNSET, not
+// empty-string-set. ANSIBLE_COLLECTIONS_PATH="" is not the same as absent:
+// ansible would read it as a path list containing nothing and stop
+// consulting its own defaults, which would break a deployment that installs
+// collections where ansible already looks.
+func TestAnsibleEnvOmitsAnUnsetCollectionsPath(t *testing.T) {
+	for _, e := range ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier"}) {
+		if strings.HasPrefix(e, "ANSIBLE_COLLECTIONS_PATH") {
+			t.Fatalf("an unset collections path was passed through anyway: %q", e)
+		}
+	}
+}
+
+// TestAnsibleEnvStillInheritsNothingElse is the guard on the guard. The
+// change above adds ONE named passthrough; it must not have become a door
+// for the whole environment, which is the thing ansible.Runner.Env's doc
+// comment exists to prevent.
+func TestAnsibleEnvStillInheritsNothingElse(t *testing.T) {
+	env := ansibleEnv(applyDeps{PATH: "/usr/bin", HOME: "/home/applier", CollectionsPath: "/opt/c"})
+	if len(env) != 3 {
+		t.Fatalf("ansibleEnv returned %d entries, want exactly PATH, HOME and the collections path: %q", len(env), env)
 	}
 }

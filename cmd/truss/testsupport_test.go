@@ -292,6 +292,23 @@ type fakeLedger struct {
 	// when the following AdvanceHead's PUT to the HEAD key fails). Nil
 	// means every PUT succeeds, matching every other test in this package.
 	failPutKeys map[string]bool
+
+	// putRequests counts every PUT that arrived over HTTP -- i.e. through a
+	// real ledger.Store call, never through the .put() seeding helper below,
+	// which writes f.objects directly and does not touch this handler at
+	// all. why_cmd_test.go's read-only guarantee asserts this stays zero
+	// across a full `truss why` run: the one thing a command meant to be
+	// safe to point at a stuck applier must never do is write to the ledger
+	// it is inspecting.
+	putRequests int
+}
+
+// puts reports how many PUT requests this fake ledger has actually
+// received over HTTP.
+func (f *fakeLedger) puts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.putRequests
 }
 
 func newFakeLedger(t *testing.T, bucket string) *fakeLedger {
@@ -359,6 +376,7 @@ func (f *fakeLedger) handle(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		f.mu.Lock()
 		shouldFail := f.failPutKeys[key]
+		f.putRequests++
 		f.mu.Unlock()
 		if shouldFail {
 			w.WriteHeader(http.StatusInternalServerError)

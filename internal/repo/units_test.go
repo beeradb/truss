@@ -60,6 +60,31 @@ func TestInventoryIsASharedInputForUnitsButNotForRoots(t *testing.T) {
 	}
 }
 
+// TestSharedInputTouchedAgreesWithTouchedUnitsWidening pins the exported
+// predicate against the behaviour it exists to explain: whenever a shared
+// input makes TouchedUnits widen to the whole tree, SharedInputTouched must
+// say so, and whenever it does not, SharedInputTouched must not either --
+// same input, same regex, no daylight between them.
+func TestSharedInputTouchedAgreesWithTouchedUnitsWidening(t *testing.T) {
+	tree := []string{"platform", "projects/wren"}
+
+	shared := []string{"inventory/clusters/beta.json"}
+	if !SharedInputTouched(shared) {
+		t.Errorf("SharedInputTouched(%v) = false, want true", shared)
+	}
+	if got := TouchedUnits(shared, tree); len(got) != len(tree) {
+		t.Errorf("TouchedUnits(%v, %v) = %v, want every unit in the tree (SharedInputTouched said this was shared)", shared, tree, got)
+	}
+
+	notShared := []string{"projects/wren/main.tf"}
+	if SharedInputTouched(notShared) {
+		t.Errorf("SharedInputTouched(%v) = true, want false", notShared)
+	}
+	if got := TouchedUnits(notShared, tree); len(got) != 1 {
+		t.Errorf("TouchedUnits(%v, %v) = %v, want just the one unit named in the diff", notShared, tree, got)
+	}
+}
+
 // TestUnitKindsAreCompiledIn pins that a directory cannot declare what it is.
 // TestRootsAreNotConfigurable stops the ENVIRONMENT naming a root; this stops
 // the TREE naming a kind, which is the same property one layer along: what

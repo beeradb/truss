@@ -13,8 +13,10 @@
 // merge-provenance gate, so a play digest would be a check that cannot
 // fail. What review means for a play is the diff itself, the same precedent
 // docs/credentials.md states for the credentials root -- plus the target
-// check in internal/gates, which this package's callers feed from
-// internal/tailnet.Reconcile.
+// check in internal/gates, which this package's callers feed from whichever
+// provider of host evidence vouches for each host -- internal/tailnet's
+// Reconcile for a machine on the tailnet, internal/reach for one at an
+// address its own inventory record states.
 package ansible
 
 import (
@@ -23,7 +25,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -65,6 +70,26 @@ type Result struct {
 	Raw []byte
 }
 
+// playEntrypoint is the file INSIDE a play directory that ansible-playbook
+// is actually handed. Callers pass the directory, because everywhere else in
+// this system a play IS a directory.
+//
+// ⚠️ AND THE OBVIOUS WORKAROUND -- POINTING A HOST RECORD AT THE FILE --
+// FAILS SILENTLY, WHICH IS WHY THE JOIN LIVES HERE AND NOT IN THE
+// INVENTORY. git.TreeAnsibleUnits lists plays with `ls-tree -d`, so only a
+// directory can ever BE a unit; repo.KindOf classifies ansible/plays/<name>/
+// and rejects the directory above it; and playHosts matches a host's
+// `config` against the unit path by EXACT equality. A record saying
+// ansible/plays/<name>/site.yml therefore matches no unit at all: the play
+// runs against zero hosts, reports applied=0, and reads as a clean pass.
+// That silent no-op is strictly worse than the error this constant fixes,
+// so the directory stays the unit and the entrypoint is named right here.
+//
+// Measured 2026-09-10: a real pass failed with ansible's own "the playbook:
+// /work/repo/ansible/plays/dev-workstation does not appear to be a file",
+// which names the path we built and not the convention it broke.
+const playEntrypoint = "site.yml"
+
 // ansibleStdoutCallback pins the run to ansible's own JSON callback plugin.
 // It is appended to the child's environment after the caller's own Env, so
 // a caller cannot weaken it by setting the variable itself -- the same
@@ -78,18 +103,37 @@ type Result struct {
 // string. The JSON callback's `stats` object is the field.
 const ansibleStdoutCallback = "ANSIBLE_STDOUT_CALLBACK=json"
 
+// ansibleGroupChars pins the group names in the generated inventory to the
+// names truss wrote, and is appended after the caller's Env for the same
+// reason ansibleStdoutCallback is.
+//
+// ⚠️ AN AMBIENT ENVIRONMENT VARIABLE CAN OTHERWISE RENAME OUR GROUPS, AND
+// SILENTLY. Groups are derived from a host's role, and this deployment's
+// roles carry hyphens -- "dev-workstation" -- which ansible considers an
+// invalid character in a group name. Measured against ansible 2.16.3:
+// unset, the group is "dev-workstation" and a warning is printed; with
+// ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS=always it becomes
+// "dev_workstation" with no warning at all, so group_vars/dev-workstation/
+// would quietly stop resolving and a play would run with variables it had
+// always had until somebody exported a variable on the applier.
+//
+// "never" is also the current default, which is exactly why it is written
+// down: a default is a thing that can change, and a behaviour this file
+// depends on should be stated rather than inherited.
+const ansibleGroupChars = "ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS=never"
+
 // Check runs the play in check mode and reports what it WOULD change. It
 // makes no change on any host.
-func (r Runner) Check(ctx context.Context, playDir string, hosts []string) (Result, error) {
-	return r.run(ctx, playDir, hosts, true)
+func (r Runner) Check(ctx context.Context, playDir string, targets []Target) (Result, error) {
+	return r.run(ctx, playDir, targets, true)
 }
 
 // Apply runs the play for real.
-func (r Runner) Apply(ctx context.Context, playDir string, hosts []string) (Result, error) {
-	return r.run(ctx, playDir, hosts, false)
+func (r Runner) Apply(ctx context.Context, playDir string, targets []Target) (Result, error) {
+	return r.run(ctx, playDir, targets, false)
 }
 
-func (r Runner) run(ctx context.Context, playDir string, hosts []string, check bool) (Result, error) {
+func (r Runner) run(ctx context.Context, playDir string, targets []Target, check bool) (Result, error) {
 	if r.Bin == "" {
 		return Result{}, fmt.Errorf("ansible: no ansible-playbook binary configured")
 	}
@@ -106,11 +150,57 @@ func (r Runner) run(ctx context.Context, playDir string, hosts []string, check b
 	// that could produce that flag by accident (strings.Join of nothing is
 	// the empty string, which would build "--limit" with no argument
 	// rather than dropping the flag).
-	if len(hosts) == 0 {
+	if len(targets) == 0 {
 		return Result{}, fmt.Errorf("ansible: refuses to run with no hosts: a play with no --limit runs against every host in the inventory")
 	}
 
-	args := []string{playDir, "--limit", strings.Join(hosts, ",")}
+	// ⚠️ STATTED BEFORE EXEC so the refusal names the convention rather
+	// than the path. ansible's own message for this is "does not appear to
+	// be a file", which sends a reader looking at the path we constructed
+	// instead of at the missing site.yml -- it cost a debugging pass in
+	// the wrong layer on 2026-09-10. IsRegular, not merely "exists": a
+	// directory named site.yml would satisfy a bare Stat and then fail
+	// inside ansible with that same unhelpful sentence.
+	play := filepath.Join(playDir, playEntrypoint)
+	if info, err := os.Stat(play); err != nil || !info.Mode().IsRegular() {
+		return Result{}, fmt.Errorf("ansible: %s has no %s: a play is a directory and %s is its entrypoint", playDir, playEntrypoint, playEntrypoint)
+	}
+
+	// ⚠️ THE INVENTORY IS GENERATED PER RUN, AND WITHOUT ONE THE --limit
+	// ABOVE NARROWS AN EMPTY SET. Before this, no -i was passed at all, so
+	// ansible parsed no inventory, found only the implicit localhost, and
+	// answered a play with "Could not match supplied host pattern,
+	// ignoring: dev-agent" -- a WARNING, not an error, on the way to
+	// reporting a run that configured nothing. Every host truss knows about
+	// lives in its own inventory/ records; this is the bridge between that
+	// and ansible's idea of an inventory, and it is derived rather than
+	// committed so the two cannot disagree.
+	//
+	// ⚠️ WRITTEN 0600 AND REMOVED AFTERWARDS, IN A DIRECTORY ONLY THIS RUN
+	// OWNS. It names every machine in the play and the account each is
+	// logged into as, which is a map of the fleet even though no line of it
+	// is a credential.
+	invDir, err := os.MkdirTemp("", "truss-ansible-inventory")
+	if err != nil {
+		return Result{}, fmt.Errorf("ansible: creating an inventory directory: %v", err)
+	}
+	defer os.RemoveAll(invDir)
+	inv, err := renderInventory(targets)
+	if err != nil {
+		return Result{}, err
+	}
+	invPath := filepath.Join(invDir, "hosts.yml")
+	if err := os.WriteFile(invPath, inv, 0o600); err != nil {
+		return Result{}, fmt.Errorf("ansible: writing the inventory: %v", err)
+	}
+
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, t.Name)
+	}
+	sort.Strings(names)
+
+	args := []string{play, "-i", invPath, "--limit", strings.Join(names, ",")}
 	if check {
 		args = append(args, "--check")
 	}
@@ -122,8 +212,33 @@ func (r Runner) run(ctx context.Context, playDir string, hosts []string, check b
 	cmd.Stderr = r.Stderr
 
 	if err := cmd.Run(); err != nil {
-		// No transcript in the error -- see wrapExecError's reasoning on
-		// Stderr's doc comment above. Stderr already has the full run.
+		// ⚠️ THE RUN'S DETAIL IS ON STDOUT, NOT STDERR, AND THIS PACKAGE IS
+		// WHY. ansibleStdoutCallback pins ANSIBLE_STDOUT_CALLBACK=json, so
+		// everything ansible has to say about what it did -- which task, on
+		// which host, and the message -- goes to STDOUT as JSON, where it is
+		// captured into a buffer for parseChanged. Stderr gets warnings.
+		//
+		// This block used to say "Stderr already has the full run" and
+		// return. That was false, and false BECAUSE of the callback pinned
+		// forty lines above: on failure the function returns before parsing,
+		// and the buffer is discarded. Measured 2026-09-11: a pass failed
+		// with two DEPRECATION WARNINGs, "exit status 4", and NO ERROR LINE
+		// ANYWHERE. It took three passes to learn that ansible had been
+		// explaining itself the whole time, into a buffer nobody read.
+		//
+		// ⚠️ IT GOES TO Stderr, NOT INTO THE ERROR, and that distinction is
+		// the original comment's point and still holds: an error string
+		// reaches the ledger and a Telegram message, and a play's transcript
+		// can carry a hostname, a task's output, or a path on somebody's
+		// machine. The operator reading logs should see it; the alert should
+		// not carry it.
+		//
+		// Raw, not parsed. A failed run is the worst moment to depend on the
+		// output being well-formed -- ansible may have died before writing
+		// valid JSON at all, which is exactly the case worth seeing.
+		if stdout.Len() > 0 {
+			fmt.Fprintf(r.Stderr, "\nansible: %s failed; its JSON callback output follows, because the run's detail is on stdout and would otherwise be discarded:\n%s\n", playDir, stdout.Bytes())
+		}
 		return Result{}, fmt.Errorf("ansible: ansible-playbook %s: %v", playDir, exitOnly(err))
 	}
 
@@ -179,7 +294,7 @@ func (r Runner) explicitEnv() []string {
 	if r.Env != nil {
 		env = append(env, r.Env...)
 	}
-	return append(env, ansibleStdoutCallback)
+	return append(env, ansibleStdoutCallback, ansibleGroupChars)
 }
 
 // exitOnly reduces an exec error to its status, mirroring
