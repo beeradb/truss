@@ -163,7 +163,31 @@ func checkHostAccess(path string, h Host) []string {
 			"%s: access.via %q is not recognised — this build understands %s; set access.via to one of them, or remove the access block; a host whose access nobody can read is a host nothing can vouch for",
 			path, h.Access.Via, strings.Join(quoted(AccessVias()), " or ")))
 	}
+	problems = append(problems, checkAccessUser(path, h.Access.User)...)
 	return problems
+}
+
+// checkAccessUser refuses a login name that is not one.
+//
+// ⚠️ IT IS CHECKED HERE RATHER THAN TRUSTED AT RENDER TIME because the
+// value is written into a generated ansible inventory, and a name carrying
+// a newline would not be a bad login -- it would be an ADDITIONAL LINE in
+// that file, at whatever indentation followed it, silently setting a
+// variable nobody wrote. The rule is the project's own: refuse at the edge
+// where the value enters, rather than escaping it at every place it leaves.
+//
+// Empty is allowed and means unstated: the renderer omits ansible_user
+// entirely, so ansible's own default applies.
+func checkAccessUser(path, user string) []string {
+	if user == "" {
+		return nil
+	}
+	if strings.TrimSpace(user) != user || strings.ContainsAny(user, " \t\r\n:#") {
+		return []string{fmt.Sprintf(
+			"%s: access.user %q is not a login name — set access.user to the bare account, with no whitespace and no \":\" or \"#\"; a value like this does not become a bad user, it becomes another line in the generated ansible inventory",
+			path, user)}
+	}
+	return nil
 }
 
 // quoted renders each of ss with quotes, so a refusal listing the values a
