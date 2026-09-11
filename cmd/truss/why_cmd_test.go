@@ -217,7 +217,13 @@ func TestWhyQueuePositionUnresolvableSHA(t *testing.T) {
 	env, _ := whyEnv(t, c0)
 
 	var stdout, stderr bytes.Buffer
-	runEnv(context.Background(), []string{"why", "0000000000000000000000000000000000dead", "--dir", dir}, env, nil, &stdout, &stderr)
+	// ⚠️ SHORT, AND scripts/leakscan IS WHY. Its "32+ character hex string"
+	// rule cannot tell a fabricated sha from a real key id, and it should not
+	// try -- so the fixture convention in this package is a short one
+	// ("deadbeef", "0123456789abcdef"). A full-length fake sha here failed CI
+	// with: leakscan: a 32+ character hex string (account id, key id, hash of
+	// something real). This sha only has to be unresolvable, and it is.
+	runEnv(context.Background(), []string{"why", "deadbeefdeadbeef", "--dir", dir}, env, nil, &stdout, &stderr)
 	out := stdout.String()
 	if !strings.Contains(out, "does not resolve against origin/main") {
 		t.Errorf("stdout = %q, want it to say the sha does not resolve", out)
