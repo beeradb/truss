@@ -68,8 +68,17 @@ subcommands:
                          (internal; runs only in the publisher container)
   status                summarise the queue: HEAD, heartbeat age, failure,
                          expiring credentials -- ledger-only, no cluster
-  why <sha>              explain what happened to one commit (exit 2 if
-                         the queue has not reached it yet)
+  why <sha> [--dir <path>]
+                         explain everything the system knows about one
+                         commit: the ledger record if any, its queue
+                         position relative to HEAD, the tofu/ansible/render
+                         units it selects, and whether CI filed an approved
+                         plan digest for each -- reads the ledger, a local
+                         git checkout (--dir, default ".") and the forge for
+                         the PR head sha; never writes to the ledger, never
+                         takes the state lock, never applies anything.
+                         Exit 2 if the queue has not reached this commit
+                         yet (no ledger record).
   skip <sha> --reason <text>
                          advance HEAD past a commit that cannot apply;
                          refuses without a failed record, a stated reason

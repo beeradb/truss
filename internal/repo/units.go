@@ -93,6 +93,30 @@ var (
 // absent read as compliant.
 var unitSharedInput = regexp.MustCompile(`^(modules/|inventory/|providers\.allow$|\.opentofu-version$|\.kustomize-version$|\.ansible-version$)`)
 
+// SharedInputTouched reports whether changedFiles includes a shared input --
+// the same test TouchedUnits makes internally (the `shared` loop above) to
+// decide whether to widen its selection to every unit that exists in the
+// tree, rather than only the ones whose own files changed.
+//
+// It exists for a caller that already knows it is about to call
+// TouchedUnits and needs to explain a WIDENED result to a reader -- `truss
+// why` (docs/work-items.md:86-133) names this explicitly, because a commit
+// touching only inventory/x.json selecting every tofu root in the
+// repository is a surprise worth stating, not one to leave a reader to
+// infer from an unusually long unit list. Re-deriving the test with a
+// second copy of unitSharedInput would be the two-copies-of-one-fact
+// mistake AGENTS.md already warns against; this reads the same regex
+// TouchedUnits itself is built on, so the two can never disagree about what
+// counts as shared.
+func SharedInputTouched(changedFiles []string) bool {
+	for _, f := range changedFiles {
+		if unitSharedInput.MatchString(f) {
+			return true
+		}
+	}
+	return false
+}
+
 // KindOf reports what kind of unit path is, if it is a unit at all. It is
 // the single place a directory's meaning is decided, so the tree listing and
 // the commit diff can never disagree about what something is.
