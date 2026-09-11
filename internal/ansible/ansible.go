@@ -212,8 +212,33 @@ func (r Runner) run(ctx context.Context, playDir string, targets []Target, check
 	cmd.Stderr = r.Stderr
 
 	if err := cmd.Run(); err != nil {
-		// No transcript in the error -- see wrapExecError's reasoning on
-		// Stderr's doc comment above. Stderr already has the full run.
+		// ⚠️ THE RUN'S DETAIL IS ON STDOUT, NOT STDERR, AND THIS PACKAGE IS
+		// WHY. ansibleStdoutCallback pins ANSIBLE_STDOUT_CALLBACK=json, so
+		// everything ansible has to say about what it did -- which task, on
+		// which host, and the message -- goes to STDOUT as JSON, where it is
+		// captured into a buffer for parseChanged. Stderr gets warnings.
+		//
+		// This block used to say "Stderr already has the full run" and
+		// return. That was false, and false BECAUSE of the callback pinned
+		// forty lines above: on failure the function returns before parsing,
+		// and the buffer is discarded. Measured 2026-09-11: a pass failed
+		// with two DEPRECATION WARNINGs, "exit status 4", and NO ERROR LINE
+		// ANYWHERE. It took three passes to learn that ansible had been
+		// explaining itself the whole time, into a buffer nobody read.
+		//
+		// ⚠️ IT GOES TO Stderr, NOT INTO THE ERROR, and that distinction is
+		// the original comment's point and still holds: an error string
+		// reaches the ledger and a Telegram message, and a play's transcript
+		// can carry a hostname, a task's output, or a path on somebody's
+		// machine. The operator reading logs should see it; the alert should
+		// not carry it.
+		//
+		// Raw, not parsed. A failed run is the worst moment to depend on the
+		// output being well-formed -- ansible may have died before writing
+		// valid JSON at all, which is exactly the case worth seeing.
+		if stdout.Len() > 0 {
+			fmt.Fprintf(r.Stderr, "\nansible: %s failed; its JSON callback output follows, because the run's detail is on stdout and would otherwise be discarded:\n%s\n", playDir, stdout.Bytes())
+		}
 		return Result{}, fmt.Errorf("ansible: ansible-playbook %s: %v", playDir, exitOnly(err))
 	}
 
