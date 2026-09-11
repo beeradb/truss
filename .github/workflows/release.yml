@@ -203,4 +203,4 @@ jobs:
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
             || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
           gh release upload "${GITHUB_REF_NAME}" --clobber \
-            dist/truss-linux-amd64 dist/truss-linux-arm64 dist/SHA256SUMS dist/IMAGE_DIGESTS
+            dist/truss-linux-amd64 dist/truss-linux-arm64 dist/SHA256SUMS dist/IMAGE_DIGESTS LICENSE
