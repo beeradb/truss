@@ -167,6 +167,10 @@ RUN set -eux; \
 COPY dist/truss-linux-${TARGETARCH} /usr/local/bin/truss
 RUN chmod 0755 /usr/local/bin/truss
 
+# Apache-2.0 §4(a): anyone redistributing the binary gives recipients a copy
+# of the licence, and this image is a redistribution.
+COPY LICENSE /usr/share/licenses/truss/LICENSE
+
 # 10001 matches the `applier` user the platform image used, so a consumer's
 # volume ownership does not change under them.
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin applier
