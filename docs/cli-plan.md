@@ -1,6 +1,7 @@
 # Plan: the local `truss` CLI you can point at a stuck applier
 
-**Status: approved, not built.** Written 2026-09-10 against `main` at `e1c9b2f`.
+**Status: approved, not built.** Written 2026-09-10; re-checked 2026-09-11
+against `main` at `b4118f9`.
 Implements [work-items.md](work-items.md), "A local `truss` you can point at a
 stuck applier".
 
@@ -17,11 +18,12 @@ alternative and the reason for rejecting it are written down beside it.
 
 `truss status`, `truss why <sha>`, `truss skip <sha>` and `truss ledger get`
 are **already implemented**: `cmd/truss/status_cmd.go`, `why_cmd.go`,
-`skip_cmd.go`, `ledger_cmd.go`, wired into `run.go`'s dispatch table,
+`skip_cmd.go`, `ledger_cmd.go`, wired into `run.go`'s dispatch table, `skip`
 documented in [threat-model.md](threat-model.md) and
-[operations.md](operations.md), and covered by tests. The tree is green at
-`e1c9b2f` — `go build`, `go vet` and `go test ./... -count=1` all clean, with
-201 tests in `cmd/truss` alone.
+[operations.md](operations.md) and `why` in [README.md](../README.md), and
+covered by tests. The tree is green at `b4118f9` — `go build`, `go vet` and
+`go test ./... -count=1` all clean, with 247 tests in `cmd/truss` alone
+(`^func Test` lines across `cmd/truss/*_test.go`).
 
 The work item was implemented and never struck, so a brief written from it
 describes a build that has largely happened.
@@ -32,24 +34,25 @@ paid for in a real incident on 2026-09-08. Rebuilding those from a sketch
 would lose them. **Do not rewrite these four commands. Change only what each
 gap below names.**
 
-### 0.2 ⚠️ THEY ARE ON `main` AND NOT IN THE DEPLOYED IMAGE, AND THE APPLIER IS WEDGED RIGHT NOW
+### 0.2 ⚠️ MERGED IS NOT DEPLOYED, AND THIS REPOSITORY CANNOT SAY WHAT IS
 
-Read off the running applier on 2026-09-10: **v0.1.2 lists `ledger`,
-`plan-digest`, `token`, `gate`, `expiry`, `notify`, `apply`, `publish` — and
-no `status`, no `why`, no `skip`.** They first appear in **v0.1.3, which is
-not pinned**.
+**v0.1.2's `subcommands` in `run.go` are `ledger`, `plan-digest`, `token`,
+`gate`, `expiry`, `notify`, `apply`, `publish` — no `status`, no `why`, no
+`skip`.** They first appear in **v0.1.3**. `why`'s four-section report (#27)
+first appears in **v0.1.9**, the latest tag at `b4118f9`.
 
-So the guarded way to advance the watermark does not exist on the box that
-needs it, during an incident where it is needed. That has three consequences
-this plan must carry:
+Which tag the applier runs cannot be read from this repository: the pin lives
+in the consumer's repository. On any image older than v0.1.3, the guarded way
+to advance the watermark does not exist. That has three consequences this
+plan must carry:
 
-1. **Nothing here reaches the incident until a release is cut and pinned.**
+1. **Nothing here reaches the applier until a release is cut and pinned.**
    Code merged to `main` is not code on the applier. See §6 step 9 — the
    release and pin are part of this work, not a follow-up somebody remembers.
 2. **It explains why `truss ledger put <head-key>` is the live hazard (G7).**
-   On the deployed image it is not merely the shorter path to the watermark,
-   it is the *only* path. Whoever is unsticking the applier tonight is using
-   it, unguarded, with nothing recorded.
+   On an image older than v0.1.3 it is not merely the shorter path to the
+   watermark, it is the *only* path, and it is unguarded, with nothing
+   recorded.
 3. **It raises the value of D5 above the rest of the plan.** Everything else
    here is ergonomics. D5 is the difference between an out-of-band watermark
    write being recorded and being invisible.
@@ -88,10 +91,11 @@ Stated so this plan is not read as "change everything".
 
 ### G1 — There is no help system at all
 
-`truss --help`, `truss help`, `truss -h` and `truss status --help` all fall
-through to "not a subcommand" and print the `usage` constant to **stderr**,
-exit **2**. There is no per-command help and no example anywhere in the
-binary.
+`truss --help`, `truss help` and `truss -h` all fall through to "not a
+subcommand" and print the `usage` constant to **stderr**, exit **2**.
+`truss status --help` is refused by `parseStatusArgs` with its one-line usage,
+same stream, same code. There is no per-command help and no example anywhere
+in the binary.
 
 Evidence: clig.dev — "Display help when passed `-h` or `--help` flags" and
 "you should be able to add `-h` to the end of anything and it should show
@@ -150,8 +154,8 @@ one subcommand away and is *the exact operation performed by hand during the
 invisible. It cannot do that while `ledger put` performs the same write in
 silence.
 
-⚠️ **And on the deployed image (§0.2) it is not the shorter path — it is the
-only path**, because `skip` is not in v0.1.2 at all.
+⚠️ **And on any image older than v0.1.3 (§0.2) it is not the shorter path — it
+is the only path**, because `skip` is not in v0.1.2 or earlier.
 
 D5 closes it.
 
@@ -334,6 +338,37 @@ point they advise against consuming it to monitor deployments. So:
 - **Failure paths emit JSON too.** A consumer that must parse stdout on
   success and read English on failure has no contract at all.
 
+#### `why`'s document mirrors its four sections
+
+Since #27, `why` prints four sections to stdout, in order, each printed even
+when it could not be answered (`why_cmd.go`): the ledger record, the queue
+position, the units selected, the approved digests. Its "unknown" and
+"absent" lines moved to stdout with them; stderr carries only what stops it
+before the first section (usage, config, the ledger client) and git's own
+stderr. So under `--json` an unanswered section is a field, never a stderr
+line — one key per section, none omitted:
+
+    {
+      "sha":     "<sha>",
+      "record":  {"state": "applied|noop|skipped|failed|absent|unknown"},
+      "queue":   {"state": "at_head|ahead|behind|unknown", "head": "<sha>"},
+      "units":   {"state": "known|unknown", "shared_input": false,
+                  "tofu": [], "ansible": [], "render": []},
+      "digests": {"state": "filed|n/a|unknown", "pr_head": "<sha>",
+                  "credentials_exempt": false,
+                  "tofu": {"<root>": "present|absent|unknown"},
+                  "render": {"<unit>": "present|absent|unknown"}}
+    }
+
+- `record` adds `reason` and `at` for `skipped` and `failed`, and `roots`,
+  `{"<root>": {"resource_changes": <n>}}`, for `applied` — `null`, never `0`,
+  where the text prints "unknown resource changes".
+- `queue` adds `queued_in_front` for `ahead`, and `blocking_on` when that is
+  non-zero. `head` is `null` when it could not be read.
+- Every `unknown` section adds `reason`: the sentence the text line prints.
+- **The exit code stays the record's alone**, as `cmdWhy`'s doc states: 0 a
+  record, 2 `absent`, 1 anything else. The other three never change it.
+
 ### D4 — Fix the exit-code inconsistency, document the table, add no new code
 
 Documented in every command's help:
@@ -390,8 +425,12 @@ Add `config.LoadLedger(getenv)`, validating only what a ledger read needs:
 `LEDGER_HEAD_KEY`, `HEARTBEAT_KEY`, `PLAN_DIGEST_PREFIX`, and `SECRETS_DIR`
 (defaulted as today).
 
-Used by `status`, `why`, `skip` and `ledger`. **`apply`, `publish` and every
-other subcommand keep `config.Load` untouched.**
+Used by `status`, `skip` and `ledger`. **`apply`, `publish` and every
+other subcommand keep `config.Load` untouched** — `why` included, since #27:
+its digest section builds a forge client from `REPO` and the GitHub App
+credential (`buildForgeClient`) and runs `checkCommitGate` with `APPROVER`,
+and its queue and units sections read a git checkout. A loader that drops
+`REPO` and `APPROVER` cannot serve it.
 
 Its problem strings say what to export and why, and **must not say "refusing
 to start"** — nothing is starting on a laptop.
@@ -408,23 +447,40 @@ configuration is deliberately all-environment, and because it needs a
 precedence decision — file versus environment versus flag — that deserves its
 own pass. Recorded in work-items.md, not built.
 
-### D7 — `status` gains "stuck on", and no forge call
+### D7 — `status` gains "stuck on"; the commit gap is an OPEN DECISION
 
 When the heartbeat records a failure, `status` reads `failed/<last_sha>` and
 prints the commit it is wedged on together with its recorded reason.
 
-⚠️ **No forge lookup and no `git` shell-out in this pass.** Computing a real
-commit gap needs either the GitHub App private key on the laptop — a second
-credential, for the one command whose premise is working when other things are
-broken — or a local clone. The work item's own warning is *"IT MUST NOT NEED A
-CLUSTER"*, and the spirit extends to "must not need a second credential to
-answer the first question".
+**What `why` already does, since #27** (`why_cmd.go`). `printQueuePosition`
+reads the ledger HEAD and walks `git rev-list --reverse --first-parent
+<head>..origin/main` in a local checkout (`--dir`, default `.`) — the same
+`Commits` call `runCommitLoop` makes — and reports the sha at HEAD, ahead
+(how many are queued in front, and which one blocks) or behind. It does not
+fetch, so a stale checkout gives a stale answer. `printApprovedDigests` builds
+a forge client from the GitHub App credential (`buildForgeClient`) and runs
+`checkCommitGate` with `APPROVER`, to learn the PR head sha digests are filed
+under. A checkout or forge it cannot reach prints an "unknown" line and never
+changes the exit code. So a forge lookup and a `git` shell-out exist — in
+`why`, not in `status`.
 
-⚠️ **So the commit GAP is NOT delivered.** See §7. The cheap follow-up, if it
-is ever wanted, is an explicit `--against <dir>` reading
-`git rev-list --count <watermark>..origin/main` from a local clone — roughly
-forty lines plus tests, and it changes what credentials `status` implies, which
-is why it is a separate decision rather than a detail.
+⚠️ **OPEN DECISION — UNDECIDED, FOR THE OWNER.** Should `status` reuse `why`'s
+queue walk (`printQueuePosition`'s `Commits(head, "origin/main")`) to print
+the gap, or stay ledger-only and credential-free?
+
+- **Reuse the walk.** Delivers the sketch's "the gap between them" from the
+  rev-list the apply pass itself walks, so "ahead" means one thing. The walk
+  calls no forge, so `status` still needs only the ledger credential and D6's
+  loader. The cost: `status` gains `--dir` and a dependency on a local clone
+  of the consumer's repository, fetched by hand because nothing here fetches,
+  and prints an "unknown" gap on a laptop without one.
+- **Stay ledger-only.** `status` keeps answering from any directory with one
+  credential, and its usage line's "ledger-only, no cluster" stays true. The
+  cost: `status` does not deliver the gap. An operator reads queue position
+  from `truss why <sha> --dir <clone>` instead, which needs the full
+  `config.Load` environment (D6) and may call the forge.
+
+**Not decided here.** Until it is, §6 step 7 builds "stuck on" only.
 
 ---
 
@@ -473,8 +529,14 @@ nobody has watched fail is a claim, not a check.
 
 ### `cmd/truss/why_cmd_test.go` — extend
 
-- `TestWhyJSONForEachRecordShape` — table over applied, noop, skipped, failed;
-  each valid JSON on stdout with a `state` field.
+- `TestWhyJSONForEachRecordShape` — table over applied, noop, skipped, failed,
+  absent; stdout is one JSON document carrying all four section keys, and
+  `record.state` names the shape.
+- `TestWhyJSONKeepsUnknownSectionsInTheDocument` — the cases of
+  `TestWhyBadDirDegradesSectionsIndependently` and
+  `TestWhyApprovedDigestsForgeUnreachable` under `--json`: each unanswered
+  section is present with `"state": "unknown"` and a `reason`, and the exit
+  code is unchanged.
 - `TestWhyJSONKeepsTheAbsentExitCode` — absent record exits 2 under `--json`,
   and stdout is still valid JSON.
 - `TestWhyConfigProblemsExitTwo` — **the D4 change.** Watch it fail against
@@ -546,16 +608,15 @@ is smaller than its description.
 | --- | --- |
 | `cmd/truss/help.go` | **new** — help texts, `wantsHelp`, help dispatch |
 | `cmd/truss/help_test.go` | **new** |
-| `cmd/truss/run.go` | route help; keep the no-args path byte-identical |
+| `cmd/truss/run.go` | route help; keep the no-args path byte-identical; D2 rewrites `usage`'s `skip` entry, which names `TRUSS_SKIP_I_UNDERSTAND` (`run.go:85`) |
 | `cmd/truss/status_cmd.go` | `--json`, stuck-on, exit-code fix |
 | `cmd/truss/why_cmd.go` | `--json`, exit-code fix |
 | `cmd/truss/skip_cmd.go` | `--confirm`, `claimed_by`, print the watermark, `--json` |
 | `cmd/truss/ledger_cmd.go` | absent message, head-key refusal, exit-code fix |
 | `internal/ledger/journal.go` | `skippedRecord` gains `claimed_by`/`claimed_from`; replace the "no `by` field" comment with D2(b)'s reasoning |
 | `internal/config/config.go` | `LoadLedger` |
-| `docs/work-items.md` | strike the item as built; record §7's non-coverage; the Vault seam note |
-| `docs/threat-model.md` | the guard list names `TRUSS_SKIP_I_UNDERSTAND` |
-| `docs/operations.md` | the escape-hatch description names it too |
+| `docs/work-items.md` | strike the item as built — still unstruck at `b4118f9`, and its `why` sketch, "the recorded failure for one commit", predates #27; record §7's non-coverage; the Vault seam note |
+| `docs/threat-model.md` | the guard list names `TRUSS_SKIP_I_UNDERSTAND` (`threat-model.md:49`) |
 
 ⚠️ **Zero new module dependencies.** `go.mod` stays three lines with no
 `go.sum`. Everything is standard library (`encoding/json`, `fmt`, `strings`,
@@ -595,19 +656,21 @@ Steps 1 to 5 are independent of D2 and can proceed in any order.
 4. `ledger get`'s absent message and **the head-key refusal (D5)** plus tests.
    ⚠️ If time runs short, this is the step that matters most — see §0.2.
 5. `--json` on `status`, `why`, `skip` plus tests.
-6. `skip`'s `--confirm` and `claimed_by` (D2), plus tests, **plus the three
-   doc updates in the same commit** — `threat-model.md` and `operations.md`
-   both describe the mechanism by name, and a doc naming a variable the binary
-   no longer reads is worse than no doc.
-7. `status` stuck-on (D7).
+6. `skip`'s `--confirm` and `claimed_by` (D2), plus tests, **plus the two
+   places that name the variable, in the same commit** —
+   `threat-model.md:49` and `usage` at `run.go:85` — because a doc naming a
+   variable the binary no longer reads is worse than no doc. `operations.md`
+   describes the four checks without naming it.
+7. `status` stuck-on (D7). Not the gap, which waits on D7's open decision.
 8. Run `scripts/check`, read it in full, then commit to `truss-cli`.
    ⚠️ **Never chained.** `scripts/check && git commit` commits either way
    under some shells, and it reads a different tree than it tested. Verify
    what will ship: `git archive HEAD` into a temp directory and run the suite
    there.
 9. ⚠️ **Cut a release and pin it, or none of this reaches the applier.**
-   See §0.2: the deployed image is v0.1.2 and does not contain `status`, `why`
-   or `skip` at all. Merged is not deployed. This step is part of the work.
+   See §0.2: the latest tag is v0.1.9, and the applier runs whatever the
+   consumer's repository pins, which this repository cannot see. Merged is not
+   deployed. This step is part of the work.
 
 ---
 
@@ -615,18 +678,18 @@ Steps 1 to 5 are independent of D2 and can proceed in any order.
 
 Written down so the next person does not assume it was forgotten.
 
-- **The commit gap in `status`.** The sketch asks for it; D7 explains why it
-  needs either a second credential or a local clone, and neither belongs in a
-  command that must work when everything else is broken. `--against <dir>`
-  sketched, not built.
+- **The commit gap in `status`.** The sketch asks for it; `why` already walks
+  `<head>..origin/main` in a local checkout, and whether `status` reuses that
+  walk or stays ledger-only is D7's open decision, not this plan's.
 - **Vault token minting.** Out of scope by instruction; the seam is documented
   in §5.
 - **A config file / XDG support.** The larger ergonomic win for laptop use,
   deferred with reasons in D6.
 - **`--version`.** GNU Coding Standards require it and the binary has none.
   Out of scope here; it needs a build-stamping decision. ⚠️ Worth a
-  work-items.md entry — §0.2 is a live incident where "which version is
-  deployed" had to be answered by reading a usage string.
+  work-items.md entry — on 2026-09-10 "which version is deployed" had to be
+  answered by reading a usage string, and this repository cannot answer it at
+  all (§0.2).
 - **Colour, pagers, progress bars.** None exist and none are being added. The
   best handling of a pager is not to have one — AWS CLI v2's default pager is
   its single most-filed CLI complaint, including cases where output is lost
@@ -647,40 +710,32 @@ Written down so the next person does not assume it was forgotten.
 Guidelines:
 
 - Command Line Interface Guidelines — <https://clig.dev/>
-- GNU Coding Standards, Command-Line Interfaces —
-  <https://www.gnu.org/prep/standards/html_node/Command_002dLine-Interfaces.html>
-- POSIX Utility Syntax Guidelines —
-  <https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap12.html>
+- GNU Coding Standards, "Standards for Command Line Interfaces"
+- POSIX.1-2017 Base Definitions, chapter 12 "Utility Conventions", 12.2
+  "Utility Syntax Guidelines"
 - 12 Factor CLI Apps, Jeff Dickey —
   <https://medium.com/@jdxcode/12-factor-cli-apps-dd3c227a0e46> (403s to
   automated fetch; content was retrieved via a mirror, so spot-check before
   quoting it verbatim)
-- Good CLI Design Is Mostly Silence, Yar Kravtsov —
-  <https://yarlson.dev/blog/good-cli-design-is-mostly-silence/>
-- Heroku CLI Style Guide —
-  <https://devcenter.heroku.com/articles/cli-style-guide>
+- Good CLI Design Is Mostly Silence, Yar Kravtsov, on his blog
+- Heroku Dev Center, "CLI Style Guide"
 
 Exit codes:
 
-- GNU Grep Manual, Exit Status —
-  <https://www.gnu.org/software/grep/manual/html_node/Exit-Status.html>
-- systemctl(1), Table 1 —
-  <https://man7.org/linux/man-pages/man1/systemctl.1.html> (verified locally
-  via `man systemctl` on 2026-09-10)
-- Exit Codes With Special Meanings —
-  <https://tldp.org/LDP/abs/html/exitcodes.html>
+- GNU Grep Manual, 2.3 "Exit Status"
+- systemctl(1), Table 1 (verified locally via `man systemctl` on 2026-09-10)
+- Advanced Bash-Scripting Guide, Appendix E "Exit Codes With Special Meanings"
 
 Failure patterns designed against:
 
-- kubectl help noise — <https://github.com/kubernetes/kubernetes/issues/23402>
-- kubectl `--ignore-not-found` exit-code inconsistency —
-  <https://github.com/kubernetes/kubectl/issues/1596>
-- kubectl delete has no confirmation, with two real incidents — KEP-3895,
-  <https://github.com/kubernetes/enhancements/blob/master/keps/sig-cli/3895-kubectl-delete-interactivity/README.md>
-- AWS CLI v2 default pager — <https://github.com/aws/aws-cli/issues/5343>
-- flyctl mixing non-JSON messages into its JSON stream —
-  <https://fly.io/blog/flyctl-meets-json/>
-- Terraform machine-readable output, as a positive example —
-  <https://developer.hashicorp.com/terraform/internals/machine-readable-ui>
+- kubectl help noise — GitHub issue `kubernetes/kubernetes#23402`
+- kubectl `--ignore-not-found` exit-code inconsistency — `kubernetes/kubectl#1596`
+- kubectl delete has no confirmation, with two real incidents — KEP-3895, in
+  `kubernetes/enhancements` at `keps/sig-cli/3895-kubectl-delete-interactivity`
+- AWS CLI v2 default pager — `aws/aws-cli#5343`
+- flyctl mixing non-JSON messages into its JSON stream — Fly.io blog,
+  "Flyctl meets JSON", section "Deploy watching"
+- Terraform machine-readable output, as a positive example — Terraform
+  documentation, "Machine-readable UI Output Reference"
 - git splitting `checkout` into `switch`/`restore` because one command did two
-  jobs — <https://github.blog/open-source/git/highlights-from-git-2-23/>
+  jobs — GitHub Blog, "Highlights from Git 2.23"
