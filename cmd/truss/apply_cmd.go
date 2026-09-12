@@ -636,6 +636,17 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 				failure = fmt.Sprintf("could not clone %s: %v", d.Cfg.Repo, err)
 				d.Obs.failed(classRepo)
 				gateOK = false
+			} else if err := d.Git.CleanTree(ctx); err != nil {
+				// ⚠️ RESET BEFORE FETCH, NOT AFTER. A pass never assumed a
+				// clean or known starting checkout before this change -- a
+				// half-written tfplan, a file a failed apply dropped, a
+				// tree still sitting at an earlier pass's head. A fresh or
+				// existing clone already has a valid HEAD to reset to, and
+				// there is no reason to fetch into a tree that is about to
+				// be discarded anyway.
+				failure = fmt.Sprintf("could not clean the working tree: %v", err)
+				d.Obs.failed(classRepo)
+				gateOK = false
 			} else if err := d.Git.Fetch(ctx, "origin", "main"); err != nil {
 				failure = fmt.Sprintf("could not fetch origin main: %v", err)
 				d.Obs.failed(classRepo)
