@@ -18,6 +18,9 @@ import (
 // CI and the applier derive the set from one implementation instead of a
 // consumer's CI reimplementing the rule (docs/work-items.md, "The two sides
 // of the render digest do not share a derivation").
+// `loop` post-dates all of those too: it runs `apply`'s own pass on an
+// interval rather than once per process, so a deployment stops needing a
+// CronJob to reconcile continuously.
 // TestSubcommandsAreExactlyTheDocumentedSet reads this slice directly rather
 // than re-deriving it, so adding a subcommand here is the one place that
 // needs to change for that test to see it.
@@ -29,6 +32,7 @@ var subcommands = []string{
 	"expiry",
 	"notify",
 	"apply",
+	"loop",
 	"publish",
 	"status",
 	"why",
@@ -64,6 +68,9 @@ subcommands:
   expiry                sweep credential expiry
   notify                compose and send a status report (stdin: JSON)
   apply                 run the applier pass
+  loop                  run passes on an interval until told to stop: the
+                         same pass apply runs, once immediately and then
+                         every $LOOP_INTERVAL (default 1m)
   publish                serve one publish request over a Unix socket
                          (internal; runs only in the publisher container)
   status                summarise the queue: HEAD, heartbeat age, failure,
@@ -125,6 +132,8 @@ func runEnv(ctx context.Context, args []string, getenv func(string) string, stdi
 		return cmdNotify(ctx, rest, getenv, stdin, stdout, stderr)
 	case "apply":
 		return cmdApply(ctx, rest, getenv, stdout, stderr)
+	case "loop":
+		return cmdLoop(ctx, rest, getenv, stdout, stderr)
 	case "publish":
 		return cmdPublish(ctx, rest, getenv, stdout, stderr)
 	case "status":

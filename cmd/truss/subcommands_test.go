@@ -33,6 +33,11 @@ import (
 // so CI and the applier derive the set from one implementation, closing
 // docs/work-items.md's "The two sides of the render digest do not share a
 // derivation".
+//
+// `loop` post-dates all of those: it runs `apply`'s own pass repeatedly
+// instead of once per process, closing the loop-mode work's reason for
+// existing -- a CronJob was never a decision, it was what "run one pass and
+// exit" made necessary.
 func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 	want := []string{
 		"ledger",
@@ -42,6 +47,7 @@ func TestSubcommandsAreExactlyTheDocumentedSet(t *testing.T) {
 		"expiry",
 		"notify",
 		"apply",
+		"loop",
 		"publish",
 		"status",
 		"why",
