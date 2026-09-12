@@ -597,6 +597,62 @@ func passMetrics(finished time.Time, duration time.Duration, driftRun bool, rep 
 	return set
 }
 
+// loopCounts is what the loop process itself has done, across every pass
+// -- process-lifetime facts a one-shot `truss apply` never had a lifetime
+// to accumulate. All fields are nil-safe zero values: a loop that has not
+// finished its first pass yet reports 0 passes, not an error.
+type loopCounts struct {
+	frequent, drift float64 // truss_passes_total, by pass kind
+}
+
+// loopMetrics is passMetrics' process-lifetime sibling: everything here
+// describes the LOOP, not one pass, and lives in this file (not a
+// separate one) for the same reason every other family does --
+// TestTheFixtureEmitsEveryFamilyTheCodeCanEmit reads metrics.go's own
+// source text for `Name: "truss_..."` literals, so a family declared
+// anywhere else is invisible to the contract tests that are the whole
+// point of keeping this list honest.
+//
+// ⚠️ ONLY WHAT IS TRIVIALLY CORRECT TODAY. A per-failure-class counter
+// (truss_pass_failures_total{class}) is deliberately not here yet: it
+// would need to derive "did this class fire this pass" from something,
+// and the only candidate -- re-parsing passMetrics' own rendered samples
+// back out of the metrics.Set a Record hook receives -- is exactly the
+// kind of indirection AGENTS.md's "gate on the field, never rendered
+// text" already refuses in spirit. It wants its own plumbing, not a
+// shortcut taken here to fill out a list.
+func loopMetrics(started time.Time, counts loopCounts, inFlight bool) metrics.Set {
+	one := func(b bool) float64 {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	return metrics.Set{
+		{
+			Name: "truss_loop_start_timestamp_seconds",
+			Help: "Unix time at which this loop process started. time() minus this is uptime; changes(...[15m]) on it is a restart loop.",
+			Samples: []metrics.Sample{
+				{Value: float64(started.Unix())},
+			},
+		},
+		{
+			Name: "truss_passes_total",
+			Help: "Passes this loop has run, by kind. A counter, unlike every truss_pass_* family above: those describe the last pass, this describes the process's whole lifetime, which loop mode is what gives it.",
+			Kind: metrics.Counter,
+			Samples: []metrics.Sample{
+				{Labels: []metrics.Label{{Name: "pass", Value: "frequent"}}, Value: counts.frequent},
+				{Labels: []metrics.Label{{Name: "pass", Value: "drift"}}, Value: counts.drift},
+			},
+		},
+		{
+			Name:    "truss_loop_pass_in_flight",
+			Help:    "1 while a pass is running. Disambiguates a stale truss_pass_timestamp_seconds: wedged, or merely busy.",
+			Samples: []metrics.Sample{{Value: one(inFlight)}},
+		},
+	}
+}
+
 // classSamples emits one series per known class, present or not -- see
 // failureClasses' own note on why the absent ones are written as 0.
 func classSamples(seen map[string]bool) []metrics.Sample {

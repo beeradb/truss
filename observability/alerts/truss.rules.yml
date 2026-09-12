@@ -1,17 +1,20 @@
 # Prometheus alerting rules for truss.
 #
-# ⚠️ READ THIS FIRST, BECAUSE EVERY RULE BELOW DEPENDS ON IT. Truss is a
-# CronJob and pushes to a Pushgateway; the gateway serves the last thing it
-# was given, forever. An applier that has STOPPED RUNNING ENTIRELY -- the
-# image will not pull, the CronJob was suspended, the node is gone -- keeps
-# answering `truss_pass_success 1` for as long as the gateway is up. Any
-# alerting built only on the outcome series reports a dead applier as a
-# healthy one, which is the fail-open-with-a-receipt shape truss refuses by
-# construction.
+# ⚠️ READ THIS FIRST, BECAUSE EVERY RULE BELOW DEPENDS ON IT. Under loop
+# mode, truss is a long-lived process serving /metrics directly AND (while
+# platform step 4 has not yet wired the scrape) still pushing to a
+# Pushgateway -- one producer, two transports, see
+# cmd/truss/metrics_server.go's own doc. The Pushgateway half of that
+# keeps serving the last thing it was given forever, so an applier that
+# has STOPPED RUNNING ENTIRELY -- the image will not pull, the pod is
+# crashlooping, the node is gone -- can still answer `truss_pass_success 1`
+# through that path. Any alerting built only on the outcome series reports
+# a dead applier as a healthy one, which is the fail-open-with-a-receipt
+# shape truss refuses by construction.
 #
 # So the first two rules are the load-bearing ones and the rest are detail.
 # `time() - truss_pass_timestamp_seconds` is the only expression here that
-# goes bad on its own when nothing pushes.
+# goes bad on its own when nothing reports.
 #
 # ⚠️ THE SCRAPE JOB MUST SET honor_labels: true. Without it Prometheus
 # overwrites the `job="truss"` the gateway derived from the push path with
@@ -20,50 +23,77 @@
 groups:
   - name: truss-liveness
     rules:
-      # The dead man's switch. The frequent pass runs every five minutes;
-      # this fires after three consecutive misses, which is long enough to
-      # ride out a node restart and short enough that a suspended CronJob is
-      # noticed the same morning.
+      # ⚠️ RE-DERIVED FOR A 1-MINUTE LOOP, NOT THE OLD 5-MINUTE CRONJOB.
+      # Naively carrying "three missed passes" over gives 180s, which is
+      # WRONG and would page every day: drift now runs inside the same
+      # serial queue as the frequent pass, and a drift pass legitimately
+      # delays the next frequent heartbeat for its own duration -- a gap
+      # the two separate CronJobs could not produce. The `and on()` clause
+      # suppresses exactly that case: a pass is still in flight, so silence
+      # is expected, not a stopped applier.
+      #
+      # The 780s bound itself is unmeasured and provisional: it assumes a
+      # drift pass takes at most ~10 minutes (600s) plus one tick (60s)
+      # plus slack (120s). Nothing in this repository bounds how long a
+      # pass may run -- see runLoop's own doc on why a hard timeout was
+      # rejected (cancelling it would SIGKILL an in-flight tofu apply) --
+      # so this number wants a real measurement before it is trusted as
+      # more than a reasoned guess.
       - alert: TrussApplierStopped
-        expr: time() - truss_pass_timestamp_seconds{pass="frequent"} > 900
-        for: 5m
+        expr: (time() - truss_pass_timestamp_seconds{pass="frequent"} > 780) and on() (truss_loop_pass_in_flight == 0)
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: The truss applier has not completed a pass in 15 minutes
+          summary: The truss applier has not completed a frequent pass recently
           description: >-
-            Nothing is applying reviewed commits. Every other truss metric is
-            the last healthy pass's opinion and is not evidence of anything.
-            Check the CronJob, then the most recent Job's pod logs.
+            Nothing is applying reviewed commits, and no pass is currently
+            running to explain the gap. Every other truss metric is the
+            last healthy pass's opinion and is not evidence of anything.
+            Check the pod, then its logs.
 
       # The daily pass is the only one that rotates credentials, publishes the
       # minted value and sweeps expiries. Silence here is slower to hurt and
       # hurts more: a rotation that stops happening is invisible until a token
-      # dies.
+      # dies. Drift stays daily under the loop, so this threshold is
+      # unchanged in substance -- restated as 26h (93600s), the same
+      # "two consecutive daily passes" arithmetic TrussRotationIsNotRunning
+      # already uses below, rather than a second spelling (30h) of one
+      # interval.
       - alert: TrussDriftPassStopped
-        expr: time() - truss_pass_timestamp_seconds{pass="drift"} > 108000
+        expr: time() - truss_pass_timestamp_seconds{pass="drift"} > 93600
         for: 15m
         labels:
           severity: critical
         annotations:
-          summary: The daily truss pass has not run in 30 hours
+          summary: The daily truss pass has not run in 26 hours
           description: >-
             Rotation, the publisher handoff and the credential expiry sweep
             all run on this pass and none of them have. truss_expiry_sweep_ok
             and truss_credential_days_left are stale and must not be trusted.
 
-      # absent() covers the case the staleness rules cannot: a gateway that
-      # has never seen truss at all, or one that was restarted and lost
-      # everything it held. Both look identical to a missing series.
+      # absent() covers the case the staleness rule cannot: no metrics exist
+      # at all, whether because truss never reported or because a restarted
+      # Pushgateway lost everything it held. `for:` shortens from 15m to 3m
+      # under loop mode: a scrape recovers within one tick, where a
+      # Pushgateway restart previously took as long as the next 5-minute
+      # CronJob pod.
+      #
+      # ⚠️ STAYS absent() ON PURPOSE, NOT up{job="truss"}==0. The stronger
+      # signal -- a scrape target that exists and answers 0 -- only exists
+      # once platform step 4 wires the scrape job; shipping that rule now
+      # would be a guard watching a case that cannot yet occur, the same
+      # vacuous shape scripts/leakscan-test refuses in its own domain. This
+      # rewrite belongs beside the scrape config that makes it real.
       - alert: TrussIsNotReporting
         expr: absent(truss_pass_timestamp_seconds{pass="frequent"})
-        for: 15m
+        for: 3m
         labels:
           severity: critical
         annotations:
           summary: No truss metrics exist at all
           description: >-
-            Either truss has never pushed, or the Pushgateway was restarted
+            Either truss has never reported, or the Pushgateway was restarted
             and holds nothing. A Pushgateway keeps its state in memory unless
             it was started with --persistence.file.
 
@@ -105,9 +135,12 @@ groups:
       # Turning protection off does not weaken the applier, it stops it --
       # and this is how you find out you did it, rather than by noticing that
       # nothing has applied all afternoon.
+      # for: shortens from 5m to 3m under the 1-minute loop: the intent --
+      # "enough passes that a transient forge hiccup does not page" -- is
+      # about a PASS COUNT, and the doc below already restates it as one.
       - alert: TrussProtectionNoLongerMeetsTheBar
         expr: truss_gate_ok == 0
-        for: 5m
+        for: 3m
         labels:
           severity: critical
         annotations:
@@ -125,15 +158,17 @@ groups:
       # the same event as a plan that did not match its approval.
       - alert: TrussApplyFailed
         expr: truss_pass_failure{class=~"plan|apply|credentials|repo|forge|config"} == 1
-        for: 5m
+        for: 3m
         labels:
           severity: warning
         annotations:
           summary: 'A truss pass failed with class {{ $labels.class }}'
           description: >-
             The queue does not advance past a failed commit, so this repeats
-            every pass until it is fixed. Five minutes of `for:` is one missed
-            pass, which is enough to ride out a transient forge error.
+            every pass until it is fixed. `for:` is three passes at the
+            loop's 1-minute interval (was one pass at the old 5-minute
+            CronJob cadence), which is enough to ride out a transient forge
+            error.
 
       # ⚠️ A LOST DURABLE RECORD, WHICH IS WHY THIS IS NOT FOLDED INTO THE
       # RULE ABOVE. The heartbeat, applied/<sha>, failed/<sha> and the HEAD
@@ -163,17 +198,25 @@ groups:
             noticed. Read the pass's pod log; the lines are logfmt and carry
             level=error.
 
+      # ⚠️ RE-DERIVED, NOT RESCALED -- THE OLD RATIONALE IS GONE ENTIRELY.
+      # There is no CronJob and no concurrencyPolicy under the loop: a slow
+      # pass delays the queue rather than suppressing a pod, and at a
+      # 1-minute tick a pass taking longer than one minute is routine
+      # whenever there is real work queued, not a failure. What still hurts
+      # is the loop buying nothing over the CronJob it replaced: 300s (the
+      # OLD 5-minute cadence) is the threshold at which a "1-minute loop"
+      # is in fact reconciling no faster than the CronJob did.
       - alert: TrussPassIsSlow
-        expr: truss_pass_duration_seconds{pass="frequent"} > 240
+        expr: truss_pass_duration_seconds{pass="frequent"} > 300
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: The frequent truss pass is taking longer than its own cadence
+          summary: The frequent truss pass is taking as long as the CronJob it replaced
           description: >-
-            The CronJob fires every five minutes with concurrencyPolicy
-            Forbid, so a pass that takes longer than that suppresses the next
-            one. truss_root_duration_seconds says which root and which step.
+            A pass this slow means loop mode's 1-minute interval is buying
+            nothing: five minutes is exactly the cadence it replaced.
+            truss_root_duration_seconds says which root and which step.
 
   - name: truss-credentials
     rules:
@@ -298,9 +341,13 @@ groups:
       # ⚠️ IT IS `and` ON applied == 0 DELIBERATELY. A deep queue that is
       # DRAINING is a busy afternoon, not an incident -- somebody merged twenty
       # commits. A queue that is deep and not moving is the wedge.
+      # for: shortens from 30m (six missed 5-minute passes) to 10m (ten
+      # missed 1-minute passes), the same judgement -- "a deep queue that
+      # is draining is a busy afternoon, not an incident" -- at the new
+      # cadence.
       - alert: TrussQueueIsNotDraining
         expr: truss_queue_depth{pass="frequent"} > 1 and truss_pass_commits_applied{pass="frequent"} == 0
-        for: 30m
+        for: 10m
         labels:
           severity: warning
         annotations:

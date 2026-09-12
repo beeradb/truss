@@ -55,7 +55,7 @@ func fullMetricSet(t *testing.T) metrics.Set {
 	o.deliveryRefIsUnprotected()
 
 	days := 5
-	return passMetrics(time.Unix(1775779200, 0), time.Minute, true, notify.Report{
+	set := passMetrics(time.Unix(1775779200, 0), time.Minute, true, notify.Report{
 		Applied: 1, Noop: 1, RotatedChanges: 2,
 		Drifted: []string{"platform"},
 		Errored: []string{"credentials"},
@@ -64,6 +64,12 @@ func fullMetricSet(t *testing.T) metrics.Set {
 			{Name: "hand-made"},
 		},
 	}, o, buildFacts{GoVersion: "go1.25.0"})
+	// loopMetrics is process-lifetime, not pass-scoped, but it lives in the
+	// same source file (metrics.go) and the contract checks below scan
+	// that file's text for every family EITHER function can emit -- so the
+	// fixture has to produce both, or a loop family arrives watched by
+	// nothing and neither check would notice.
+	return append(set, loopMetrics(time.Unix(1775779200, 0), loopCounts{frequent: 3, drift: 1}, true)...)
 }
 
 // observabilityFiles is every artifact that names a metric: the Grafana

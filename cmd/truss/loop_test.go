@@ -41,6 +41,10 @@ func validLoopEnv(overrides map[string]string) func(string) string {
 		"DRIFT_HEARTBEAT_KEY": "heartbeat/drift.json",
 		"HEARTBEAT_KEY":       "heartbeat/applier.json",
 		"HANDOFF_SOCKET":      "/var/run/publish/publish.sock",
+		// "localhost", not a literal IP: scripts/leakscan refuses any IPv4
+		// dotted quad anywhere in the tree, with no exemption yet -- that
+		// lands with the control listener's own bind address, later.
+		"METRICS_LISTEN": "localhost:0",
 	}
 	for k, v := range overrides {
 		base[k] = v

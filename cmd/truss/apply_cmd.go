@@ -19,6 +19,7 @@ import (
 	"github.com/beeradb/truss/internal/gates"
 	"github.com/beeradb/truss/internal/handoff"
 	"github.com/beeradb/truss/internal/ledger"
+	"github.com/beeradb/truss/internal/metrics"
 	"github.com/beeradb/truss/internal/notify"
 	"github.com/beeradb/truss/internal/plan"
 	"github.com/beeradb/truss/internal/repo"
@@ -146,6 +147,11 @@ type applyDeps struct {
 	// just "a pass is running". Nil under `truss apply`. Nothing reads it
 	// back to make a decision.
 	Progress func(string)
+	// Record receives exactly the metrics.Set passMetrics produced for this
+	// pass, the same value pushPassMetrics is handed -- one source of
+	// truth for both transports. Nil under `truss apply`; the loop wires
+	// it to its /metrics listener's in-memory snapshot.
+	Record func(driftRun bool, set metrics.Set)
 }
 
 // stopping reports whether a graceful stop has been asked for. Nil-safe,
@@ -979,17 +985,24 @@ func runApplyPass(ctx context.Context, d applyDeps, last string) applyResult {
 		}
 	}
 
-	// The metrics push is the pass's LAST act, after the alert, so the set
-	// it renders includes the warning a failed send just produced. Same
-	// non-fatal contract as the ping and the send above, and for a stronger
-	// reason: a monitoring endpoint that is down must never be able to fail
-	// a pass that applied infrastructure correctly.
+	// The metrics set is computed unconditionally -- not only when a push
+	// URL is configured -- because d.Record (the loop's /metrics listener,
+	// nil under `truss apply`) needs exactly the same set a push would have
+	// sent, and needs it even when no push URL is set at all. Computed
+	// LAST, after the alert, so it includes the warning a failed send just
+	// produced.
 	//
-	// Safe to log the error: metrics.Push never returns one carrying the
-	// gateway URL (see its own doc), and metrics.Render's errors name a
+	// Safe to log the push error: metrics.Push never returns one carrying
+	// the gateway URL (see its own doc), and metrics.Render's errors name a
 	// metric, not a value.
+	set := passMetrics(d.now(), d.now().Sub(started), driftRun, report, d.Obs, buildInfo())
+	if d.Record != nil {
+		d.Record(driftRun, set)
+	}
 	if d.Cfg.MetricsPushURL != "" {
-		set := passMetrics(d.now(), d.now().Sub(started), driftRun, report, d.Obs, buildInfo())
+		// Non-fatal, same contract as the ping and the send above, and for
+		// a stronger reason: a monitoring endpoint that is down must never
+		// be able to fail a pass that applied infrastructure correctly.
 		if err := pushPassMetrics(ctx, d.Cfg.MetricsPushURL, driftRun, set); err != nil {
 			d.warnf("metrics push failed (non-fatal): %v", err)
 		}

@@ -62,7 +62,7 @@
     {
       "type": "stat",
       "title": "Since the last pass",
-      "description": "**The only liveness signal on this dashboard.** A Pushgateway serves the last thing it was given forever, so every other number here survives the applier's death unchanged. If this tile is red, read nothing else as evidence.",
+      "description": "**The only liveness signal on this dashboard.** Under loop mode this can also survive a healthy pod: while a drift pass is running the frequent heartbeat is briefly stale by design (TrussApplierStopped suppresses on truss_loop_pass_in_flight for the same reason). If this tile is red AND no pass is in flight, read nothing else as evidence.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -124,7 +124,7 @@
               },
               {
                 "color": "red",
-                "value": 900
+                "value": 780
               }
             ]
           },
@@ -194,11 +194,11 @@
               },
               {
                 "color": "orange",
-                "value": 93600
+                "value": 82800
               },
               {
                 "color": "red",
-                "value": 108000
+                "value": 93600
               }
             ]
           },
@@ -2198,6 +2198,165 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "The loop process itself",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Loop uptime",
+      "description": "time() minus truss_loop_start_timestamp_seconds. A daemon; a one-shot CronJob pod never had an uptime to report.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "time() - truss_loop_start_timestamp_seconds",
+          "legendFormat": "uptime",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Passes run (rate)",
+      "description": "rate(truss_passes_total[15m]), by pass kind -- the realised cadence, which loop mode exists to change from one pass per five minutes to one per $LOOP_INTERVAL.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (pass) (rate(truss_passes_total[15m]))",
+          "legendFormat": "{{pass}}",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pass in flight",
+      "description": "1 while a pass is running. Disambiguates a stale 'since the last pass' tile: wedged, or merely busy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 66
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "truss_loop_pass_in_flight",
+          "legendFormat": "in flight",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "time_series"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
       }
     }
   ]

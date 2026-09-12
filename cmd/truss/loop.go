@@ -55,6 +55,7 @@ type loopConfig struct {
 	driftAt           driftSchedule
 	driftHeartbeatKey string
 	handoffSocket     string
+	metricsListen     string
 }
 
 // loadLoopConfig reads and validates the loop's own environment on top of
@@ -117,6 +118,16 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 		problems = append(problems, "refusing to start: $HANDOFF_SOCKET is unset -- the loop always eventually runs a drift pass, which must hand its result to the publisher")
 	}
 
+	// ⚠️ REQUIRED FOR THE LOOP, OPTIONAL FOR `truss apply` (which never
+	// reads it at all). A daemon nobody can scrape is the fail-open-with-a-
+	// receipt shape observability/README.md exists to refuse: every other
+	// refusal here stops a manifest that forgot something before it can run
+	// silently; this is the same rule applied to its own observability.
+	metricsListen := getenv("METRICS_LISTEN")
+	if metricsListen == "" {
+		problems = append(problems, "refusing to start: $METRICS_LISTEN is unset -- the loop must be scrapeable, not just running")
+	}
+
 	if len(problems) > 0 {
 		return loopConfig{}, problems
 	}
@@ -125,6 +136,7 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 		driftAt:           driftAt,
 		driftHeartbeatKey: driftHeartbeatKey,
 		handoffSocket:     handoffSocket,
+		metricsListen:     metricsListen,
 	}, nil
 }
 
@@ -187,7 +199,7 @@ type loopTurn func(ctx context.Context) (notifyText string, fatal bool, problems
 // and return rather than being cancelled through ctx (which would reach
 // exec.CommandContext and SIGKILL a running tofu, orphaning its state
 // lock; see internal/childproc's doc comment for the measurement).
-func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() time.Time, stop func() bool) loopTurn {
+func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() time.Time, stop func() bool, snap *snapshots) loopTurn {
 	return func(ctx context.Context) (string, bool, []string) {
 		n := now()
 		drift := lcfg.driftAt.due(n, lastDrift)
@@ -197,7 +209,10 @@ func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() ti
 			return "", true, problems
 		}
 		deps.Stop = stop
+		deps.Record = snap.record
+		snap.setInFlight(true)
 		result := runApplyPass(ctx, deps, last)
+		snap.setInFlight(false)
 		if drift {
 			lastDrift = n
 		}
@@ -274,9 +289,22 @@ func cmdLoop(ctx context.Context, args []string, getenv func(string) string, std
 
 	lastDrift := seedLastDrift(ctx, e.Cfg, lcfg.driftHeartbeatKey)
 
+	snap := newSnapshots(time.Now())
+	metricsSrv := newMetricsServer(snap)
+	if err := listenMetrics(ctx, metricsSrv, lcfg.metricsListen); err != nil {
+		fmt.Fprintln(stderr, "refusing to start: "+err.Error())
+		return 1
+	}
+	// Provisional: an immediate Close rather than a graceful Shutdown with
+	// a bounded grace period. The control listener (not yet built) needs
+	// its own shutdown ordering relative to this one -- the lease, once it
+	// exists, must not be released before both listeners are down -- so
+	// this is revisited in that change rather than half-designed here.
+	defer metricsSrv.Close()
+
 	stopping, stop := armStopSignal(ctx, stderr)
 	defer stop()
-	turn := realLoopTurn(e, lcfg, lastDrift, time.Now, stopping)
+	turn := realLoopTurn(e, lcfg, lastDrift, time.Now, stopping, snap)
 
 	return runLoop(ctx, lcfg.interval, turn, stopping, stdout, stderr)
 }

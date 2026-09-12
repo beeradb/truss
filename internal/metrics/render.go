@@ -1,24 +1,25 @@
 // Package metrics renders the Prometheus text exposition format, and pushes
 // it to a Pushgateway.
 //
-// ⚠️ TRUSS PUSHES BECAUSE NOTHING CAN SCRAPE IT. The pass is a CronJob that
-// exists for the length of one run: by the time a scrape arrived, the process
-// holding the numbers has exited. The Pushgateway is the component for that
-// case and it accepts the same text a scrape would have returned, so this
-// package renders that text and PUTs it.
+// Under `truss loop`, the same rendered text is ALSO served from an
+// in-memory snapshot on demand (cmd/truss's metrics server): the process
+// outlives its passes now, so it can hold the last exposition of each pass
+// kind and answer a scrape with it. The push survives alongside the scrape
+// as a transitional path -- see cmd/truss/metrics_server.go's own doc for
+// why deleting it is a platform-side change, not an engine one.
 //
 // Rendering is a separate file from pushing for the reason internal/gates
 // gives for itself: every interesting decision here -- what a sample is
 // called, which labels it carries, whether the set is valid at all -- is then
 // a function a test calls, with no server anywhere.
 //
-// ⚠️ EVERY SAMPLE IS A GAUGE, AND A COUNTER WOULD BE WRONG. A counter's
-// meaning is "monotonically increasing since this process started"; this
-// process starts, counts to three and exits, so the next pass would push a
-// smaller number and Prometheus would read the drop as a counter reset. What
-// truss can honestly report is the state of ONE pass, which is a gauge. The
-// consequence for anybody writing a query is in observability/README.md:
-// rate() and increase() do not mean what they usually mean here.
+// Every family declared in this repository before loop mode is, and stays,
+// a gauge: each one describes the state of ONE pass, which is still true
+// whether that pass's numbers are pushed or scraped. Kind adds counters for
+// what a long-lived PROCESS can honestly report that a one-shot one could
+// not -- how many passes it has run, how many of each failure class -- see
+// cmd/truss/metrics.go's loopMetrics for the ones that exist. A gauge
+// family never needed Kind set; it is the zero value.
 package metrics
 
 import (
@@ -39,6 +40,24 @@ type Sample struct {
 	Value  float64
 }
 
+// Kind is a family's Prometheus metric type. Gauge, the zero value, says so
+// by omission: every family that predates loop mode is a gauge, and
+// refusing an unset Kind the way Help is refused would have meant editing
+// every existing literal to restate a fact none of them got wrong.
+type Kind int
+
+const (
+	Gauge Kind = iota
+	Counter
+)
+
+func (k Kind) String() string {
+	if k == Counter {
+		return "counter"
+	}
+	return "gauge"
+}
+
 // Family is every sample sharing a metric name, with the HELP text a person
 // reading the dashboard's metric browser will see.
 //
@@ -49,6 +68,7 @@ type Sample struct {
 type Family struct {
 	Name    string
 	Help    string
+	Kind    Kind
 	Samples []Sample
 }
 
@@ -89,7 +109,7 @@ func Render(set Set) (string, error) {
 		names[f.Name] = true
 
 		fmt.Fprintf(&b, "# HELP %s %s\n", f.Name, escapeHelp(f.Help))
-		fmt.Fprintf(&b, "# TYPE %s gauge\n", f.Name)
+		fmt.Fprintf(&b, "# TYPE %s %s\n", f.Name, f.Kind)
 
 		for _, s := range f.Samples {
 			line, err := renderSample(f.Name, s)

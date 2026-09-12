@@ -31,6 +31,16 @@ func TestAFamilyRendersItsHelpItsTypeAndItsSamples(t *testing.T) {
 	}
 }
 
+func TestACounterFamilyIsTypedAsACounter(t *testing.T) {
+	got, err := Render(Set{{Name: "truss_x_total", Help: "h", Kind: Counter, Samples: []Sample{{Value: 1}}}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if !strings.Contains(got, "# TYPE truss_x_total counter\n") {
+		t.Errorf("Render() = %q, want a counter TYPE line for Kind: Counter", got)
+	}
+}
+
 func TestASampleWithNoLabelsHasNoBraces(t *testing.T) {
 	got, err := Render(Set{gauge("truss_pass_applied", "Commits applied.", 3)})
 	if err != nil {
