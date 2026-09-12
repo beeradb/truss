@@ -294,13 +294,26 @@ func loadPassEnv(getenv func(string) string, stderr io.Writer) (passEnv, []strin
 // operator runs `truss skip` from outside this process; a cached HEAD
 // would re-apply commits or silently skip over them.
 //
+// drift, handoffSocket and driftHeartbeatKey are supplied by the caller
+// rather than derived from e.Cfg, because the two callers disagree about
+// where "is this a drift pass" comes from: `truss apply`'s process
+// identity is fixed for its whole lifetime by $DRIFT_CHECK
+// (e.Cfg.DriftOnly), but `truss loop` runs both kinds from ONE process
+// whose own $DRIFT_CHECK is refused outright (loadLoopConfig) -- so drift
+// has to be decided per call, by the loop's own schedule, not read off
+// cfg. handoffSocket follows the same split: loadHandoffConfig's "required
+// on drift, forbidden on frequent" rule is a statement about a FIXED
+// per-process identity and cannot be evaluated per pass inside a loop that
+// is sometimes one and sometimes the other -- see cmdApply and cmdLoop for
+// where each resolves it. driftHeartbeatKey, non-empty only under the
+// loop, overrides the heartbeat key on a drift pass so a frequent pass a
+// minute later cannot overwrite the daily record.
+//
 // The refusal order below is `truss apply`'s own, preserved exactly: the
-// ledger store, the forge client, Telegram, Vault, the publisher socket,
-// HEAD, then the tailnet client. Vault and handoff config are pure env
-// reads and cost nothing to repeat here rather than hoist into passEnv --
-// keeping them in this order is what keeps the order identical to before
-// the split, and apply_handoff_test.go and others assert stderr text.
-func buildPass(ctx context.Context, e passEnv) (applyDeps, string, []string) {
+// ledger store, the forge client, Telegram, Vault, HEAD, then the tailnet
+// client. Vault config is a pure env read and costs nothing to repeat here
+// rather than hoist into passEnv.
+func buildPass(ctx context.Context, e passEnv, drift bool, handoffSocket, driftHeartbeatKey string) (applyDeps, string, []string) {
 	store, err := buildLedgerStore(e.Cfg)
 	if err != nil {
 		return applyDeps{}, "", []string{err.Error()}
@@ -317,12 +330,19 @@ func buildPass(ctx context.Context, e passEnv) (applyDeps, string, []string) {
 	if len(vproblems) > 0 {
 		return applyDeps{}, "", vproblems
 	}
-	handoffSocket, hproblems := loadHandoffConfig(e.Getenv, e.Cfg.DriftOnly)
-	if len(hproblems) > 0 {
-		return applyDeps{}, "", hproblems
-	}
 
-	journal := &ledger.Journal{Store: store, Layout: layoutFor(e.Cfg)}
+	cfg := e.Cfg
+	cfg.DriftOnly = drift
+	layout := layoutFor(cfg)
+	if drift && driftHeartbeatKey != "" {
+		// ⚠️ THE DRIFT PASS KEEPS ITS OWN HEARTBEAT KEY, WHICH THE TWO
+		// CRONJOBS GAVE IT FOR FREE. Collapsing the two would let a frequent
+		// pass overwrite the daily drift and expiry findings a minute after
+		// they were produced -- the record `truss status` and the expiry
+		// alarm read would then have a lifetime of one tick.
+		layout.HeartbeatKey = driftHeartbeatKey
+	}
+	journal := &ledger.Journal{Store: store, Layout: layout}
 	last, err := journal.Head(ctx)
 	if err != nil {
 		if errors.Is(err, ledger.ErrNotFound) {
@@ -344,14 +364,14 @@ func buildPass(ctx context.Context, e passEnv) (applyDeps, string, []string) {
 	}
 
 	d := applyDeps{
-		Cfg:      e.Cfg,
+		Cfg:      cfg,
 		Dir:      e.Dir,
 		Journal:  journal,
 		Forge:    forgeClient,
 		Telegram: tg,
-		Git:      execGit{Bin: "git", Dir: e.Cfg.Workdir, Stderr: e.Stderr},
+		Git:      execGit{Bin: "git", Dir: cfg.Workdir, Stderr: e.Stderr},
 		NewTofu: func(env []string) tofuRunner {
-			return plan.Runner{Bin: "tofu", PluginDir: e.Cfg.PluginDir, Stderr: e.Stderr, Env: env}
+			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: e.Stderr, Env: env}
 		},
 		NewRender:         e.NewRender,
 		NewAnsible:        e.NewAnsible,
@@ -404,7 +424,19 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 		return 1
 	}
 
-	deps, last, problems := buildPass(ctx, e)
+	// `truss apply`'s process identity is fixed for its whole lifetime by
+	// $DRIFT_CHECK, so -- unlike the loop -- resolving the handoff socket
+	// once here, rather than per pass inside buildPass, changes nothing
+	// about what it validates or when.
+	handoffSocket, hproblems := loadHandoffConfig(e.Getenv, e.Cfg.DriftOnly)
+	if len(hproblems) > 0 {
+		for _, p := range hproblems {
+			fmt.Fprintln(stderr, p)
+		}
+		return 1
+	}
+
+	deps, last, problems := buildPass(ctx, e, e.Cfg.DriftOnly, handoffSocket, "")
 	if len(problems) > 0 {
 		for _, p := range problems {
 			fmt.Fprintln(stderr, p)

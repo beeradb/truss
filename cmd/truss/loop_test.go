@@ -11,18 +11,9 @@ import (
 )
 
 func TestLoadLoopConfigRefusesDriftCheck(t *testing.T) {
-	getenv := func(name string) string {
-		if name == "DRIFT_CHECK" {
-			return "1"
-		}
-		return ""
-	}
-	_, problems := loadLoopConfig(getenv)
-	if len(problems) == 0 {
-		t.Fatalf("loadLoopConfig accepted $DRIFT_CHECK, want a refusal")
-	}
-	if !strings.Contains(problems[0], "DRIFT_CHECK") {
-		t.Errorf("problem = %q, want it to name DRIFT_CHECK", problems[0])
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_CHECK": "1"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_CHECK") {
+		t.Fatalf("problems = %v, want exactly one refusal naming DRIFT_CHECK", problems)
 	}
 }
 
@@ -32,20 +23,30 @@ func TestLoadLoopConfigRefusesDriftCheckEvenSetToZero(t *testing.T) {
 	// variable must be ABSENT, not that it must carry any particular value,
 	// because its mere presence is a sign the manifest still thinks in
 	// CronJob terms.
-	getenv := func(name string) string {
-		if name == "DRIFT_CHECK" {
-			return "0"
-		}
-		return ""
-	}
-	_, problems := loadLoopConfig(getenv)
-	if len(problems) == 0 {
-		t.Fatalf("loadLoopConfig accepted $DRIFT_CHECK=0, want a refusal")
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_CHECK": "0"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_CHECK") {
+		t.Fatalf("problems = %v, want exactly one refusal naming DRIFT_CHECK", problems)
 	}
 }
 
+// validLoopEnv answers every variable loadLoopConfig requires with a value
+// that passes, so a test about ONE variable does not have to restate every
+// other one. overrides layer on top, the same shape testFullEnv uses.
+func validLoopEnv(overrides map[string]string) func(string) string {
+	base := map[string]string{
+		"DRIFT_AT":            "04:10",
+		"DRIFT_HEARTBEAT_KEY": "heartbeat/drift.json",
+		"HEARTBEAT_KEY":       "heartbeat/applier.json",
+		"HANDOFF_SOCKET":      "/var/run/publish/publish.sock",
+	}
+	for k, v := range overrides {
+		base[k] = v
+	}
+	return func(name string) string { return base[name] }
+}
+
 func TestLoadLoopConfigDefaultsTheIntervalToOneMinute(t *testing.T) {
-	lcfg, problems := loadLoopConfig(func(string) string { return "" })
+	lcfg, problems := loadLoopConfig(validLoopEnv(nil))
 	if len(problems) != 0 {
 		t.Fatalf("loadLoopConfig: %v", problems)
 	}
@@ -55,13 +56,7 @@ func TestLoadLoopConfigDefaultsTheIntervalToOneMinute(t *testing.T) {
 }
 
 func TestLoadLoopConfigParsesAnExplicitInterval(t *testing.T) {
-	getenv := func(name string) string {
-		if name == "LOOP_INTERVAL" {
-			return "30s"
-		}
-		return ""
-	}
-	lcfg, problems := loadLoopConfig(getenv)
+	lcfg, problems := loadLoopConfig(validLoopEnv(map[string]string{"LOOP_INTERVAL": "30s"}))
 	if len(problems) != 0 {
 		t.Fatalf("loadLoopConfig: %v", problems)
 	}
@@ -71,29 +66,98 @@ func TestLoadLoopConfigParsesAnExplicitInterval(t *testing.T) {
 }
 
 func TestLoadLoopConfigRefusesAnUnparseableInterval(t *testing.T) {
-	getenv := func(name string) string {
-		if name == "LOOP_INTERVAL" {
-			return "banana"
-		}
-		return ""
-	}
-	_, problems := loadLoopConfig(getenv)
-	if len(problems) == 0 {
-		t.Fatalf("loadLoopConfig accepted an unparseable $LOOP_INTERVAL, want a refusal")
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"LOOP_INTERVAL": "banana"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "LOOP_INTERVAL") {
+		t.Fatalf("problems = %v, want exactly one refusal naming LOOP_INTERVAL", problems)
 	}
 }
 
 func TestLoadLoopConfigRefusesAZeroOrNegativeInterval(t *testing.T) {
 	for _, raw := range []string{"0s", "-1m"} {
-		getenv := func(name string) string {
-			if name == "LOOP_INTERVAL" {
-				return raw
-			}
-			return ""
+		_, problems := loadLoopConfig(validLoopEnv(map[string]string{"LOOP_INTERVAL": raw}))
+		if len(problems) != 1 || !strings.Contains(problems[0], "LOOP_INTERVAL") {
+			t.Errorf("$LOOP_INTERVAL=%q: problems = %v, want exactly one refusal naming LOOP_INTERVAL", raw, problems)
 		}
-		if _, problems := loadLoopConfig(getenv); len(problems) == 0 {
-			t.Errorf("loadLoopConfig accepted $LOOP_INTERVAL=%q, want a refusal", raw)
+	}
+}
+
+func TestLoadLoopConfigRefusesAMissingDriftAt(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_AT": ""}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_AT") {
+		t.Fatalf("problems = %v, want exactly one refusal naming DRIFT_AT", problems)
+	}
+}
+
+func TestLoadLoopConfigRefusesADriftAtNotShapedHHMM(t *testing.T) {
+	for _, raw := range []string{"04:10:00", "tomorrow", "25:00", "04:1"} {
+		_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_AT": raw}))
+		if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_AT") {
+			t.Errorf("$DRIFT_AT=%q: problems = %v, want exactly one refusal naming DRIFT_AT", raw, problems)
 		}
+	}
+}
+
+func TestLoadLoopConfigParsesADriftAtInUTC(t *testing.T) {
+	lcfg, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_AT": "04:10"}))
+	if len(problems) != 0 {
+		t.Fatalf("loadLoopConfig: %v", problems)
+	}
+	if lcfg.driftAt.hour != 4 || lcfg.driftAt.minute != 10 {
+		t.Errorf("driftAt = %+v, want 04:10", lcfg.driftAt)
+	}
+}
+
+func TestLoadLoopConfigRefusesAMissingDriftHeartbeatKey(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_HEARTBEAT_KEY": ""}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_HEARTBEAT_KEY") {
+		t.Fatalf("problems = %v, want exactly one refusal naming DRIFT_HEARTBEAT_KEY", problems)
+	}
+}
+
+func TestLoadLoopConfigRefusesADriftHeartbeatKeyEqualToHeartbeatKey(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"DRIFT_HEARTBEAT_KEY": "heartbeat/applier.json"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "DRIFT_HEARTBEAT_KEY") {
+		t.Fatalf("problems = %v, want exactly one refusal naming DRIFT_HEARTBEAT_KEY", problems)
+	}
+}
+
+func TestLoadLoopConfigRefusesAMissingHandoffSocket(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"HANDOFF_SOCKET": ""}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "HANDOFF_SOCKET") {
+		t.Fatalf("problems = %v, want exactly one refusal naming HANDOFF_SOCKET", problems)
+	}
+}
+
+func TestDriftScheduleDueOncePerDayAtTheWindow(t *testing.T) {
+	s := driftSchedule{hour: 4, minute: 10}
+	window := time.Date(2026, 9, 12, 4, 10, 0, 0, time.UTC)
+
+	if s.due(window.Add(-time.Second), time.Time{}) {
+		t.Errorf("due before the window opened, want not due")
+	}
+	if !s.due(window, time.Time{}) {
+		t.Errorf("not due exactly at the window, want due")
+	}
+	if !s.due(window.Add(time.Hour), time.Time{}) {
+		t.Errorf("not due an hour after the window, want due (never drifted)")
+	}
+	if s.due(window.Add(time.Hour), window) {
+		t.Errorf("due again after already drifting today, want not due")
+	}
+}
+
+func TestDriftScheduleCatchesUpAfterADowntimeButOnlyOnce(t *testing.T) {
+	s := driftSchedule{hour: 4, minute: 10}
+	lastDrift := time.Date(2026, 9, 10, 4, 10, 0, 0, time.UTC) // two days stale
+
+	comeBackUp := time.Date(2026, 9, 12, 9, 0, 0, 0, time.UTC)
+	if !s.due(comeBackUp, lastDrift) {
+		t.Fatalf("a loop that missed two windows should drift once on return")
+	}
+	// After running, lastDrift advances to "now" (realLoopTurn's own
+	// behavior) -- confirm that reads as satisfied for the rest of today.
+	if s.due(comeBackUp.Add(time.Hour), comeBackUp) {
+		t.Errorf("due again later the same day after catching up, want not due")
 	}
 }
 

@@ -2,30 +2,60 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/beeradb/truss/internal/config"
+	"github.com/beeradb/truss/internal/ledger"
 )
 
 // defaultLoopInterval is the loop's pass interval when $LOOP_INTERVAL is
 // unset -- a stated design decision (the loop-mode work), not a guess.
 const defaultLoopInterval = time.Minute
 
+// driftSchedule is the daily window $DRIFT_AT names, always in UTC -- never
+// local time, because a local-time schedule moves twice a year under DST,
+// and a credential rotation that happens twice or not at all on one day in
+// October is not a schedule.
+type driftSchedule struct {
+	hour, minute int
+}
+
+// parseDriftAt parses "HH:MM" -- time.Parse's own "15:04" layout, which
+// already refuses an out-of-range hour or minute.
+func parseDriftAt(raw string) (driftSchedule, bool) {
+	t, err := time.Parse("15:04", raw)
+	if err != nil {
+		return driftSchedule{}, false
+	}
+	return driftSchedule{hour: t.Hour(), minute: t.Minute()}, true
+}
+
+// due reports whether the daily drift window has opened and this loop has
+// not acted on it yet. One comparison gets three cases right at once: a
+// drift runs once a day; a loop that was down at the window runs one when
+// it comes back (not one per missed day, and not none); and a loop that
+// restarts after today's drift does not run a second one.
+func (s driftSchedule) due(now, lastDrift time.Time) bool {
+	window := time.Date(now.Year(), now.Month(), now.Day(), s.hour, s.minute, 0, 0, time.UTC)
+	return !now.Before(window) && lastDrift.Before(window)
+}
+
 // loopConfig is `truss loop`'s own environment, layered on top of passEnv
 // (apply_cmd.go), which it shares with `truss apply`.
 type loopConfig struct {
-	interval time.Duration
+	interval          time.Duration
+	driftAt           driftSchedule
+	driftHeartbeatKey string
+	handoffSocket     string
 }
 
 // loadLoopConfig reads and validates the loop's own environment on top of
 // whatever loadPassEnv already validated. Fail-closed, matching
 // config.Load's own contract: every problem reported, nothing defaulted
 // that matters.
-//
-// ⚠️ THIS IS NOT YET THE FULL LOOP CONFIGURATION. Drift scheduling and the
-// publisher's socket are validated where they start being used, not here in
-// advance of any code that would act on them -- a refusal that gates
-// nothing is not a refusal, it is a trap for whoever configures it first.
 func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 	var problems []string
 
@@ -48,10 +78,79 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 		}
 	}
 
+	var driftAt driftSchedule
+	if raw := getenv("DRIFT_AT"); raw == "" {
+		problems = append(problems, "refusing to start: $DRIFT_AT is unset -- the loop needs to know when to run the daily drift pass, as HH:MM in UTC")
+	} else if parsed, ok := parseDriftAt(raw); !ok {
+		problems = append(problems, fmt.Sprintf("refusing to start: $DRIFT_AT must be HH:MM in UTC, not %q", raw))
+	} else {
+		driftAt = parsed
+	}
+
+	// ⚠️ MUST DIFFER FROM $HEARTBEAT_KEY. The two CronJobs gave the drift
+	// pass its own heartbeat key for free; collapsing the two in one loop
+	// would let a frequent pass overwrite the daily drift and expiry
+	// findings a minute after they were produced.
+	driftHeartbeatKey := getenv("DRIFT_HEARTBEAT_KEY")
+	if driftHeartbeatKey == "" {
+		problems = append(problems, "refusing to start: $DRIFT_HEARTBEAT_KEY is unset -- the drift pass needs its own heartbeat key, or a frequent pass a minute later would overwrite its record")
+	} else if driftHeartbeatKey == getenv("HEARTBEAT_KEY") {
+		problems = append(problems, "refusing to start: $DRIFT_HEARTBEAT_KEY must differ from $HEARTBEAT_KEY -- the same key would let a frequent pass overwrite the daily drift record a minute after it was written")
+	}
+
+	// ⚠️ REQUIRED UNCONDITIONALLY, UNLIKE `truss apply`'s
+	// loadHandoffConfig. The loop always eventually runs a drift pass, so a
+	// manifest without the publisher sidecar must be a refusal to start
+	// regardless of which pass happens to be running at the instant it is
+	// checked. Which pass actually DIALS the socket is decided by drift
+	// alone (runApplyPass gates runHandoff on driftRun), so a frequent pass
+	// with this set simply never reaches it -- the prohibition
+	// loadHandoffConfig enforces for `truss apply` is satisfied here by
+	// construction instead of by config.
+	handoffSocket := getenv("HANDOFF_SOCKET")
+	if handoffSocket == "" {
+		problems = append(problems, "refusing to start: $HANDOFF_SOCKET is unset -- the loop always eventually runs a drift pass, which must hand its result to the publisher")
+	}
+
 	if len(problems) > 0 {
 		return loopConfig{}, problems
 	}
-	return loopConfig{interval: interval}, nil
+	return loopConfig{
+		interval:          interval,
+		driftAt:           driftAt,
+		driftHeartbeatKey: driftHeartbeatKey,
+		handoffSocket:     handoffSocket,
+	}, nil
+}
+
+// seedLastDrift reads the drift heartbeat once, at startup, so a restart
+// does not re-run a drift pass that already ran today -- in memory alone,
+// lastDrift would be zero on every restart, and a restart after the
+// window opened would then rotate credentials on every crash-loop
+// iteration. An absent or unparseable record seeds the zero time, which
+// makes the first window this loop sees due -- correct on a virgin
+// deployment, and the only case where guessing would be worse than
+// acting. Errors are swallowed to that same zero-time default: a ledger
+// this cannot yet reach is buildPass's refusal to report, not this
+// function's.
+func seedLastDrift(ctx context.Context, cfg config.Config, driftHeartbeatKey string) time.Time {
+	store, err := buildLedgerStore(cfg)
+	if err != nil {
+		return time.Time{}
+	}
+	body, err := store.Get(ctx, driftHeartbeatKey)
+	if err != nil {
+		return time.Time{}
+	}
+	var hb ledger.Heartbeat
+	if err := json.Unmarshal(body, &hb); err != nil {
+		return time.Time{}
+	}
+	t, err := time.Parse(heartbeatTimeLayout, hb.Time)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // loopTurn runs one pass and reports what happened. fatal means a
@@ -66,18 +165,31 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 // git behind it. realLoopTurn is the only production implementation.
 type loopTurn func(ctx context.Context) (notifyText string, fatal bool, problems []string)
 
-// realLoopTurn closes over passEnv and calls buildPass fresh on every
-// invocation, so a rotated ledger credential, forge key or Telegram token
-// takes effect on the very next pass rather than requiring a restart -- see
-// buildPass's own doc for why each of its pieces must be rebuilt rather
-// than hoisted.
-func realLoopTurn(e passEnv) loopTurn {
+// realLoopTurn closes over passEnv and lcfg and calls buildPass fresh on
+// every invocation, so a rotated ledger credential, forge key or Telegram
+// token takes effect on the very next pass rather than requiring a
+// restart -- see buildPass's own doc for why each of its pieces must be
+// rebuilt rather than hoisted.
+//
+// lastDrift is captured by the closure and advanced in place: each call
+// decides drift for ITSELF from the current time, and if it ran a drift
+// pass, the NEXT call sees today's window as already handled. Advanced
+// when the pass RETURNS, not when the heartbeat write inside it succeeds
+// -- a broken ledger costs one missed drift rather than a rotation storm
+// on every tick until the ledger recovers.
+func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() time.Time) loopTurn {
 	return func(ctx context.Context) (string, bool, []string) {
-		deps, last, problems := buildPass(ctx, e)
+		n := now()
+		drift := lcfg.driftAt.due(n, lastDrift)
+
+		deps, last, problems := buildPass(ctx, e, drift, lcfg.handoffSocket, lcfg.driftHeartbeatKey)
 		if len(problems) > 0 {
 			return "", true, problems
 		}
 		result := runApplyPass(ctx, deps, last)
+		if drift {
+			lastDrift = n
+		}
 		return result.notifyText, false, nil
 	}
 }
@@ -87,8 +199,7 @@ func realLoopTurn(e passEnv) loopTurn {
 // construction factored out, purely so it can be driven by a fake turn in
 // tests.
 //
-// ⚠️ THIS IS THE FREQUENT-PASS-ONLY SHAPE, THE FIRST OF SEVERAL STEPS. No
-// drift scheduling, no run-now, no graceful stop yet -- ctx.Done() is the
+// ⚠️ THIS IS STILL MISSING RUN-NOW AND GRACEFUL STOP. ctx.Done() is the
 // only way this returns before a fatal turn, and nothing today ever
 // cancels the ctx that reaches here (run.go's context.Background() is
 // never cancelled). Each is landed as its own change so every one of them
@@ -118,7 +229,9 @@ func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stdout,
 }
 
 // cmdLoop runs the same pass `truss apply` runs, once immediately and then
-// on an interval, until ctx is done. passEnv is loaded ONCE, at startup.
+// on an interval, until ctx is done. passEnv and loopConfig are loaded
+// ONCE, at startup; lastDrift is seeded once from the ledger so a restart
+// does not re-run today's drift.
 func cmdLoop(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "usage: truss loop")
@@ -140,5 +253,8 @@ func cmdLoop(ctx context.Context, args []string, getenv func(string) string, std
 		return 1
 	}
 
-	return runLoop(ctx, lcfg.interval, realLoopTurn(e), stdout, stderr)
+	lastDrift := seedLastDrift(ctx, e.Cfg, lcfg.driftHeartbeatKey)
+	turn := realLoopTurn(e, lcfg, lastDrift, time.Now)
+
+	return runLoop(ctx, lcfg.interval, turn, stdout, stderr)
 }

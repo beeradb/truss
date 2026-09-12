@@ -70,7 +70,11 @@ subcommands:
   apply                 run the applier pass
   loop                  run passes on an interval until told to stop: the
                          same pass apply runs, once immediately and then
-                         every $LOOP_INTERVAL (default 1m)
+                         every $LOOP_INTERVAL (default 1m), plus a daily
+                         drift pass at $DRIFT_AT (HH:MM, UTC) -- refuses
+                         to start if $DRIFT_CHECK is set, or without
+                         $DRIFT_HEARTBEAT_KEY (distinct from
+                         $HEARTBEAT_KEY) and $HANDOFF_SOCKET
   publish                serve one publish request over a Unix socket
                          (internal; runs only in the publisher container)
   status                summarise the queue: HEAD, heartbeat age, failure,
