@@ -126,6 +126,16 @@ type Fixtures struct {
 	// the scenario did not stub it, which the reference `curl` shim
 	// answers with `{"ok":true}` -- a 200 carrying no expiry.
 	CloudflareVerify *CloudflareVerify `json:"cloudflare_verify"`
+
+	// ApplyGate and RecordPath are not part of the reference fixtures.json
+	// schema -- no recorded scenario ever sets them, and both carry
+	// omitempty so the corpus's own recordings are unaffected. They exist
+	// for loop-mode's own tests, which need a REAL `tofu apply` subprocess
+	// to still be running when a signal arrives, not a Go fake that returns
+	// before the test can observe anything in flight. See fakebin's own
+	// doc comment for what each does.
+	ApplyGate  string `json:"apply_gate,omitempty"`
+	RecordPath string `json:"record_path,omitempty"`
 }
 
 // CloudflareVerify is the issuer's own answer about the minting token.

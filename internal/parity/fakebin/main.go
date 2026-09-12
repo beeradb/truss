@@ -23,7 +23,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 // fixtures is the subset of the scenario the two shims answer from. It is
@@ -36,6 +39,33 @@ type fixtures struct {
 	TofuShow      json.RawMessage     `json:"tofu_show"`
 	TofuPlanFail  bool                `json:"tofu_plan_fail"`
 	TofuApplyFail bool                `json:"tofu_apply_fail"`
+
+	// ApplyGate, if set, is a path prefix beside fixtures.json (never an
+	// environment variable -- the doc above explains why nothing here can
+	// be). `tofu apply` touches "<ApplyGate>.started" the instant it
+	// begins and blocks until "<ApplyGate>.release" appears, so a caller
+	// driving this as a real subprocess can synchronise on "the child is
+	// now mid-apply" without a sleep. No recorded scenario sets this; it
+	// exists for loop-mode's own SIGTERM-during-a-unit tests, which need a
+	// real process still running when the signal arrives.
+	ApplyGate string `json:"apply_gate,omitempty"`
+
+	// RecordPath, if set, is where this invocation writes one JSON
+	// applyRecord when it exits from the gated apply path below. Absent
+	// unless ApplyGate is also set -- there is nothing to record about an
+	// apply that never blocked.
+	RecordPath string `json:"record_path,omitempty"`
+}
+
+// applyRecord is what a gated `tofu apply` writes about itself: enough to
+// prove, from OUTSIDE the process, that a real SIGINT reached it and it
+// reacted -- as opposed to being SIGKILLed, which would leave no record at
+// all, or never having been signalled, which leaves SignalCaught empty.
+type applyRecord struct {
+	Argv         []string `json:"argv"`
+	Pid          int      `json:"pid"`
+	Pgid         int      `json:"pgid"`
+	SignalCaught string   `json:"signal_caught"`
 }
 
 func main() {
@@ -100,6 +130,9 @@ func tofu(f fixtures, args []string) int {
 		fmt.Println("OpenTofu will perform the following actions:\n\nPlan: 1 to add, 0 to change, 0 to destroy.")
 		return 0
 	case "apply":
+		if f.ApplyGate != "" {
+			return gatedApply(f)
+		}
 		if f.TofuApplyFail {
 			fmt.Fprintln(os.Stderr, "tofu shim: simulated apply failure")
 			return 1
@@ -195,6 +228,64 @@ func git(f fixtures, args []string) int {
 	default: // clone, fetch, checkout: nothing reads their output
 		return 0
 	}
+}
+
+// gatedApply stands in for a slow, real `tofu apply`: it announces that it
+// has started, blocks until told to stop, and records whatever signal it
+// caught while blocked. It never touches SIGTERM's default disposition by
+// installing a handler for it too -- childproc.Command sends only SIGINT
+// (internal/childproc's own doc comment carries the measurement for why),
+// and a test that wants to prove SIGTERM is NOT what gets sent needs this
+// process to behave like real tofu: uncaught, and dead without a record.
+func gatedApply(f fixtures) int {
+	rec := applyRecord{Argv: os.Args, Pid: os.Getpid()}
+	if pgid, err := syscall.Getpgid(0); err == nil {
+		rec.Pgid = pgid
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT)
+
+	started := f.ApplyGate + ".started"
+	release := f.ApplyGate + ".release"
+	if err := os.WriteFile(started, nil, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "fakebin: writing gate started marker: %v\n", err)
+		return 127
+	}
+
+	for rec.SignalCaught == "" {
+		select {
+		case s := <-sig:
+			rec.SignalCaught = s.String()
+		default:
+		}
+		if _, err := os.Stat(release); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// A release and a signal can arrive in the same instant; give a signal
+	// already in flight a brief window to land before deciding none came.
+	if rec.SignalCaught == "" {
+		select {
+		case s := <-sig:
+			rec.SignalCaught = s.String()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	if f.RecordPath != "" {
+		if data, err := json.Marshal(rec); err == nil {
+			_ = os.WriteFile(f.RecordPath, data, 0o600)
+		}
+	}
+
+	if rec.SignalCaught != "" {
+		fmt.Fprintln(os.Stderr, "tofu shim: interrupted, shutting down")
+		return 1
+	}
+	fmt.Println("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.")
+	return 0
 }
 
 // ensureConfiguration adds an empty "configuration" key to raw when it does
