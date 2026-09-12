@@ -1704,6 +1704,138 @@ a non-2xx return an empty slice instead of an error turned the status and
 credential-hygiene tests red -- but that proves the two functions do what
 they claim, not that anything downstream depends on them yet.
 
+## A pluggable ledger backend
+
+Today the ledger is object storage over the S3 API, and `ledger.New` returns a
+concrete `*ledger.Store` that callers depend on by type. Making the backend an
+interface is wanted, with `cmd/truss/ledger_cmd.go`'s `buildLedgerStore` as the
+one construction point that already exists to become the seam.
+
+### Why, and it is not abstraction for its own sake
+
+⚠️ **THE CREDENTIAL IS IN THE HOT PATH.** `gcs-ledger` is three of the twelve
+fields the applier fetches before it can do anything, and on 2026-09-10 a
+DIFFERENT missing credential wedged the applier for hours. Every credential on
+the startup path is a way for the applier to be unable to report that it is
+unable to work. A backend needing no credential -- a CRD read with the pod's
+own ServiceAccount -- removes one.
+
+Kubernetes-native also buys `kubectl get`, RBAC per resource, and **Events**,
+which is the part worth having on its own: a pass that did nothing currently
+looks identical to a pass that did not happen, and an Event per outcome
+(applied, refused, no-op, skipped, drift, expiry-not-checked) says which.
+
+### Candidates, with what each actually costs
+
+| Backend | Gains | Costs |
+| --- | --- | --- |
+| object storage (today) | survives the cluster entirely; portable; no k8s dependency | a credential on the startup path; S3 signing; GCS rejects botocore checksum headers |
+| CRD | no credential; `kubectl get`; Events; RBAC | lives in the cluster's datastore -- and single-server k3s is SQLite on one node's disk, so backups become load-bearing; couples truss to Kubernetes |
+| external database | durable, queryable, independent of both | a credential AND a service to run; the most operational surface of the three |
+| Hedera Consensus Service | append-only and tamper-EVIDENT, and a topic IS the shape of a journal; consensus timestamps are attested rather than claimed; READS need no credential | only half the ledger fits (see below); reconstructing state means replay; a credential to write |
+
+### ⚠️ What any backend has to satisfy, and the first one is the trap
+
+1. **It must be readable when the thing it records is broken.** The CLI exists
+   to be pointed at a stuck applier. A backend reachable only through the
+   cluster is unavailable in a share of the incidents it exists for -- though
+   note the 2026-09-10 incidents had a healthy API server throughout, so this
+   is weaker than it first sounds and should be argued from real outages
+   rather than assumed.
+2. **It records what ALREADY HAPPENED.** That rules out git: the applier would
+   commit to the repository it applies from, and its own writes become commits
+   it must then process. Considered and rejected.
+3. **Append-mostly.** The watermark moves and entries are added; entries are
+   not edited. A backend whose natural operation is mutation is a poor fit.
+4. **A backup that fails must be loud.** Moving from "the ledger is object
+   storage" to "the ledger is in-cluster, backed up to object storage" turns a
+   loud failure (the applier cannot start) into a quiet one (history is being
+   lost and nothing says so). `vault-snapshot` failed for over two days
+   unnoticed; the same shape here loses the audit record instead of the
+   backups.
+
+### ⚠️ HCS FITS HALF THE LEDGER, AND WHICH HALF IS THE WHOLE DESIGN
+
+A Consensus Service topic is an ordered, timestamped, append-only message
+stream. That is exactly what `applied/<sha>` and `failed/<sha>` are, and the
+consensus timestamp makes "this commit was applied at T" attested rather than
+asserted by the process whose behaviour is in question -- which no other
+candidate offers.
+
+It is a poor fit for `applied/HEAD`. The watermark is a MUTABLE POINTER, and a
+stream has no update. Reading it means replaying the topic, or checkpointing
+and replaying the tail.
+
+So the interface probably is not one thing. The ledger is a **journal**
+(append-only, HCS fits perfectly) and a **state pointer** (mutable, HCS does
+not). Splitting those two before choosing backends is the actual design work,
+and it can be done today against the existing object-storage implementation
+without committing to anything.
+
+⚠️ **SUBMIT A HASH, NOT THE ENTRY, AND THE PRIVACY OBJECTION GOES AWAY.** The
+row above used to say a public record leaks repository names, shas and timing.
+It need not: submit `sha256(entry)` and keep the entry itself wherever it
+already lives. The public record then proves an entry existed at a time and has
+not changed, and says nothing about what it contains. Timing is still visible,
+which is a real if smaller leak -- a pass cadence is inferable.
+
+⚠️ **AND READS NEED NO CREDENTIAL, WHICH SERVES THE CASE THE CLI EXISTS FOR.**
+A mirror node is public. `truss status` and `truss why <sha>` could verify the
+journal from a laptop holding nothing at all -- which is precisely the
+laptop-ergonomics blocker recorded above, where the CLI today demands ten
+environment variables and a mounted credential tree for commands that only read.
+Only writing needs a key, and only the applier writes.
+
+### ⚠️ ANCHOR THE LEDGER; DO NOT NECESSARILY MOVE IT
+
+Tamper-evidence only matters if the writer is not trusted. The writer is the
+applier, and a compromised applier IS in this threat model -- it is why the
+applier can administer nothing in Vault. Today it holds write access to the
+bucket, so it could rewrite its own history. That is a real gap. Moving the
+whole journal to a DLT is one way to close it and the most expensive one.
+
+**1. Retention lock on the store that already exists.** GCS Bucket Lock, or
+object retention on the ledger prefix, makes entries physically unrewritable --
+by the applier, by an operator, by anyone holding the key. No new system, no
+new credential, no new failure mode. It does not defend against the storage
+provider, which is not the threat; it completely removes "a compromised applier
+rewrote history", which is. Cheapest thing on this page and it can be done
+today.
+
+**2. Anchor the head; do not relocate the journal.** Hash-chain the entries and
+publish only the periodic HEAD hash externally. One small message rather than
+every entry: less cost, less leakage, and the ledger stays a store that can be
+read without a replay. This gets the tamper-evidence property without the
+migration, and it is compatible with any backend -- which makes the choice of
+attester a late, reversible decision at one call site rather than a storage
+change.
+
+**3. An external attester is already in this repository.** `.github/workflows/
+release.yml` runs `actions/attest-build-provenance`, which writes to Sigstore's
+Rekor -- an append-only, publicly verifiable transparency log, free, keyless
+over OIDC. For "prove this entry existed at a time and has not changed", Rekor
+and HCS do the same job, and one of them is already wired in.
+
+⚠️ **WHERE HCS GENUINELY WINS, AND IT IS NOT NOTHING: ORDERING.** A topic is a
+consensus-ordered, timestamped sequence as a first-class primitive. Rekor gives
+inclusion proofs over independently signed entries; it is a set with proofs,
+not a sequence. A ledger IS an ordered journal, so HCS is the better semantic
+fit for the journal half. Against that: an account, a key, a mirror-node
+dependency and a new failure mode, added to a system whose 2026-09-10 outage
+was one credential failing to arrive.
+
+**Suggested order:** do 1 now. Design 2 as part of the journal/state split,
+which has to happen anyway. Leave Rekor-versus-HCS as a later decision at the
+anchor point, where it is a few lines rather than a migration.
+
+### Not to be done as part of this
+
+A projection is not a plug-in. If the applier writes state into a CR **for
+observability** while object storage stays authoritative, that is two copies of
+one fact and it is only safe while the direction is strictly one-way. The
+moment anything branches on the CR rather than the ledger there are two sources
+of truth, and the disagreement will be silent.
+
 ## ci.yml and release.yml state the same fact twice
 
 `release.yml` had no tofu install, so every release after #12 failed on
