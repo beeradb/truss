@@ -31,6 +31,11 @@ func newTestClient(t *testing.T, baseURL string) *Client {
 // TestDevicesDecodesAWellFormedResponse exercises the verified shape: the
 // endpoint path, the "devices" wrapper key, and the name/tags/lastSeen
 // field spellings from the OpenAPI document cited in client.go.
+//
+// ⚠️ THE NAMES ARE MagicDNS NAMES BECAUSE THAT IS WHAT THE API SENDS. This
+// fixture used bare names ("web-1") for its whole life, while the schema's
+// own example is "pangolin.tailfe8c.ts.net" -- so the suite agreed with
+// Reconcile's bare inventory names and production never could.
 func TestDevicesDecodesAWellFormedResponse(t *testing.T) {
 	var gotPath, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,13 +45,13 @@ func TestDevicesDecodesAWellFormedResponse(t *testing.T) {
 		_, _ = fmt.Fprint(w, `{
 			"devices": [
 				{
-					"name": "web-1",
+					"name": "web-1.tailfe8c.ts.net",
 					"tags": ["tag:k8s"],
 					"lastSeen": "2026-09-01T12:00:00Z",
 					"connectedToControl": false
 				},
 				{
-					"name": "web-2",
+					"name": "web-2.tailfe8c.ts.net",
 					"tags": [],
 					"connectedToControl": true
 				}
@@ -209,8 +214,8 @@ func TestAnOmittedLastSeenIsToldApartByConnectedToControl(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"devices":[
-			{"name":"live","tags":["tag:managed"],"connectedToControl":true},
-			{"name":"never","tags":["tag:managed"],"connectedToControl":false}
+			{"name":"live.tailfe8c.ts.net","tags":["tag:managed"],"connectedToControl":true},
+			{"name":"never.tailfe8c.ts.net","tags":["tag:managed"],"connectedToControl":false}
 		]}`)
 	}))
 	defer srv.Close()
@@ -224,6 +229,9 @@ func TestAnOmittedLastSeenIsToldApartByConnectedToControl(t *testing.T) {
 		byName[d.Name] = d
 	}
 
+	if _, ok := byName["live"]; !ok {
+		t.Fatalf("no device named live in %v", devices)
+	}
 	if byName["live"].LastSeen.IsZero() {
 		t.Error("a device connected to control read as never seen; it cannot be stale by any definition")
 	}
@@ -237,5 +245,78 @@ func TestAnOmittedLastSeenIsToldApartByConnectedToControl(t *testing.T) {
 	got := Reconcile(devices, []string{"live", "never"}, "tag:managed", now, time.Hour)
 	if len(got.Unreachable) != 1 || got.Unreachable[0] != "never" {
 		t.Errorf("Unreachable = %v, want exactly [never]", got.Unreachable)
+	}
+}
+
+// TestAManagedDeviceIsMatchedToItsDeclaredHostByMagicDNSName is the defect
+// the bare-name fixtures hid. The API names a device by its MagicDNS name;
+// the inventory names a host by its record. Compared as-is they never match,
+// so a declared, connected, managed host reads as BOTH unreachable AND an
+// undeclared intruder -- and the intruder half refuses every play in the pass.
+//
+// Found 2026-09-11 when a host joined a real tailnet: `tailscale whoami`
+// reported "<hostname>.<tailnet>.ts.net", the shape the schema documents.
+func TestAManagedDeviceIsMatchedToItsDeclaredHostByMagicDNSName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"devices":[
+			{"name":"dev-agent.tailfe8c.ts.net","tags":["tag:managed"],"connectedToControl":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	devices, err := newTestClient(t, srv.URL).Devices(context.Background())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+	got := Reconcile(devices, []string{"dev-agent"}, "tag:managed", time.Now(), time.Hour)
+	if len(got.UnknownTagged) != 0 {
+		t.Errorf("UnknownTagged = %v: the declared host dev-agent was not recognised under its MagicDNS name", got.UnknownTagged)
+	}
+	if len(got.Unreachable) != 0 {
+		t.Errorf("Unreachable = %v: a connected device named dev-agent.<tailnet> did not vouch for dev-agent", got.Unreachable)
+	}
+}
+
+// TestASharedInDeviceNeverVouchesForADeclaredHost pins what matching by the
+// first DNS label would otherwise open. A device shared INTO the tailnet
+// (isExternal) belongs to someone else's tailnet, and its label is theirs to
+// choose -- so "dev-agent.other.ts.net" must not make our dev-agent reachable.
+func TestASharedInDeviceNeverVouchesForADeclaredHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"devices":[
+			{"name":"dev-agent.other-tailnet.ts.net","tags":[],"isExternal":true,"connectedToControl":true}
+		]}`)
+	}))
+	defer srv.Close()
+
+	devices, err := newTestClient(t, srv.URL).Devices(context.Background())
+	if err != nil {
+		t.Fatalf("Devices: %v", err)
+	}
+	got := Reconcile(devices, []string{"dev-agent"}, "tag:managed", time.Now(), time.Hour)
+	if len(got.Unreachable) != 1 || got.Unreachable[0] != "dev-agent" {
+		t.Errorf("Unreachable = %v, want exactly [dev-agent]: a shared-in device vouched for a host on this tailnet", got.Unreachable)
+	}
+}
+
+// TestANameThatIsNotAMagicDNSNameIsRefused keeps the parse honest. A name
+// with no domain, or an empty first label, is not the documented shape, and
+// guessing a host from it is how a device gets matched to the wrong record.
+func TestANameThatIsNotAMagicDNSNameIsRefused(t *testing.T) {
+	for _, name := range []string{"web-1", ".tailfe8c.ts.net", ""} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"devices":[{"name":%q,"tags":["tag:managed"],"connectedToControl":true}]}`, name)
+			}))
+			defer srv.Close()
+
+			devices, err := newTestClient(t, srv.URL).Devices(context.Background())
+			if err == nil {
+				t.Fatalf("device name %q was accepted as %v, want a refusal", name, devices)
+			}
+			if !strings.Contains(err.Error(), "MagicDNS") {
+				t.Errorf("error %q does not say the name is not a MagicDNS name", err.Error())
+			}
+		})
 	}
 }
