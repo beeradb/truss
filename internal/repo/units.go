@@ -75,6 +75,36 @@ var (
 	deliveryUnit = regexp.MustCompile(`^deliveries/([^/]+)/([^/]+)/`)
 )
 
+// The same prefixes, anchored, for the OTHER question. The patterns above
+// answer "which unit owns this file", where a prefix is right: a file at
+// ansible/plays/<p>/group_vars/all.yml belongs to <p>. These answer "is this
+// path itself a unit", where a prefix is WRONG, and the difference wedged the
+// applier on 2026-09-12.
+//
+// ⚠️ KindOf USED TO ASK THE FIRST QUESTION AND ACT ON THE ANSWER TO THE
+// SECOND. It matched path+"/" against the prefixes, so every directory nested
+// inside a unit answered yes. TreeAnsibleUnits lists with `ls-tree -d -r`, so
+// ansible/plays/<p>/group_vars -- Ansible's own standard layout -- arrived as
+// a play of its own, with no site.yml and no host declaring it. The target
+// gate then refused EVERY play in the pass, every five minutes, and the fleet
+// stopped. internal/ansible/ansible.go already said a play is a directory
+// containing site.yml; nothing made unit selection agree with it.
+//
+// ⚠️ TWO SHAPES OF ONE PREFIX IS NOT TWO COPIES OF ONE FACT. They are two
+// questions. Collapsing them by anchoring the patterns above would fix
+// classification and silently break selection: a commit touching only a
+// play's group_vars would then select no play at all -- absent read as
+// compliant, which is quieter and worse than the wedge it replaced.
+// TestAFileInAUnitsSubdirectoryStillSelectsThatUnit exists to refuse that fix.
+var (
+	clusterUnitExact  = regexp.MustCompile(`^clusters/[^/]+$`)
+	hostUnitExact     = regexp.MustCompile(`^hosts/[^/]+$`)
+	projectUnitExact  = regexp.MustCompile(`^projects/[^/]+$`)
+	ansibleUnitExact  = regexp.MustCompile(`^ansible/plays/[^/]+$`)
+	baselineUnitExact = regexp.MustCompile(`^baselines/[^/]+$`)
+	deliveryUnitExact = regexp.MustCompile(`^deliveries/[^/]+/[^/]+$`)
+)
+
 // unitSharedInput is a path that is an input to EVERY unit.
 //
 // ⚠️ IT IS DELIBERATELY NOT sharedInput, EVEN THOUGH IT CONTAINS IT.
@@ -126,13 +156,13 @@ func KindOf(path string) (Kind, bool) {
 		return KindCredentials, true
 	case path == "platform":
 		return KindTofu, true
-	case projectPath.MatchString(path + "/"):
+	case projectUnitExact.MatchString(path):
 		return KindTofu, true
-	case clusterUnit.MatchString(path + "/"), hostUnit.MatchString(path + "/"):
+	case clusterUnitExact.MatchString(path), hostUnitExact.MatchString(path):
 		return KindTofu, true
-	case ansibleUnit.MatchString(path + "/"):
+	case ansibleUnitExact.MatchString(path):
 		return KindAnsible, true
-	case baselineUnit.MatchString(path + "/"), deliveryUnit.MatchString(path + "/"):
+	case baselineUnitExact.MatchString(path), deliveryUnitExact.MatchString(path):
 		return KindRender, true
 	}
 	return 0, false
