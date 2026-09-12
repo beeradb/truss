@@ -21,14 +21,29 @@ import (
 // reading fine everywhere else.
 const heartbeatTimeLayout = "2006-01-02T15:04:05Z"
 
-// defaultStaleAfter is three missed passes of the applier's five-minute
-// CronJob: long enough that one slow pass (a large plan, a busy state
-// lock) does not trip a false alarm, short enough that a stopped CronJob
-// is noticed well within the working day, instead of only at the next
-// person to go looking. Not derived from the schedule at runtime -- the
-// schedule lives in a Kubernetes manifest this binary never reads, so 15m
-// is a measured constant, restated here rather than imported.
-const defaultStaleAfter = 15 * time.Minute
+// missedPasses is how many passes may go by before the applier is
+// presumed stopped rather than merely quiet: long enough that one slow
+// pass (a large plan, a busy state lock) does not trip a false alarm,
+// short enough that a stopped applier is noticed well within the working
+// day. It is the number the old 15-minute constant encoded -- three
+// misses of a five-minute CronJob -- restated as the arithmetic instead
+// of the answer, so the cadence and the threshold cannot independently
+// drift out of agreement the way they did once already (see loop.go's
+// own history: a naive carry-over of "three misses" at the loop's
+// 1-minute interval would have paged daily).
+const missedPasses = 3
+
+// staleAfter is the ONE definition of "too long since the last pass",
+// shared by `truss status` and the loop's own /metrics and control API:
+// there is no second number anywhere in this binary that also means
+// this. Under `truss apply` (a one-shot process with no interval of its
+// own) `truss status` assumes defaultLoopInterval (loop.go), which is
+// the schedule any deployment of this binary is expected to run under.
+func staleAfter(interval time.Duration) time.Duration { return missedPasses * interval }
+
+// defaultStaleAfter is `truss status`'s own default when --stale-after is
+// not given: three missed passes at the loop's own default interval.
+var defaultStaleAfter = staleAfter(defaultLoopInterval)
 
 // cmdStatus implements `truss status` (docs/work-items.md:86-133): read
 // the ledger over S3, the same credential the applier uses, and answer

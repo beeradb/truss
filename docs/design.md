@@ -10,8 +10,10 @@ gate it has to pass on the way.
   the system can give one.
 - **a root** — one OpenTofu configuration with its own state file. Planned and
   applied separately; what a root's state holds decides who may read it.
-- **the applier** — a small scheduled job inside the cluster. It is the only
-  thing in the system holding credentials that can change anything.
+- **the applier** — this binary, running inside the cluster: one pass
+  (`truss apply`) or passes on an interval until told to stop (`truss loop`).
+  It is the only thing in the system holding credentials that can change
+  anything.
 - **the forge** — wherever the code and its reviews live. GitHub today, and
   the only implementation.
 
@@ -35,8 +37,10 @@ a conditional write: no create-if-absent primitive is reachable from an
 S3-compatible client against this endpoint, which is a measurement rather than
 an oversight — see the comment above `Put` in `internal/ledger/store.go` for
 what was tried and what the bucket answered. Mutual exclusion comes from the
-layer that actually has it: the applier runs one pass at a time, and OpenTofu
-holds its own state lock.
+layer that actually has it: one pass runs at a time — a serial, in-process
+queue under `truss loop`, one pod per pass under a scheduled `truss apply` —
+and OpenTofu holds its own state lock as the fence against the case either
+of those can still miss (two processes briefly alive at once).
 
 ## The change path
 

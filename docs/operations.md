@@ -144,18 +144,20 @@ Every alert in [observability/alerts/truss.rules.yml](../observability/alerts/tr
 carries its own reasoning, and the dashboards beside it are where you look
 next. Three things are worth knowing before you read a panel.
 
-**Check the freshness tile first, every time.** Truss is a CronJob and pushes
-its metrics to a Pushgateway, and a gateway serves the last thing it was given
-forever. An applier that has stopped running entirely still reports
-`truss_pass_success 1`. `time() - truss_pass_timestamp_seconds` is the only
-expression that goes bad on its own when nothing pushes; if it is red,
-**nothing else on the page is evidence of anything.**
+**Check the freshness tile first, every time.** `truss loop` serves /metrics
+directly; a deployment still pushing to a Pushgateway is trusting a component
+that serves the last thing it was given forever, so either way an applier
+that has stopped running entirely can still report `truss_pass_success 1`.
+`time() - truss_pass_timestamp_seconds` is the only expression that goes bad
+on its own when nothing reports; if it is red and no pass is in flight
+(`truss_loop_pass_in_flight == 0`), **nothing else on the page is evidence of
+anything.**
 
 **The pass narrates itself in logfmt with a level.** Ordinary narration is
 `level=info`, a non-fatal problem is `level=warn`, and something that was
 *lost* — a ledger object that could not be written — is `level=error`.
 
-    kubectl -n <namespace> logs job/<the most recent applier job> | grep level=error
+    kubectl -n <namespace> logs <the applier pod, or its most recent job> | grep level=error
 
 **A refusal repeats.** The queue does not advance past a commit that failed, so
 a real refusal is a continuous band on the timeline dashboard rather than a
@@ -176,8 +178,9 @@ setting Prometheus overwrites `job` with the scrape job's own name, and every
 selector in the rules and dashboards matches nothing. This is the first thing
 to check, because it fails silently and completely.
 
-**`METRICS_PUSH_URL` is not set on the CronJob.** Unset means the feature is
-off; the pass is unaffected and pushes nothing. A gateway that is set but
-unreachable is louder — the pass logs `level=warn msg="metrics push failed"`
-and carries on, because a monitoring endpoint being down must never fail a pass
-that applied infrastructure correctly.
+**`METRICS_PUSH_URL` is not set on the manifest.** Unset means the feature is
+off; the pass is unaffected and pushes nothing — under `truss loop`, /metrics
+still works regardless. A gateway that is set but unreachable is louder — the
+pass logs `level=warn msg="metrics push failed"` and carries on, because a
+monitoring endpoint being down must never fail a pass that applied
+infrastructure correctly.

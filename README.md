@@ -10,9 +10,10 @@ every apply, not assumed.** Truss ties an approval to a cryptographic digest of
 the exact plan it was given, and refuses to apply anything whose plan does not
 hash to what the approver read.
 
-It is a GitOps applier for OpenTofu that runs as a scheduled job inside your
-cluster, and it is the only thing in the system holding credentials that can
-change anything. Each pass it re-reads your branch protection from the forge's
+It is a GitOps applier for OpenTofu that runs inside your cluster, one pass at
+a time -- `truss apply` for a single pass, or `truss loop` to run passes on an
+interval until told to stop -- and it is the only thing in the system holding
+credentials that can change anything. Each pass it re-reads your branch protection from the forge's
 API, checks how every new commit on `main` actually got there, re-plans that
 commit with its own credentials, and applies it only if the plan matches the
 approved one. Every credential it touches is either minted and rotated by code
@@ -160,12 +161,15 @@ apart from a job that is no longer running.
 
 ## Every refusal is a number, not just a sentence
 
-Each pass pushes what it did to a Prometheus Pushgateway — the whole state of
-the run, as gauges: which gate refused and in which class, how long each root
-spent in each step of its apply, how many days each credential has left, which
-roots drifted and which ones could not even be checked. The dashboards and the
-alerting rules that read them ship in
-[observability/](observability/README.md).
+Each pass reports what it did as the whole state of the run, in gauges: which
+gate refused and in which class, how long each root spent in each step of its
+apply, how many days each credential has left, which roots drifted and which
+ones could not even be checked. `truss loop` serves this directly at
+`/metrics`; a deployment that has not wired a scrape can instead push it to a
+Prometheus Pushgateway by setting `METRICS_PUSH_URL` (off by default, and a
+gateway that is down cannot fail a pass — the push is the last thing a pass
+does, long after the heartbeat and the alert). The dashboards and the alerting
+rules that read them ship in [observability/](observability/README.md).
 
 **The classes are the point.** A digest refusal means the plan about to run did
 not hash to the plan a human read; a `tofu apply` returning non-zero means
@@ -173,15 +177,13 @@ something broke. Both are red and they want different people, so they are
 different series — never a regex over the alert text, which is the mistake a
 dashboard makes once.
 
-⚠️ **A Pushgateway serves the last thing it was given, forever.** An applier
-that has stopped running entirely keeps reporting its final healthy state, so
-every alert here is anchored on `time() - truss_pass_timestamp_seconds` — the
-one expression that goes bad on its own when nothing pushes. That trade is
-written down rather than discovered.
-
-It is off unless you set `METRICS_PUSH_URL`, and a gateway that is down cannot
-fail a pass: the push is the last thing a pass does, long after the heartbeat
-and the alert.
+⚠️ **Whichever transport you use, staleness is the load-bearing signal, not
+the outcome fields.** A Pushgateway serves the last thing it was given,
+forever, so an applier that has stopped running entirely keeps reporting its
+final healthy state through it; every alert here is anchored on
+`time() - truss_pass_timestamp_seconds` — the one expression that goes bad on
+its own when nothing reports. That trade is written down rather than
+discovered.
 
 ## Nothing about your deployment is baked into the binary
 

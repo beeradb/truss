@@ -29,13 +29,19 @@ type Config struct {
 	// whole metric set to as its last act. Optional with NO default: empty
 	// means the feature is off and nothing about the pass changes.
 	//
-	// ⚠️ A PUSHGATEWAY, NOT A PROMETHEUS. The pass is a CronJob and is gone
-	// before any scrape could reach it; the gateway is the component that
-	// holds a batch job's last numbers for the scrape to find. What that
-	// means for anybody writing a query is stated in observability/README.md
-	// and is not optional reading: the gateway keeps serving the last push
-	// forever, so an applier that has stopped running entirely still reports
-	// its final healthy state.
+	// ⚠️ A PUSHGATEWAY, NOT A PROMETHEUS -- AND UNDER `truss loop`, A
+	// TRANSITIONAL ONE. `truss loop` also serves /metrics directly, from the
+	// same passMetrics output this pushes (cmd/truss/metrics_server.go); the
+	// two are one producer with two transports, not a choice. This variable
+	// exists for a deployment that has not yet wired a scrape job, and a
+	// deployment that has retires it by removing it from the manifest, not by
+	// an engine-side flag. Under `truss apply` (a one-shot process with no
+	// listener at all) it is the only way metrics leave the process. What
+	// that means for anybody writing a query against the pushed series is
+	// stated in observability/README.md and is not optional reading: the
+	// gateway keeps serving the last push forever, so an applier that has
+	// stopped running entirely still reports its final healthy state through
+	// this path.
 	//
 	// It is a bearer secret in the same sense HeartbeatPingURL is -- it can
 	// carry credentials in its userinfo -- so it is never logged, never

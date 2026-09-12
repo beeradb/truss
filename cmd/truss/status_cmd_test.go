@@ -29,6 +29,21 @@ func statusHeartbeat(t time.Time, lastSHA string, applied, noop int, failure *st
 	return body
 }
 
+// TestStalenessIsDerivedFromThePassIntervalNotAConstant pins the formula
+// itself: three missed passes, at whatever interval is given, not a
+// number restated independently of the schedule it describes.
+func TestStalenessIsDerivedFromThePassIntervalNotAConstant(t *testing.T) {
+	if got, want := staleAfter(time.Minute), 3*time.Minute; got != want {
+		t.Errorf("staleAfter(1m) = %v, want %v", got, want)
+	}
+	if got, want := staleAfter(5*time.Minute), 15*time.Minute; got != want {
+		t.Errorf("staleAfter(5m) = %v, want %v (the old CronJob-era constant, derived rather than restated)", got, want)
+	}
+	if defaultStaleAfter != staleAfter(defaultLoopInterval) {
+		t.Errorf("defaultStaleAfter = %v, want staleAfter(defaultLoopInterval) = %v -- they must be the same formula, not two numbers that happen to agree", defaultStaleAfter, staleAfter(defaultLoopInterval))
+	}
+}
+
 // TestStatusHealthyExitsZeroAndNamesShaAndAge is the clean case: a fresh
 // heartbeat, no failure. It also carries the "names the last sha and the
 // age" assertion the spec calls for, since a healthy run is the simplest

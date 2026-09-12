@@ -175,6 +175,6 @@ RUN chown 10001:10001 /work
 USER 10001
 
 # No default subcommand: `truss` with no arguments prints usage and exits 2,
-# so a CronJob that forgets its argument fails loudly rather than doing
-# something plausible.
+# so a manifest that forgets its argument (`apply`, `loop`, `publish`, ...)
+# fails loudly rather than doing something plausible.
 ENTRYPOINT ["/usr/local/bin/truss"]

@@ -15,44 +15,61 @@ thing you supply is where to push.
 
 ## ⚠️ Read this before writing a single query
 
-**Truss is a CronJob. It pushes; nothing scrapes it.** The pass exists for the
-length of one run, so by the time a scrape arrived the process holding the
-numbers has exited. It pushes to a **Prometheus Pushgateway**, which is the
-component for exactly this case.
+**`truss loop` serves `/metrics` directly; a deployment that has not wired a
+scrape can also push the same numbers to a Prometheus Pushgateway.** These are
+two transports for one producer (`passMetrics`, `cmd/truss/metrics.go`), never
+two different sets of numbers — the served body is the pushed body with one
+label added (`pass="frequent"` or `pass="drift"`, see point 3 below), so
+everything past this point applies identically to both. `truss apply` (a
+one-shot process with no listener) can only push.
 
 Three consequences, and none of them are optional reading:
 
-**1. A Pushgateway serves the last thing it was given, forever.** If truss
-stops running entirely — the image will not pull, the CronJob was suspended,
-the node is gone — every metric here keeps answering with whatever the last
-healthy pass said. `truss_pass_success` stays `1`. A dashboard built on the
-outcome series alone reports a dead applier as a healthy one.
+**1. A Pushgateway serves the last thing it was given, forever — a fact that
+is now purely about that ONE transport, not about truss.** If a Pushgateway
+deployment stops receiving pushes — the image will not pull, the pod is
+crashlooping, the node is gone — every metric there keeps answering with
+whatever the last healthy pass said. `truss_pass_success` stays `1`. A
+dashboard built on the outcome series alone reports a dead applier as a
+healthy one. A scraped `/metrics` target degrades more informatively (`up`
+goes to 0), but the per-pass series it serves have exactly the same staleness
+problem once the process itself is gone, which is why the rule below still
+matters either way.
 
 > **`time() - truss_pass_timestamp_seconds` is the only expression that goes
-> bad on its own when nothing pushes.** It is the dead man's switch, it is the
-> first rule in `alerts/truss.rules.yml`, and it is the first tile on the
+> bad on its own when nothing reports.** It is the dead man's switch, it is
+> the first rule in `alerts/truss.rules.yml`, and it is the first tile on the
 > overview dashboard. Anchor on it; read nothing else as evidence when it is
-> red.
+> red **and no pass is currently in flight**
+> (`truss_loop_pass_in_flight == 0`) — under the loop, a long-running drift
+> pass legitimately delays the next frequent heartbeat in a way the old
+> CronJobs' separate schedules could not.
 
-**2. Every sample is a gauge, and `rate()` does not mean what it usually
-means.** A counter's meaning is "monotonically increasing since this process
-started"; this process starts, counts to three and exits, so the next pass
-would push a smaller number and Prometheus would read the drop as a counter
-reset. What truss can honestly report is the state of **one pass**.
+**2. Every `truss_pass_*` sample is a gauge, and `rate()` does not mean what
+it usually means for them.** A counter's meaning is "monotonically increasing
+since this process started"; each of these describes **one pass**, not the
+process's lifetime, so a counter would be the wrong shape even now that the
+process (under the loop) has a lifetime to count across. `truss loop` adds a
+small set of genuinely cumulative, process-lifetime counters alongside them
+(`truss_passes_total`, and any family whose `# TYPE` line in `/metrics` says
+`counter`) — those, and only those, are the ones `rate()`/`increase()` mean
+what you expect on.
 
 So `truss_pass_commits_applied` is "the last pass applied N commits", not a
-running total. `increase(...[1d])` over it is wrong twice over: the gateway is
-scraped every 15 seconds and serves the same value each time, so the same pass
-is counted repeatedly. Query these as state — `truss_digest_refusals > 0`, not
-`rate(truss_digest_refusals[5m])`.
+running total. `increase(...[1d])` over it is wrong twice over: it is
+re-served (pushed or scraped) unchanged between passes, so the same pass is
+counted repeatedly. Query these as state — `truss_digest_refusals > 0`, not
+`rate(truss_digest_refusals[5m])`. `sum by (pass) (rate(truss_passes_total[15m]))`
+is the query for "how often is each kind of pass actually running."
 
-**3. The two passes push under different grouping keys.** The frequent pass
-(every five minutes) applies commits and never rotates; the daily pass rotates,
-publishes and sweeps expiries and never applies. They arrive as
-`pass="frequent"` and `pass="drift"`. Under one key the frequent pass would
-overwrite the daily one's rotation and expiry series five minutes after they
-were written, so **a query for anything rotation- or expiry-shaped must say
-`{pass="drift"}`**.
+**3. The two passes are told apart by a `pass` label, pushed under different
+grouping keys or served with different sample labels depending on transport
+— same result either way.** The frequent pass applies commits and never
+rotates; the daily pass rotates, publishes and sweeps expiries and never
+applies. They arrive as `pass="frequent"` and `pass="drift"`. Collapsed to one
+series, the frequent pass would overwrite the daily one's rotation and expiry
+series a tick later, so **a query for anything rotation- or expiry-shaped must
+say `{pass="drift"}`**.
 
 ## Wiring it up
 
