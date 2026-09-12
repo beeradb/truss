@@ -222,6 +222,24 @@ check 'prometheus url elsewhere' refuse d.txt \
 check '1password packages'   clean  d.txt 'curl https://downloads.1password.com/linux/keys/1password.asc'
 check '1password vault uri'  refuse d.txt 'op://platform/gcs-ledger/endpoint'
 
+# ⚠️ THE LICENCE'S TWO ADDRESSES, AS THE CANONICAL TEXT WRITES THEM. LICENSE is
+# copied verbatim from apache.org, so both lines must pass exactly as they sit
+# there. The refusing halves keep the exemption to that file and those lines:
+# the same URL one file over, another apache.org path, the URL with something
+# beside it, and one that walks back out of /licenses/ all still bite.
+check 'licence header url'      clean  LICENSE \
+  '                        http://www.apache.org/licenses/'
+check 'licence appendix url'    clean  LICENSE \
+  '       http://www.apache.org/licenses/LICENSE-2.0'
+check 'licence url elsewhere'   refuse README.md \
+  'Licensed under http://www.apache.org/licenses/LICENSE-2.0'
+check 'other apache.org path'   refuse LICENSE \
+  '       http://www.apache.org/foundation/private-thing'
+check 'licence url plus bucket' refuse LICENSE \
+  '       http://www.apache.org/licenses/LICENSE-2.0  # mirrored to gs://real-bucket'
+check 'licence url escapes'     refuse LICENSE \
+  '       http://www.apache.org/licenses/../../someorg/private-platform/x'
+
 # ⚠️ THE TOOLCHAIN'S OWN DOWNLOADS, UNDER THE SAME RULE AND WITH THE SAME
 # LIMIT. scripts/toolchain fetches the pinned Go, jq and OpenTofu; a published
 # release address names the vendor and is identical for every user. The

@@ -53,11 +53,16 @@ const apiHost = "https://api.tailscale.com"
 // observation, never a declaration of what should exist (see the package
 // doc and Reconcile).
 type Device struct {
-	// Name is the wire field "name": the device's MagicDNS name (e.g.
-	// "pangolin.tailfe8c.ts.net" in Tailscale's own example). Verified
-	// against the `Device` schema in the OpenAPI document cited above.
-	// "hostname" is a different, shorter field in the same schema (the
-	// admin-console display name) and is not used here.
+	// Name is the host label of the wire field "name", which is the device's
+	// MagicDNS name ("pangolin.tailfe8c.ts.net" in the `Device` schema of the
+	// OpenAPI document cited above) -- so Name is "pangolin", the form an
+	// inventory record names a host by.
+	//
+	// ⚠️ THE FIRST LABEL, NOT A SUFFIX STRIPPED BY Config.Tailnet. Tailnet
+	// may be "-" or an organisation name, neither of which is the MagicDNS
+	// domain, so trimming by it would be right for one deployment's spelling
+	// and silently wrong for the others. "hostname" is a different field in
+	// the same schema (the admin-console machine name) and is not used here.
 	Name string
 	// Tags is the wire field "tags": every ACL tag applied to the device.
 	// A device carrying none of them relevant to this package is not our
@@ -88,12 +93,19 @@ type wireDevice struct {
 	Tags               []string `json:"tags"`
 	LastSeen           *string  `json:"lastSeen"`
 	ConnectedToControl bool     `json:"connectedToControl"`
+	// IsExternal is true for a device shared INTO the tailnet from another
+	// one -- "not a member of the tailnet", in the schema's words.
+	IsExternal bool `json:"isExternal"`
 }
 
 // toDevice converts one wire record, using now to stand in for a
 // currently-connected device's omitted lastSeen -- see Device.LastSeen.
 func (w wireDevice) toDevice(now time.Time) (Device, error) {
-	d := Device{Name: w.Name, Tags: w.Tags}
+	label, domain, _ := strings.Cut(w.Name, ".")
+	if label == "" || domain == "" {
+		return Device{}, fmt.Errorf("tailnet: device name %q is not a MagicDNS name (<host>.<domain>), so it cannot be matched to an inventory record", w.Name)
+	}
+	d := Device{Name: label, Tags: w.Tags}
 	switch {
 	case w.LastSeen != nil:
 		t, err := time.Parse(time.RFC3339, *w.LastSeen)
@@ -194,7 +206,7 @@ func sanitizeErr(err error, apiKey string) error {
 	return errors.New(redact(err.Error(), apiKey))
 }
 
-// Devices lists every device on the configured tailnet. A non-2xx response
+// Devices lists every member device of the configured tailnet. A non-2xx response
 // is an error naming the status -- never an empty slice, which this method
 // reserves for the tailnet genuinely having no devices (internal/secrets'
 // Store.List records why the two must never be confused: an unreadable
@@ -234,6 +246,15 @@ func (c *Client) Devices(ctx context.Context) ([]Device, error) {
 	now := time.Now()
 	devices := make([]Device, 0, len(parsed.Devices))
 	for _, w := range parsed.Devices {
+		// ⚠️ A SHARED-IN DEVICE IS SOMEBODY ELSE'S MACHINE, AND MATCHING BY
+		// HOST LABEL WOULD LET IT VOUCH FOR ONE OF OURS. Its label is chosen
+		// in its own tailnet, so "dev-agent.<theirs>" must not make the
+		// declared dev-agent reachable. The schema also leaves its tags
+		// empty, so it can never be a managed intruder either: it is not
+		// evidence about this tailnet in any direction.
+		if w.IsExternal {
+			continue
+		}
 		d, err := w.toDevice(now)
 		if err != nil {
 			return nil, err

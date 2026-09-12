@@ -254,3 +254,73 @@ func TestTouchedUnitsTofuHalfMatchesTouchedRoots(t *testing.T) {
 		})
 	}
 }
+
+// TestASubdirectoryInsideAUnitIsNotItselfAUnit is the regression for the
+// wedge of 2026-09-12. KindOf classified by PREFIX, so every directory NESTED
+// inside a unit answered "yes, I am a unit too". Ansible's own standard
+// layout was the first to commit one: ansible/plays/<play>/group_vars became
+// a play in its own right -- with no site.yml and no host naming it -- and
+// the target gate refused every play in the pass, every five minutes, until
+// the engine was fixed.
+//
+// ⚠️ IT WAS NOT ANSIBLE-SPECIFIC AND THE OTHER KINDS ARE LISTED HERE ON
+// PURPOSE. The same prefix rule accepted hosts/<h>/anything and
+// deliveries/<c>/<n>/anything; nobody had committed a subdirectory inside
+// those yet. A delivery's own base/ overlay would have found it next.
+func TestASubdirectoryInsideAUnitIsNotItselfAUnit(t *testing.T) {
+	for _, p := range []string{
+		"ansible/plays/dev-workstation/group_vars",
+		"ansible/plays/dev-workstation/host_vars",
+		"ansible/plays/node-exporter/group_vars/nested/deeper",
+		"clusters/beta/manifests",
+		"hosts/h/.terraform",
+		"baselines/base/overlays",
+		"deliveries/beta/web/base",
+	} {
+		if k, ok := KindOf(p); ok {
+			t.Errorf("KindOf(%q) = %v, true; want it rejected -- it is a directory INSIDE a unit, not a unit", p, k)
+		}
+	}
+
+	// And the units themselves must still be units, or the fix has simply
+	// stopped truss seeing anything at all.
+	for p, want := range map[string]Kind{
+		"ansible/plays/dev-workstation": KindAnsible,
+		"clusters/beta":                 KindTofu,
+		"hosts/h":                       KindTofu,
+		"baselines/base":                KindRender,
+		"deliveries/beta/web":           KindRender,
+		"platform":                      KindTofu,
+		"credentials":                   KindCredentials,
+	} {
+		k, ok := KindOf(p)
+		if !ok || k != want {
+			t.Errorf("KindOf(%q) = %v, %v; want %v, true", p, k, ok, want)
+		}
+	}
+}
+
+// TestAFileInAUnitsSubdirectoryStillSelectsThatUnit is the other half, and it
+// exists to stop the fix above being made the wrong way. The same patterns
+// map a CHANGED FILE to the unit that owns it, and there the prefix shape is
+// correct: a file in group_vars/ belongs to its play. Anchoring the shared
+// patterns would fix classification and silently break selection -- commits
+// touching a play's variables would select no play at all, which is the
+// "absent read as compliant" failure the whole unit machinery exists to
+// avoid, and a quieter one than the wedge it replaced.
+func TestAFileInAUnitsSubdirectoryStillSelectsThatUnit(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want Unit
+	}{
+		{"ansible/plays/dev-workstation/group_vars/all.yml", Unit{KindAnsible, "ansible/plays/dev-workstation"}},
+		{"ansible/plays/dev-workstation/host_vars/dev-agent.yml", Unit{KindAnsible, "ansible/plays/dev-workstation"}},
+		{"hosts/h/nested/main.tf", Unit{KindTofu, "hosts/h"}},
+		{"deliveries/beta/web/base/kustomization.yaml", Unit{KindRender, "deliveries/beta/web"}},
+	} {
+		got := TouchedUnits([]string{tc.file}, nil)
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("TouchedUnits(%q) = %v; want exactly [%v]", tc.file, got, tc.want)
+		}
+	}
+}
