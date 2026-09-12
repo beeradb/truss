@@ -215,6 +215,55 @@ func TestInventoryGateAppliesAStatelessMoveBetweenClusters(t *testing.T) {
 	}
 }
 
+// TestInventoryGateComparesMainsCommitNotThePRHeadSHA: CheckMoves must
+// compare the commit runCommitLoop is actually walking (sha, main's own
+// history) against ITS parent -- never headSHA (checkCommitGate's
+// pr.HeadSHA), whose parent is whatever the PR branch's own git history
+// says came before it.
+//
+// A PR resynced with `git merge origin/main` more than once builds exactly
+// this trap: headSHA's first parent is the PR branch's OWN prior commit,
+// not sha's real predecessor on main. If an unrelated stateful placement
+// change landed on main inside that merge bubble, comparing headSHA against
+// its own parent reads as a data-losing move that never actually happened
+// to sha at all -- sha's real parent shows no change.
+//
+// Measured live 2026-09-12: platform PR #120 (no inventory/ in its own
+// diff) was refused this way after a resync merge bubble hid platform PR
+// #125's dev-agent -> dev-1 rename from the comparison.
+func TestInventoryGateComparesMainsCommitNotThePRHeadSHA(t *testing.T) {
+	const sha = "invsquashsha"               // the commit runCommitLoop is walking, on main
+	const shaParent = "invsquashshaparent"   // sha's REAL parent on main: no move happened
+	const head = "invsquashhead"             // pr.HeadSHA: a different commit, same tree as sha
+	const headParent = "invsquashheadparent" // head's OWN first parent: a stale point in the PR branch's history, predating an unrelated rename
+
+	git := &fakeGit{
+		CommitsList: []string{sha},
+		TreeFSBySha: map[string]fs.FS{
+			sha:        invStatefulTree("prod", true),
+			shaParent:  invStatefulTree("prod", true),   // sha vs its real parent: no move
+			head:       invStatefulTree("prod", true),   // squash preserves sha's tree content
+			headParent: invStatefulTree("backup", true), // stale: the PR branch's own history before a resync
+		},
+		ParentBySha: map[string]string{
+			sha:  shaParent,
+			head: headParent,
+		},
+	}
+	tofu := &fakeTofu{PlanDetailedChanged: true}
+	deps, fl := invApplyDeps(t, sha, head, git, tofu)
+	fl.put("digests/"+sha+"/platform.digest", []byte(ourDigest(t)))
+
+	result := runInvPass(t, deps, "startsha")
+	if result.failure != "" {
+		t.Fatalf("result.failure = %q, want empty -- sha's real parent shows no move; "+
+			"headSHA's own first parent (a stale point in the PR branch's history) must not be consulted", result.failure)
+	}
+	if _, ok := fl.get("applied/" + sha); !ok {
+		t.Errorf("applied/%s was not written", sha)
+	}
+}
+
 // TestInventoryGateSkipsATreeWithNoInventoryDirectory is the
 // parity-protecting case: a deployment that has never adopted the
 // inventory must not have every one of its commits refused for the
