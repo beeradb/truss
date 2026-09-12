@@ -32,6 +32,101 @@ type Host struct {
 	Cluster        *string  `json:"cluster"` // cluster name, or explicit null
 	Frozen         bool     `json:"frozen"`
 	Decommissioned bool     `json:"decommissioned"`
+	// Access says HOW the applier reaches this machine, which decides
+	// WHICH provider is allowed to vouch that it exists before a play is
+	// run against it. See Access.
+	//
+	// ⚠️ NIL IS TOLERATED AND MEANS "tailscale", WHICH IS THE ONE PLACE
+	// THIS PACKAGE READS AN UNSTATED FIELD AS AN ANSWER -- and it is a
+	// deliberate exception to the rule HasHAVault and Stateful state, not
+	// a lapse from it. Those two refuse nil because nobody has ever
+	// answered them and the answer changes what happens. Every host record
+	// written before this field existed was, necessarily, reached over the
+	// tailnet: it was the only thing the applier could reach a machine
+	// through, and the only evidence it would accept. So nil is not an
+	// unanswered question here, it is a question that had exactly one
+	// possible answer at the time the record was written, and reading it
+	// as that answer is the only default that cannot silently change what
+	// an existing commit does.
+	//
+	// It does not fail open: a host that resolves to "tailscale" in a
+	// deployment with no tailscale credential mounted is still refused, by
+	// the same rule as one that says so out loud. And the applier names
+	// every such host on every pass, so the tolerance is visible rather
+	// than assumed.
+	Access *Access `json:"access"`
+}
+
+// The values Access.Via may take. Each names ONE provider of host
+// evidence; the applier maps them onto the thing that does the observing.
+//
+// ⚠️ THEY ARE A CLOSED SET AND AN UNRECOGNISED ONE IS REFUSED, not ignored.
+// A record whose access nobody can read is a record nothing can vouch for,
+// and the failure of accepting it quietly is a host that gets configured on
+// the strength of no evidence at all.
+const (
+	// AccessTailscale: the machine is reached over the tailnet, and
+	// Tailscale's own device list is the evidence it exists.
+	AccessTailscale = "tailscale"
+	// AccessAddress: the machine is reached at an address stated in the
+	// record, and a live probe of that address is the evidence it exists.
+	AccessAddress = "address"
+)
+
+// AccessVias is every value Access.Via may take, sorted, for a refusal to
+// name when it has just refused one that is not among them.
+func AccessVias() []string { return []string{AccessAddress, AccessTailscale} }
+
+// Access says how truss reaches one machine.
+//
+// ⚠️ IT IS NOT A BOOTSTRAP PHASE AND MUST NOT BE DESIGNED AS ONE. For this
+// author's own deployment a declared address is transitional -- load a host
+// on its external address, run the play, join the tailnet, lock SSH down
+// from outside, then point the record at the internal name. For somebody
+// else it is the whole and permanent story: a fleet reached by SSH over
+// stated addresses is a real way to run machines, and truss refusing to
+// configure one would be this deployment's process compiled into a general
+// engine. Anything shaped as "temporary until the tailnet is up" rebuilds
+// that coupling more slowly.
+//
+// ⚠️ AND THE TWO ARE NOT EQUALLY SAFE, WHICH IS A FACT ABOUT THE WORLD AND
+// NOT A GAP IN THIS CODE. Tailscale can be asked "which machines claim to
+// be managed?" and answer with machines nobody declared -- an intruder, or
+// a host somebody forgot -- which is the single most valuable thing the
+// ansible target gate does. An address can only be asked about the hosts
+// the inventory already names, so it can never discover an undeclared
+// machine, and no amount of probing will make it able to. A deployment
+// reaching its hosts this way gets a strictly weaker guarantee; the applier
+// says so on every pass rather than letting an empty answer read as "none
+// found".
+type Access struct {
+	// Via names the provider. One of AccessVias().
+	Via string `json:"via"`
+	// Address is the machine's address as "<host>" or "<host>:<port>",
+	// required when Via is AccessAddress and refused otherwise -- see
+	// checkHost. It is where the applier DIALS, never where it looks the
+	// machine up: a name here that only the tailnet resolves is a record
+	// that says "address" and means "tailscale".
+	Address string `json:"address"`
+	// User is the account a play logs in as, rendered into the generated
+	// ansible inventory as ansible_user. Empty means "unstated", and an
+	// unstated user is left out of the inventory entirely so ansible's own
+	// default applies -- a play's remote_user, or the invoking account.
+	//
+	// ⚠️ IT IS ORTHOGONAL TO Via, WHICH IS WHY IT SITS BESIDE Address
+	// RATHER THAN INSIDE THE ADDRESS CASE. How a machine is RESOLVED and
+	// who you log in AS are different questions: a tailnet host is reached
+	// by name and still has an account, and the pair would have to be
+	// restated the day a host moves from an address to the tailnet --
+	// which is precisely the transition this deployment performs on every
+	// machine it builds.
+	//
+	// ⚠️ AND IT IS THE ONE PLACE THE SSH ACCOUNT IS WRITTEN DOWN. Before
+	// this field the account existed only in somebody's shell history:
+	// `root` on one host, `deploy` on another, and nothing in the tree
+	// recording which. A record that says how a machine is reached but not
+	// who reaches it is half an answer.
+	User string `json:"user"`
 }
 
 // Cluster is one Kubernetes cluster.

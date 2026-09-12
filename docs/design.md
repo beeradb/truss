@@ -232,7 +232,7 @@ cannot quietly go false one kind at a time:**
 | `credentials` (a `tofu` root) | exempt from the plan digest | the code diff itself | CI cannot plan this root — its state *is* the tokens, so there is nothing CI could read to file a digest against (`docs/credentials.md`) |
 | every other `tofu` root | plan digest | CI's plan hash vs. the applier's own re-plan | a plan is a function of the tree *and* live infrastructure, so an independent re-plan is the only thing that proves nothing moved between review and apply |
 | `render` (a delivery unit) | render digest, no exemption | CI's render hash vs. the applier's own re-render | a render is a function of the tree alone, so any unit CI could not render is a unit that will not render for the applier either |
-| `ansible` (a play) | **no digest at all** | the code diff itself, plus `gates.CheckAnsibleTargets` | CI cannot reach the hosts a play would run against, by the same design that keeps it out of the plan and render tiers — so anything CI could file would be a function of the commit alone, and the commit is already pinned by the merge-provenance gate. A digest here would be a check that cannot fail. What a digest cannot give is supplied by a different gate instead: declared hosts must be non-empty, every declared host must be reachable on the tailnet, and no device may carry the managed tag without an inventory record — refusing the whole pass if one does |
+| `ansible` (a play) | **no digest at all** | the code diff itself, plus `gates.CheckAnsibleTargets` | CI cannot reach the hosts a play would run against, by the same design that keeps it out of the plan and render tiers — so anything CI could file would be a function of the commit alone, and the commit is already pinned by the merge-provenance gate. A digest here would be a check that cannot fail. What a digest cannot give is supplied by a different gate instead: declared hosts must be non-empty, every declared host must be observed reachable *at the moment of the run* by whichever provider vouches for it, and no device may carry the managed tag without an inventory record — refusing the whole pass if one does |
 
 The `ansible` row is the same precedent `credentials` already sets —
 `docs/credentials.md`: *"what a human reviews here is the code diff itself,
@@ -244,10 +244,42 @@ machine's configuration) that CI is not allowed to read or reach.
 every OpenTofu root and before every render — infrastructure makes the
 machine, configuration configures it, delivery ships onto it — and each one
 is proved before it runs. The target set comes from `inventory.Host.Config`
-inverted, the live half from `tailnet.Reconcile`, and a deployment with no
-tailscale credential mounted is refused rather than run unchecked: with no
+inverted; the live half comes from a **provider of host evidence**, and a
+host no provider can vouch for is refused rather than run unchecked: with no
 evidence about which hosts exist there is no gate, and this kind has nothing
-else. Three absence rules now differ by kind, deliberately — an absent root
+else.
+
+**Tailscale is one provider, not the definition of evidence**
+(`cmd/truss/evidence.go`). Each host's `access.via` says which one vouches
+for it: `tailscale` reads the device list through `tailnet.Reconcile`, and
+`address` dials the address the record itself states, through
+`internal/reach`. A record naming an address is a *declaration*; the dial is
+the *observation*, made at the moment of the run and never inferred from the
+record. Both are first class — a fleet reached by SSH over stated addresses
+is a real way to run machines, and an engine that could not configure one
+would be this deployment's process compiled into a general tool. It is also
+what makes **first contact** possible at all: a host that has never joined a
+tailnet has no device record, so under a tailscale-only gate it could never
+be a target, so the play that would have joined it could never run.
+
+⚠️ **The two providers do not offer the same guarantee, and the applier says
+so.** Tailscale can be asked which machines *claim* to be managed and answer
+with ones nobody declared — an intruder, or a host somebody forgot — which
+is the single most valuable thing this gate does. A declared-address
+provider has no such list and cannot acquire one: the only addresses it
+knows are the ones the inventory already names, so the set it can look at is
+by construction the set that is already declared. That is a real reduction
+in safety rather than an implementation gap, so `hostEvidence.Discovers()`
+is a method on the interface rather than a convention about an empty slice,
+and a pass carrying any non-discovering provider narrates the limit on every
+run. "We looked and the fleet is clean" and "nothing here could look" both
+produce zero names, and they are different promises.
+
+⚠️ **`internal/gates.CheckAnsibleTargets` names no vendor and must not
+start.** It takes `Declared`, `Unknown` and `Unreachable` and refuses; where
+those three lists came from is the caller's business. That is why making
+evidence pluggable changed no refusal: the gate was already the right shape,
+and the seam belonged above it. Three absence rules now differ by kind, deliberately — an absent root
 is a **refusal** (its state may hold live resources), an absent delivery
 unit is a **prune** (the reconciler removes what it applied), and an absent
 play is a **retirement**: deleting it un-configures nothing, the machine

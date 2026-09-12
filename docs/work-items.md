@@ -978,20 +978,53 @@ before that — a kind the tree understands and the pass does not.
 `TestACommitTouchingOnlyAPlayIsRunNotNooped` is the reproduction; it was
 watched red with the `len(plays) == 0` term removed from the noop check.
 
-What the wiring does, per commit: derive the plays, refuse outright if no
-tailscale credential is mounted (no evidence means no gate, and this kind
-has no digest to fall back on), load the head's inventory through
+What the wiring does, per commit: load the head's inventory through
 `gitDriver.TreeFS`, invert `Host.Config` into each play's declared hosts,
-compare the whole managed set against the live device list with
-`tailnet.Reconcile`, then per play: `gates.CheckAnsibleTargets`, a
+ask each host's **provider of host evidence** what it can see right now —
+refusing outright if no provider can vouch for a host, because no evidence
+means no gate and this kind has no digest to fall back on — then per play: `gates.CheckAnsibleTargets`, a
 `--check` pre-run whose failure refuses before any machine is touched, the
 real run, and a second `--check` whose findings are **named, never
 refused** — a non-idempotent task is a defect in the play, but the run
 already succeeded and the machine is already configured, so failing there
 would wedge the queue behind a change that worked.
 
+✅ **The evidence became pluggable on 2026-09-10** — `hostEvidence` in
+`cmd/truss/evidence.go`, with `tailscaleEvidence` and `addressEvidence`
+beside it and `internal/reach` doing the dialling. Before it, the gate read
+`d.Tailnet == nil` and refused, which had two costs. A truss user who does
+not run Tailscale could not run an ansible unit at all — one deployment's
+process compiled into a general engine, a heavier coupling than the
+identifying values the engine extraction lifts out. And first contact was
+impossible in the only order that works: load a host at an external address,
+run the play, join the tailnet, lock SSH down from outside, then point the
+record at the internal name. A host that has never joined has no device
+record, so it could never be a target, so the play that would have joined it
+could never run.
+
+`inventory.Host.Access` (`{"via": "tailscale"}` or `{"via": "address",
+"address": "<host>[:<port>]"}`) selects the provider per host. A record with
+no access block resolves to `tailscale` — the one unstated field this system
+reads as an answer, and it cannot fail open, because such a host is still
+refused when no tailscale credential is mounted. `managedTag` moved inside
+the tailscale provider: the reasoning that keeps it compiled in is entirely
+about Tailscale's ACL model and says nothing to a deployment reaching
+machines at stated addresses.
+
+⚠️ **The asymmetry is real and is disclosed rather than papered over.** A
+declared-address provider cannot report `Unknown`: the only addresses it
+knows are the ones the inventory already names, so the set it can look at is
+by construction the set that is already declared. `Discovers()` is a method
+on the interface, not a convention about an empty slice, and a pass carrying
+any non-discovering provider says so on every run. An empty `Undeclared`
+from a provider that cannot look must never read as a clean fleet.
+
+**Still open on this:** the disclosure is a log line. If the pass ever grows
+a metric for "which guarantee did tonight's run give", `passEvidence.Blind`
+is the field to push.
+
 Three decisions worth keeping: every play is handed the whole pass's
-`UnknownTagged`, which is what makes "one unknown device refuses every
+`Undeclared`, which is what makes "one unknown device refuses every
 play" true by construction rather than by a caller's discipline;
 `Unreachable` is narrowed to each play's own hosts, because an offline host
 is a fact about that host while an undeclared tagged machine is a fact
@@ -1016,8 +1049,8 @@ versions. `internal/gates.CheckAnsibleTargets` is the target-side gate: it
 refuses any play whose declared host set is empty (nothing declared must
 never silently become "run against everything", the identical rule
 `Runner`'s own empty-hosts refusal states on the execution side), any
-declared host the tailnet reports unreachable (absent is not "fine"), and
-any device carrying the managed tag with no inventory record — and that
+declared host its own provider reports unreachable (absent is not "fine"),
+and any device carrying the managed tag with no inventory record — and that
 last case is written to demand refusing **every play in the pass**, not
 only the one that happened to name the intruder, though the function itself
 can only refuse one play's worth of `AnsibleTargets` at a time; enforcing
@@ -1802,3 +1835,19 @@ observability** while object storage stays authoritative, that is two copies of
 one fact and it is only safe while the direction is strictly one-way. The
 moment anything branches on the CR rather than the ledger there are two sources
 of truth, and the disagreement will be silent.
+
+## ci.yml and release.yml state the same fact twice
+
+`release.yml` had no tofu install, so every release after #12 failed on
+`internal/plan`'s declaration tests -- and nothing noticed, because nothing was
+tagged in between. v0.1.4 found it.
+
+⚠️ THE FIX WAS TO COPY THE TWO LINES, WHICH IS THE SAME BUG DEFERRED. ci.yml
+runs `scripts/check` precisely so that one definition serves both a developer
+and CI; release.yml restates the steps instead. The next test dependency added
+to one will be missing from the other in exactly this way.
+
+release.yml should run `scripts/check` too. It cannot simply call it today:
+the release job needs `TRUSS_REQUIRE_JQ` set the same way, and it runs
+`go vet`/`go test` before a matrix that builds per tofu version, so the order
+is not identical. Worth one pass to make it so.

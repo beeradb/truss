@@ -132,6 +132,19 @@ RUN set -eux; \
 # is what makes them findable. Without it ansible looks in ~/.ansible and
 # /usr/share/ansible, finds neither, and reports the play's modules as
 # missing -- which reads as a broken play rather than a broken image.
+# ⚠️ READ BY truss, NOT BY ansible-playbook, AND THE DIFFERENCE IS NOT
+# COSMETIC. This sets the variable in the TRUSS process's environment;
+# cmd/truss/ansibleCollectionsPath reads it from there and passes it on to
+# the play by name. It does not reach ansible-playbook on its own, because
+# ansible.Runner builds the child's environment explicitly and inherits
+# nothing -- a property that exists so a play running as root on somebody
+# else's machine does not receive every credential this process holds.
+#
+# For a year this line looked like it configured ansible and configured
+# nothing: a pass failed with "couldn't resolve module/action
+# 'ansible.posix.mount'" while that collection was pinned below and
+# installed right here. Deleting this line still breaks collections; so
+# does deleting the passthrough in cmd/truss. Both halves are required.
 ENV ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections
 
 # The 1Password CLI, used only by the publisher. Its apt repo is per-arch, so
@@ -153,6 +166,10 @@ RUN set -eux; \
 # inside every image build for no benefit.
 COPY dist/truss-linux-${TARGETARCH} /usr/local/bin/truss
 RUN chmod 0755 /usr/local/bin/truss
+
+# Apache-2.0 §4(a): anyone redistributing the binary gives recipients a copy
+# of the licence, and this image is a redistribution.
+COPY LICENSE /usr/share/licenses/truss/LICENSE
 
 # 10001 matches the `applier` user the platform image used, so a consumer's
 # volume ownership does not change under them.

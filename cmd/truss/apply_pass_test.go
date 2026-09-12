@@ -120,7 +120,7 @@ func buildTestDeps(t *testing.T, forgeFake *fakeForge, git gitDriver, newTofu to
 		// ansible-playbook should report has a hole in it, and an empty
 		// Result would read as "the play ran and changed nothing".
 		NewAnsible: func(env []string) ansibleRunner { return unconfiguredAnsible{} },
-		Now:       func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
+		Now:        func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
 		VaultConfig: secrets.KVConfig{
 			Addr: vaultSrv.URL, Mount: "platform", Role: "applier", JWTPath: testJWTFile(t),
 		},

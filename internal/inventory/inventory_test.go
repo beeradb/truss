@@ -109,6 +109,22 @@ type defect struct {
 func defects() []defect {
 	return []defect{
 		{
+			// ⚠️ THROUGH THE PUBLIC Check, DELIBERATELY. A test that
+			// called checkAccessUser directly passed with the call site
+			// deleted -- it proved the function worked and said nothing
+			// about whether anything invoked it, which is the
+			// exported-but-never-wired shape this project already has a
+			// standing rule about.
+			name: "AccessUserCarriesANewline",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: AccessAddress, Address: "alpha.invalid:22", User: "root\n      ansible_host: evil"}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{"access.user", "not a login name", "another line"},
+		},
+		{
 			name: "UnknownSchema",
 			mutate: func(s *Snapshot) {
 				h := s.Hosts["alpha"]
@@ -137,6 +153,41 @@ func defects() []defect {
 			},
 			wantFile:  "inventory/hosts/alpha.json",
 			wantWords: []string{`"alph4"`, `"alpha"`, "rename"},
+		},
+		// The three ways an access block can be unreadable. A record with
+		// NO access block is deliberately not here: see
+		// TestAHostWithNoAccessBlockIsAccepted below, and Host.Access's own
+		// doc for why nil is the one unstated field this package reads as
+		// an answer.
+		{
+			name: "AccessViaIsNotRecognised",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: "carrier-pigeon"}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{`"carrier-pigeon"`, "not recognised", `"address"`, `"tailscale"`},
+		},
+		{
+			name: "AccessByAddressWithNoAddress",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: AccessAddress}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{"access.address is empty", "nothing to reach it at"},
+		},
+		{
+			name: "AccessByTailscaleCarryingAStaleAddress",
+			mutate: func(s *Snapshot) {
+				h := s.Hosts["alpha"]
+				h.Access = &Access{Via: AccessTailscale, Address: "alpha.example.invalid:22"}
+				s.Hosts["alpha"] = h
+			},
+			wantFile:  "inventory/hosts/alpha.json",
+			wantWords: []string{"not two", "remove the address"},
 		},
 		// ⚠️ checkCluster, checkProject AND checkEnvironment EACH REPEAT THE
 		// SAME SCHEMA-AND-NAME SHAPE checkHost ALREADY HAS ABOVE, AND ONLY THE
@@ -641,5 +692,35 @@ func TestTwoEnvironmentsCannotShareADerivedDeliveryUnit(t *testing.T) {
 	// delivery directory on the shared cluster. Nothing here is a defect.
 	if got := Check(s); len(got) != 0 {
 		t.Fatalf("two distinct environments on one cluster were refused: %v", got)
+	}
+}
+
+// TestCheckRefusesAnAccessUserThatIsNotALoginName pins the reason the value
+// is checked at the record rather than escaped at render time: it is
+// written into a generated ansible inventory, where a newline does not make
+// a bad user -- it makes another LINE, setting a variable nobody wrote.
+func TestCheckRefusesAnAccessUserThatIsNotALoginName(t *testing.T) {
+	for _, bad := range []string{
+		"root\n      ansible_host: evil",
+		"root ",
+		" root",
+		"ro ot",
+		"root:x",
+		"root#c",
+	} {
+		if problems := checkAccessUser("inventory/hosts/h.json", bad); len(problems) == 0 {
+			t.Fatalf("accepted access.user %q", bad)
+		}
+	}
+}
+
+// TestCheckAllowsAnUnstatedOrOrdinaryAccessUser is the other half: empty
+// means unstated, which the renderer turns into no ansible_user at all, and
+// ordinary logins must not be refused by a rule aimed at injection.
+func TestCheckAllowsAnUnstatedOrOrdinaryAccessUser(t *testing.T) {
+	for _, ok := range []string{"", "root", "deploy", "ubuntu", "ansible_svc", "dev-agent"} {
+		if problems := checkAccessUser("inventory/hosts/h.json", ok); len(problems) != 0 {
+			t.Fatalf("refused access.user %q: %v", ok, problems)
+		}
 	}
 }
