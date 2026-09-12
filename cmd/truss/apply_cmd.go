@@ -246,69 +246,89 @@ func loadHandoffConfig(getenv func(string) string, driftOnly bool) (string, []st
 	return socket, nil
 }
 
-// cmdApply replaces apply.sh in full (§4.9, landing at step 5). Everything
-// up to and including finding HEAD is a boot-time refusal with no
-// heartbeat -- §2 item 5, "applied/HEAD is never guessed", is a refusal to
-// START, the same class as an invalid config, and the reference bash
-// itself never writes a heartbeat for either. Once HEAD is known, the pass
-// always writes one (§2 item 8), which is runApplyPass's job and why this
-// function stops doing its own error handling the moment that call is
-// made.
-func cmdApply(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	if len(args) != 0 {
-		fmt.Fprintln(stderr, "usage: truss apply")
-		return 2
-	}
+// passEnv is everything a pass needs that CANNOT go stale while this
+// process runs: the environment as read once, and the pure factories built
+// from it. It is loaded once per process under `truss apply` and once at
+// loop startup under `truss loop` -- see buildPass for what is deliberately
+// NOT here, and why.
+type passEnv struct {
+	Cfg        config.Config
+	Dir        secrets.Dir
+	Getenv     func(string) string
+	Stderr     io.Writer
+	NewRender  renderFactory
+	NewAnsible ansibleFactory
+}
 
+// loadPassEnv reads and validates $CONFIG. /proc/self/environ does not
+// change while this process runs, so re-reading it every pass would be a
+// second way to get the same answer -- this is the one call in the boot
+// sequence safe to hoist out of a loop.
+func loadPassEnv(getenv func(string) string, stderr io.Writer) (passEnv, []string) {
 	cfg, problems := config.Load(getenv)
 	if len(problems) > 0 {
-		for _, p := range problems {
-			fmt.Fprintln(stderr, p)
-		}
-		return 1
+		return passEnv{}, problems
 	}
+	return passEnv{
+		Cfg:        cfg,
+		Dir:        secrets.Dir{Root: cfg.SecretsDir},
+		Getenv:     getenv,
+		Stderr:     stderr,
+		NewRender:  newRenderFactory(getenv, stderr),
+		NewAnsible: newAnsibleFactory(getenv, stderr),
+	}, nil
+}
 
-	dir := secrets.Dir{Root: cfg.SecretsDir}
-
-	store, err := buildLedgerStore(cfg)
+// buildPass reads every credential the mirror holds and the ledger HEAD,
+// and returns the deps for ONE pass. ⚠️ CALLED ONCE PER PASS, NEVER
+// HOISTED. Unlike passEnv's contents, every value built here can go stale
+// under a long-lived process: the ledger store holds the SigV4 key pair
+// mirrored from gcs-ledger, which is rotatable, and a daemon that read it
+// once would 403 on every ledger write forever after a rotation -- the
+// repair would be a pod restart, which is the class of design AGENTS.md
+// says to prefer against ("a component can deliver its own fixes"). The
+// forge client holds the GitHub App private key for the same reason.
+// Telegram and the tailnet client are named in the loop-mode design
+// doc explicitly. HEAD is not a credential at all -- it is the queue
+// position, and it moves every time a pass applies something or an
+// operator runs `truss skip` from outside this process; a cached HEAD
+// would re-apply commits or silently skip over them.
+//
+// The refusal order below is `truss apply`'s own, preserved exactly: the
+// ledger store, the forge client, Telegram, Vault, the publisher socket,
+// HEAD, then the tailnet client. Vault and handoff config are pure env
+// reads and cost nothing to repeat here rather than hoist into passEnv --
+// keeping them in this order is what keeps the order identical to before
+// the split, and apply_handoff_test.go and others assert stderr text.
+func buildPass(ctx context.Context, e passEnv) (applyDeps, string, []string) {
+	store, err := buildLedgerStore(e.Cfg)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return applyDeps{}, "", []string{err.Error()}
 	}
-	forgeClient, err := buildForgeClient(cfg, getenv)
+	forgeClient, err := buildForgeClient(e.Cfg, e.Getenv)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return applyDeps{}, "", []string{err.Error()}
 	}
-	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
+	tg, err := loadTelegram(e.Dir, e.Getenv("TELEGRAM_API_BASE_URL"))
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return applyDeps{}, "", []string{err.Error()}
 	}
-	vcfg, vproblems := loadVaultConfig(getenv)
+	vcfg, vproblems := loadVaultConfig(e.Getenv)
 	if len(vproblems) > 0 {
-		for _, p := range vproblems {
-			fmt.Fprintln(stderr, p)
-		}
-		return 1
+		return applyDeps{}, "", vproblems
 	}
-	handoffSocket, hproblems := loadHandoffConfig(getenv, cfg.DriftOnly)
+	handoffSocket, hproblems := loadHandoffConfig(e.Getenv, e.Cfg.DriftOnly)
 	if len(hproblems) > 0 {
-		for _, p := range hproblems {
-			fmt.Fprintln(stderr, p)
-		}
-		return 1
+		return applyDeps{}, "", hproblems
 	}
 
-	journal := &ledger.Journal{Store: store, Layout: layoutFor(cfg)}
+	journal := &ledger.Journal{Store: store, Layout: layoutFor(e.Cfg)}
 	last, err := journal.Head(ctx)
 	if err != nil {
 		if errors.Is(err, ledger.ErrNotFound) {
-			fmt.Fprintf(stderr, "refusing to start: no %s in the ledger -- bootstrap/bootstrap.sh writes it, and it must never be guessed\n", cfg.LedgerHeadKey)
-		} else {
-			fmt.Fprintf(stderr, "refusing to start: could not read HEAD from the ledger: %v\n", err)
+			return applyDeps{}, "", []string{fmt.Sprintf("refusing to start: no %s in the ledger -- bootstrap/bootstrap.sh writes it, and it must never be guessed", e.Cfg.LedgerHeadKey)}
 		}
-		return 1
+		return applyDeps{}, "", []string{fmt.Sprintf("refusing to start: could not read HEAD from the ledger: %v", err)}
 	}
 
 	// ⚠️ A MISSING TAILSCALE CREDENTIAL IS NOT AN ERROR HERE, AND IS ALSO
@@ -318,31 +338,30 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 	// runAnsibleUnits refuses on nil the moment a play exists -- the refusal
 	// lands on the commit that introduces a play rather than on every pass
 	// of every deployment, which is where it is both correct and actionable.
-	tsClient, err := loadTailnetClient(dir, getenv("TAILSCALE_API_BASE_URL"))
+	tsClient, err := loadTailnetClient(e.Dir, e.Getenv("TAILSCALE_API_BASE_URL"))
 	if err != nil {
-		fmt.Fprintf(stderr, "refusing to start: %v\n", err)
-		return 1
+		return applyDeps{}, "", []string{fmt.Sprintf("refusing to start: %v", err)}
 	}
 
-	deps := applyDeps{
-		Cfg:      cfg,
-		Dir:      dir,
+	d := applyDeps{
+		Cfg:      e.Cfg,
+		Dir:      e.Dir,
 		Journal:  journal,
 		Forge:    forgeClient,
 		Telegram: tg,
-		Git:      execGit{Bin: "git", Dir: cfg.Workdir, Stderr: stderr},
+		Git:      execGit{Bin: "git", Dir: e.Cfg.Workdir, Stderr: e.Stderr},
 		NewTofu: func(env []string) tofuRunner {
-			return plan.Runner{Bin: "tofu", PluginDir: cfg.PluginDir, Stderr: stderr, Env: env}
+			return plan.Runner{Bin: "tofu", PluginDir: e.Cfg.PluginDir, Stderr: e.Stderr, Env: env}
 		},
-		NewRender:         newRenderFactory(getenv, stderr),
-		NewAnsible:        newAnsibleFactory(getenv, stderr),
+		NewRender:         e.NewRender,
+		NewAnsible:        e.NewAnsible,
 		Now:               time.Now,
-		Stderr:            stderr,
+		Stderr:            e.Stderr,
 		VaultConfig:       vcfg,
-		CloudflareBaseURL: getenv("CLOUDFLARE_API_BASE_URL"),
-		PATH:              getenv("PATH"),
-		HOME:              getenv("HOME"),
-		CollectionsPath:   ansibleCollectionsPath(getenv),
+		CloudflareBaseURL: e.Getenv("CLOUDFLARE_API_BASE_URL"),
+		PATH:              e.Getenv("PATH"),
+		HOME:              e.Getenv("HOME"),
+		CollectionsPath:   ansibleCollectionsPath(e.Getenv),
 		HandoffSocket:     handoffSocket,
 		Handoff:           handoff.Send,
 	}
@@ -353,7 +372,44 @@ func cmdApply(ctx context.Context, args []string, getenv func(string) string, st
 	// panic, or worse, return an empty device list that reads as "no
 	// unknown devices".
 	if tsClient != nil {
-		deps.Tailnet = tsClient
+		d.Tailnet = tsClient
+	}
+	return d, last, nil
+}
+
+// cmdApply replaces apply.sh in full (§4.9, landing at step 5). Everything
+// up to and including finding HEAD is a boot-time refusal with no
+// heartbeat -- §2 item 5, "applied/HEAD is never guessed", is a refusal to
+// START, the same class as an invalid config, and the reference bash
+// itself never writes a heartbeat for either. Once HEAD is known, the pass
+// always writes one (§2 item 8), which is runApplyPass's job and why this
+// function stops doing its own error handling the moment that call is
+// made.
+//
+// loadPassEnv and buildPass do the construction; `truss loop` (cmdLoop)
+// calls the same two functions, loadPassEnv once at startup and buildPass
+// once per pass, which is the whole reason they are split out rather than
+// inlined here.
+func cmdApply(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "usage: truss apply")
+		return 2
+	}
+
+	e, problems := loadPassEnv(getenv, stderr)
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(stderr, p)
+		}
+		return 1
+	}
+
+	deps, last, problems := buildPass(ctx, e)
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Fprintln(stderr, p)
+		}
+		return 1
 	}
 
 	result := runApplyPass(ctx, deps, last)
