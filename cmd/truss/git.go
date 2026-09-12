@@ -92,6 +92,20 @@ type gitDriver interface {
 	Checkout(ctx context.Context, ref string) error
 	HasDir(root string) bool
 
+	// CleanTree returns the working tree to the commit it has checked out
+	// and removes everything else, so a pass never plans against something
+	// an earlier pass left behind -- a half-written tfplan, a file a failed
+	// apply dropped, a tree still sitting at a stale checkout. A one-shot
+	// `truss apply` needs this exactly as much as a loop does: nothing about
+	// a persistent workdir guarantees the tree it starts from is the one the
+	// last pass finished with, or that it finished at all.
+	//
+	// ⚠️ .terraform/ IS PRESERVED, AND IT IS THE ONLY EXCEPTION. The provider
+	// cache is derived entirely from the TRACKED lockfile, so keeping it
+	// cannot make the tree disagree with the commit -- and deleting it makes
+	// every `tofu init` re-download every provider, once a pass.
+	CleanTree(ctx context.Context) error
+
 	// PushRef fast-forwards a remote ref to sha. It is the only write this
 	// driver performs, and the only thing truss publishes anywhere.
 	PushRef(ctx context.Context, sha, ref string) error
@@ -359,6 +373,21 @@ func (g execGit) Checkout(ctx context.Context, ref string) error {
 	_, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "checkout", "--quiet", ref})
 	if err != nil {
 		return fmt.Errorf("git checkout %s: %w", ref, err)
+	}
+	return nil
+}
+
+func (g execGit) CleanTree(ctx context.Context) error {
+	if _, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "reset", "--hard"}); err != nil {
+		return fmt.Errorf("git reset --hard: %w", err)
+	}
+	// -e .terraform is a gitignore-shaped pattern with no slash, so it
+	// matches a directory of that name at ANY depth: platform/.terraform and
+	// credentials/.terraform alike. -x is what makes the exclusion
+	// necessary -- without -x the cache is already ignored and already
+	// spared; with it, nothing but this line spares it.
+	if _, err := g.run(ctx, g.Dir, []string{"-C", g.Dir, "clean", "-ffdx", "-e", ".terraform"}); err != nil {
+		return fmt.Errorf("git clean -ffdx: %w", err)
 	}
 	return nil
 }

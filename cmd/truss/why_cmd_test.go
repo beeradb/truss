@@ -557,4 +557,7 @@ func TestWhyGitSectionsNeverWriteToGit(t *testing.T) {
 	if len(g.checkouts) != 0 {
 		t.Errorf("checkouts = %v, want none: why never checks out a tree", g.checkouts)
 	}
+	if g.cleaned() != 0 {
+		t.Errorf("CleanTree was called, want none: why runs against an operator's own checkout, and a git clean -ffdx there would delete their work")
+	}
 }

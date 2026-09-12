@@ -826,12 +826,17 @@ type fakeGit struct {
 	// before any checkout.
 	DirsAtRef map[string][]string
 
-	mu        sync.Mutex
-	checkouts []string
-	current   string
-	token     string
-	clones    int
-	fetches   int
+	// CleanTreeErr makes CleanTree fail, so a test can assert a dirty tree
+	// that will not clean becomes a pass refusal rather than a dirty apply.
+	CleanTreeErr error
+
+	mu         sync.Mutex
+	checkouts  []string
+	current    string
+	token      string
+	clones     int
+	fetches    int
+	cleanTrees int
 }
 
 // WithToken records the token so a test can assert every git call carries
@@ -877,6 +882,26 @@ func (g *fakeGit) fetched() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.fetches > 0
+}
+
+func (g *fakeGit) CleanTree(ctx context.Context) error {
+	if g.CleanTreeErr != nil {
+		return g.CleanTreeErr
+	}
+	g.mu.Lock()
+	g.cleanTrees++
+	g.mu.Unlock()
+	return nil
+}
+
+// cleaned is a COUNT, not a bool: "every pass starts from a clean tree" is a
+// per-pass property, and a test asserting only that a clean happened at
+// least once would pass against a loop that cleaned exactly once at
+// startup.
+func (g *fakeGit) cleaned() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.cleanTrees
 }
 
 func (g *fakeGit) Commits(ctx context.Context, from, to string) ([]string, error) {
