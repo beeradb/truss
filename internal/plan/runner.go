@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/beeradb/truss/internal/childproc"
 )
 
 // Runner drives the `tofu` binary. Every method builds an exact argv, runs
@@ -81,6 +83,13 @@ func (r Runner) PlanDetailed(ctx context.Context, dir string) (changes bool, err
 // Apply runs `tofu apply` against exactly the plan file it was given —
 // never -auto-approve, never a re-plan, always the plan a human already
 // reviewed (§2 item 18).
+//
+// If ctx is cancelled while this is running, r.run's childproc.Command
+// sends SIGINT to tofu's process group rather than SIGKILL: measured
+// against the real binary this project pins, SIGINT releases the state
+// lock cleanly and SIGTERM does not (internal/childproc's doc comment
+// carries the measurement). A cancelled Apply is therefore a clean stop,
+// not a leaked lock for the next pass to find.
 func (r Runner) Apply(ctx context.Context, dir, planFile string) error {
 	if planFile == "" {
 		return errors.New("apply: refuses to apply without a plan file")
@@ -101,7 +110,7 @@ func (r Runner) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, err
 	}
 	args := []string{"show", "-json", planFile}
 
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := childproc.Command(ctx, r.Bin, args...)
 	cmd.Dir = dir
 	cmd.Env = explicitEnv(r.Env)
 
@@ -129,7 +138,7 @@ func (r Runner) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, err
 // combined output (for lock-message matching and for embedding in an error)
 // alongside cmd.Run's error, unmodified.
 func (r Runner) run(ctx context.Context, dir string, args []string) (combined string, err error) {
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := childproc.Command(ctx, r.Bin, args...)
 	cmd.Dir = dir
 	cmd.Env = explicitEnv(r.Env)
 

@@ -25,6 +25,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/beeradb/truss/internal/childproc"
 	"github.com/beeradb/truss/internal/repo"
 	"strings"
 	"unicode"
@@ -382,7 +383,7 @@ func (g execGit) run(ctx context.Context, dir string, args []string) (string, er
 	if bin == "" {
 		bin = "git"
 	}
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := childproc.Command(ctx, bin, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

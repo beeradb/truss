@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/beeradb/truss/internal/childproc"
 )
 
 // Runner drives the ansible-playbook binary.
@@ -205,7 +207,7 @@ func (r Runner) run(ctx context.Context, playDir string, targets []Target, check
 		args = append(args, "--check")
 	}
 
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := childproc.Command(ctx, r.Bin, args...)
 	cmd.Env = r.explicitEnv()
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout

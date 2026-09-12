@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // OP is a Store backed by the 1Password `op` CLI, covering a 1Password
@@ -172,9 +174,24 @@ func redactBytes(b []byte, values ...string) []byte {
 
 // execReal actually starts cfg.Bin as a subprocess. This is the only place
 // in this package that ever exec's a real process.
+//
+// ⚠️ THE PROCESS-GROUP AND CANCEL LINES BELOW ARE DUPLICATED FROM
+// internal/childproc, NOT IMPORTED FROM IT, because this package's own test
+// (TestSecretsImportsOnlyTheStandardLibrary) refuses any import path with a
+// dot before its first slash, and childproc's is one. `op` is short-lived,
+// holds no state lock and has no provider subprocess of its own, so the
+// consequence of the duplication drifting is smaller here than at the other
+// four call sites -- but it is still a duplication, and it exists only
+// because of that test. Keep it in step with childproc.Command's contract
+// if that ever changes.
 func (o *OP) execReal(ctx context.Context, env []string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, o.cfg.Bin, args...)
 	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+	}
+	cmd.WaitDelay = 10 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

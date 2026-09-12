@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/beeradb/truss/internal/childproc"
 )
 
 // Runner drives the kustomize binary.
@@ -97,7 +99,7 @@ func (r Runner) Build(ctx context.Context, dir string) ([]byte, error) {
 	}
 
 	args := append(append([]string(nil), buildArgs...), dir)
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := childproc.Command(ctx, r.Bin, args...)
 	cmd.Env = r.explicitEnv()
 	var out bytes.Buffer
 	cmd.Stdout = &out
