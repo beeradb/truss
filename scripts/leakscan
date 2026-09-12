@@ -206,6 +206,16 @@ scan() { # pattern description
   # the format sha256sum reads and there would be no reason to write it.
   hits=$(echo "$hits" | grep -vE '^scripts/toolchain\.sha256:[0-9]+:[0-9a-f]{64}  [A-Za-z0-9._-]+$' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
+  # ⚠️ THE APACHE LICENCE'S OWN TWO ADDRESSES, IN LICENSE AND NOWHERE ELSE.
+  # The canonical text names `http://www.apache.org/licenses/` in its header
+  # and `.../licenses/LICENSE-2.0` in its appendix, and it is copied verbatim
+  # -- editing a licence to satisfy a scanner is not an option. Anchored to the
+  # whole line in the one file that must carry it, so the same URL anywhere
+  # else, any other apache.org path, or anything else sharing the line still
+  # refuses. Added 2026-09-11 after CI refused the commit that added LICENSE:
+  # the local run passed only because LICENSE was not yet tracked, and this
+  # scanner reads `git ls-files`.
+  hits=$(echo "$hits" | grep -vE '^LICENSE:[0-9]+:[[:space:]]*http://www\.apache\.org/licenses/(LICENSE-2\.0)?$' || true)
   # ⚠️ NO EXEMPTION SURVIVES A `..` IN A URL PATH, AND THIS IS ONE RULE RATHER
   # THAN SEVEN ANCHORS. Every exemption above is a substring match that drops
   # the WHOLE line, so a permitted address with `/../..` after it walks out of
