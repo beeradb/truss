@@ -105,6 +105,8 @@ check 'concrete store'     refuse conf.yaml  'reads op://platform/thing/field'
 check 'store, capsed'      refuse conf.yaml  'reads OP://PLATFORM/thing/field'
 check 'bucket url'         refuse conf.yaml  'state lives in gs://someones-real-bucket'
 check 'url into a host'    refuse notes.md   'see example.com/private/thing for it'
+check 'non-loopback IP, same file/prefix shape as the control-listener exemption' \
+                           refuse cmd/truss/control_server.go 'const controlBindHost = "10.0.0.1"'
 
 # The other direction. A scanner that refuses everything is no more useful
 # than one that refuses nothing, and the go.mod exemption is narrow on purpose.
@@ -119,6 +121,14 @@ check 'go.mod, other line' refuse go.mod     'module github.com/beeradb/truss
 check 'pinned action'      clean  .github/workflows/ci.yml '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1'
 check 'hex in a workflow'  refuse .github/workflows/ci.yml '      - run: echo 0123456789abcdef0123456789abcdef'
 check 'unpinned uses line' clean  .github/workflows/ci.yml '      - uses: actions/checkout@v7'
+
+# The control listener's compiled-in loopback bind: the exact declaration
+# is exempt, a non-loopback value assigned to the same name still bites
+# (above), and so does the same literal anywhere else in the tree.
+check 'control listener loopback bind' \
+                           clean  cmd/truss/control_server.go 'const controlBindHost = "127.0.0.1"'
+check 'loopback literal outside its one exempt line' \
+                           refuse cmd/truss/other_file.go 'const controlBindHost = "127.0.0.1"'
 
 # ⚠️ THE VENDOR'S NAME IS NOT A LEAK; A REFERENCE INTO THEIR STORE IS. A design
 # document has to be able to name the product it integrates with. What must

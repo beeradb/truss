@@ -1013,8 +1013,11 @@ type fakeTofu struct {
 	// unit finish" is actually about.
 	OnApply func(dir string)
 
-	mu      sync.Mutex
-	applies []string
+	ForceUnlockErr error
+
+	mu           sync.Mutex
+	applies      []string
+	forceUnlocks []string
 }
 
 func (f *fakeTofu) Init(ctx context.Context, dir string) error          { return f.InitErr }
@@ -1051,6 +1054,19 @@ func (f *fakeTofu) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, 
 		return f.ShowJSONBytes, nil
 	}
 	return changingPlanJSON, nil
+}
+
+func (f *fakeTofu) ForceUnlock(ctx context.Context, dir, lockID string) error {
+	f.mu.Lock()
+	f.forceUnlocks = append(f.forceUnlocks, dir+"="+lockID)
+	f.mu.Unlock()
+	return f.ForceUnlockErr
+}
+
+func (f *fakeTofu) forceUnlockCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.forceUnlocks...)
 }
 
 // ⚠️ THE DEFAULT PLAN CHANGES SOMETHING, AND IT USED TO NOT.

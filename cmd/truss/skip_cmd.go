@@ -9,6 +9,7 @@ import (
 
 	"github.com/beeradb/truss/internal/config"
 	"github.com/beeradb/truss/internal/ledger"
+	"github.com/beeradb/truss/internal/notify"
 	"github.com/beeradb/truss/internal/secrets"
 )
 
@@ -41,16 +42,7 @@ func cmdSkip(ctx context.Context, args []string, getenv func(string) string, std
 		return 2
 	}
 
-	// Guard 1: --reason is mandatory and must be non-empty after trimming
-	// space. No default, no prompt -- a skip with nothing stated about why
-	// is exactly the shortcut work-items.md warns against, and it needs no
-	// ledger access to check, so it is refused before anything else is even
-	// attempted.
 	trimmedReason := strings.TrimSpace(reason)
-	if trimmedReason == "" {
-		fmt.Fprintln(stderr, "skip: refusing -- --reason is required and must be non-empty. State, in the reason, why this commit's plan cannot ever apply, then run the command again with that text.")
-		return 1
-	}
 
 	cfg, problems := config.Load(getenv)
 	if len(problems) > 0 {
@@ -66,86 +58,141 @@ func cmdSkip(ctx context.Context, args []string, getenv func(string) string, std
 	}
 	journal := &ledger.Journal{Store: store, Layout: layoutFor(cfg)}
 
-	// Guard 2: failed/<sha> must exist. The queue stops AT the commit it
-	// fails on (§2 item 6), so a failed/ record is the proof the applier
-	// actually reached and tried this commit. Without one, "skip" would be
-	// guessing about work nobody attempted -- the exact failure mode
-	// work-items.md names as "refuse a commit whose plan the applier never
-	// tried".
-	_, err = store.Get(ctx, journal.Layout.FailedKey(sha))
-	if err != nil {
-		if errors.Is(err, ledger.ErrNotFound) {
-			fmt.Fprintf(stderr, "skip: refusing -- no failed record for %s. The applier never tried this commit, so there is nothing proven to skip past. If it needs skipping, wait until the applier reaches it and fails there first, then run this again.\n", sha)
-			return 1
+	// Guards 1-3: a non-empty reason, a failed/<sha> record, sha not
+	// already HEAD -- none of them touch Telegram, and neither did the
+	// original ordering here: a pass that fails one of these must not also
+	// need a working alert credential to say so.
+	if outcome := checkSkipGuards(ctx, journal, sha, trimmedReason); outcome.Refused != "" {
+		fmt.Fprintln(stderr, "skip: "+outcome.Refused)
+		if outcome.NeedsLedger {
+			return 2
 		}
-		fmt.Fprintf(stderr, "skip: could not read the failed record for %s: %v\n", sha, err)
-		return 2
-	}
-
-	// Guard 3: sha must not already be HEAD -- there is nothing to advance
-	// past if the queue is already there.
-	head, err := journal.Head(ctx)
-	if err != nil {
-		fmt.Fprintf(stderr, "skip: could not read HEAD: %v\n", err)
-		return 2
-	}
-	if head == sha {
-		fmt.Fprintf(stderr, "skip: refusing -- HEAD is already %s. There is nothing to advance past; if the queue still looks stuck, something else is wrong and `truss status` is the next step.\n", sha)
 		return 1
 	}
 
 	// Guard 4: confirm by naming. TRUSS_SKIP_I_UNDERSTAND must equal this
-	// exact sha, not merely be set -- see envSkipConfirm's doc.
+	// exact sha, not merely be set -- see envSkipConfirm's doc. This is
+	// the CLI's own confirmation; the control API (control_server.go) has
+	// no environment to type into and uses expect_head instead.
 	if getenv(envSkipConfirm) != sha {
 		fmt.Fprintf(stderr, "skip: refusing -- set %s=%s to confirm you mean to skip exactly this commit.\n", envSkipConfirm, sha)
 		return 1
 	}
 
-	// Write order: the record first, then HEAD. A crash between the two
-	// leaves an explained commit behind (applied/<sha> already says
-	// skipped) rather than an unexplained jump (HEAD past a commit with no
-	// record of why at all).
-	// ⚠️ THE ANNOUNCEMENT COMES BEFORE THE SKIP, AND A SKIP THAT CANNOT BE
-	// ANNOUNCED DOES NOT HAPPEN.
-	//
-	// docs/threat-model.md says of the one existing escape hatch that an
-	// operator "can never do it quietly, which is the other point", and
-	// docs/operations.md calls it the only one. This command is a second
-	// escape hatch and a narrower one -- it is aimed at a single commit,
-	// where turning protection off is all-or-nothing -- so the quietness
-	// property has to be earned rather than inherited.
-	//
-	// Sending first is what earns it. If the alert goes out and the skip
-	// then fails, somebody investigates a skip that did not happen, which
-	// costs a minute. If the skip were performed first and the alert failed,
-	// a commit the applier refused would have been walked past with nothing
-	// anywhere saying so -- and the ledger record alone does not count,
-	// because nothing reads it unless a person already suspects something.
 	dir := secrets.Dir{Root: cfg.SecretsDir}
 	tg, err := loadTelegram(dir, getenv("TELEGRAM_API_BASE_URL"))
 	if err != nil {
 		fmt.Fprintf(stderr, "skip: could not load the alert credentials: %v\n", err)
 		return 2
 	}
-	announce := fmt.Sprintf("%s: SKIPPED %s by hand -- %s", defaultAlertSubject, sha, trimmedReason)
-	if err := tg.Send(ctx, announce); err != nil {
-		fmt.Fprintf(stderr, "skip: refusing -- could not announce the skip (%v). "+
-			"A skip nobody is told about is the one thing this command must not be, so nothing has been written. "+
-			"Fix the alert transport and run it again.\n", err)
-		return 1
-	}
 
-	if err := journal.PutSkipped(ctx, sha, trimmedReason); err != nil {
-		fmt.Fprintf(stderr, "skip: could not write the skipped record for %s: %v\n", sha, err)
-		return 2
-	}
-	if err := journal.AdvanceHead(ctx, sha); err != nil {
-		fmt.Fprintf(stderr, "skip: wrote the skipped record for %s but could not advance HEAD: %v. The record is in place; re-run once the ledger is reachable to finish advancing HEAD.\n", sha, err)
-		return 2
+	outcome := finishSkip(ctx, journal, tg, sha, trimmedReason)
+	if outcome.Refused != "" {
+		fmt.Fprintln(stderr, "skip: "+outcome.Refused)
+		if outcome.NeedsLedger {
+			return 2
+		}
+		return 1
 	}
 
 	fmt.Fprintf(stdout, "skipped %s: %s\n", sha, trimmedReason)
 	return 0
+}
+
+// skipOutcome is what checkSkipGuards or finishSkip did or refused.
+type skipOutcome struct {
+	// Refused, when non-empty, is the guard's own refusal sentence -- a
+	// caller prints or returns it verbatim, never re-derives it, so the
+	// CLI and the control API cannot end up saying two different things
+	// about the same guard.
+	Refused string
+	// NeedsLedger is true when Refused came from being unable to reach the
+	// ledger at all (config, network, a store error), as opposed to a
+	// guard that read it fine and said no. Distinguishes "could not ask"
+	// from "asked and was refused" -- exit 2 vs. 1 for the CLI, 400/503
+	// vs. 422 for the control API.
+	NeedsLedger bool
+}
+
+// checkSkipGuards runs skip's three ledger-checkable guards: a non-empty
+// reason, a failed/<sha> record proving the applier actually tried this
+// commit, and sha not already being HEAD. It touches no Telegram
+// credential and writes nothing, on purpose: a guard refusal here must not
+// ALSO require a working alert transport to report, and finishSkip (below)
+// is the only thing in this file allowed to write.
+//
+// It does NOT check the fourth guard (confirm by naming): that is
+// specific to each CALLER -- the CLI's environment variable (cmdSkip,
+// above) or the control API's expect_head compare-and-swap
+// (control_server.go) -- checked by the caller in whatever order its own
+// contract requires.
+//
+// ⚠️ EXTRACTED SO THERE IS EXACTLY ONE IMPLEMENTATION OF THE DANGEROUS
+// PART. Two copies of "which guards, in which order, saying what" is the
+// internal/plan/digest.go hazard AGENTS.md already names: they drift, and
+// the reviewer of one PR does not see it happen in the other.
+func checkSkipGuards(ctx context.Context, journal *ledger.Journal, sha, trimmedReason string) skipOutcome {
+	// Guard 1: reason must be non-empty after trimming space. No default,
+	// no prompt -- needs no ledger access, so it is refused before
+	// anything else is even attempted.
+	if trimmedReason == "" {
+		return skipOutcome{Refused: "refusing -- reason is required and must be non-empty. State, in the reason, why this commit's plan cannot ever apply, then try again with that text."}
+	}
+
+	// Guard 2: failed/<sha> must exist. The queue stops AT the commit it
+	// fails on (§2 item 6), so a failed/ record is the proof the applier
+	// actually reached and tried this commit. Without one, a skip would be
+	// guessing about work nobody attempted.
+	_, err := journal.Store.Get(ctx, journal.Layout.FailedKey(sha))
+	if err != nil {
+		if errors.Is(err, ledger.ErrNotFound) {
+			return skipOutcome{Refused: fmt.Sprintf("refusing -- no failed record for %s. The applier never tried this commit, so there is nothing proven to skip past. If it needs skipping, wait until the applier reaches it and fails there first, then try again.", sha)}
+		}
+		return skipOutcome{Refused: fmt.Sprintf("could not read the failed record for %s: %v", sha, err), NeedsLedger: true}
+	}
+
+	// Guard 3: sha must not already be HEAD -- there is nothing to advance
+	// past if the queue is already there.
+	head, err := journal.Head(ctx)
+	if err != nil {
+		return skipOutcome{Refused: fmt.Sprintf("could not read HEAD: %v", err), NeedsLedger: true}
+	}
+	if head == sha {
+		return skipOutcome{Refused: fmt.Sprintf("refusing -- HEAD is already %s. There is nothing to advance past; if the queue still looks stuck, something else is wrong and `truss status` is the next step.", sha)}
+	}
+	return skipOutcome{}
+}
+
+// finishSkip announces the skip to Telegram BEFORE writing anything, and
+// on success writes PutSkipped then AdvanceHead in that order. Callers
+// must have already run checkSkipGuards (and their own fourth guard)
+// successfully; finishSkip does not re-check any of them.
+//
+// Write order: the record first, then HEAD. A crash between the two
+// leaves an explained commit behind (applied/<sha> already says skipped)
+// rather than an unexplained jump. THE ANNOUNCEMENT COMES BEFORE THE
+// SKIP, AND A SKIP THAT CANNOT BE ANNOUNCED DOES NOT HAPPEN --
+// docs/threat-model.md says of the one existing escape hatch that an
+// operator "can never do it quietly, which is the other point", and this
+// is a second, narrower one, so the quietness property has to be earned
+// rather than inherited. Sending first costs a minute of confusion if the
+// skip then fails; sending after would let a commit get walked past with
+// nothing anywhere saying so the moment the alert itself failed.
+func finishSkip(ctx context.Context, journal *ledger.Journal, tg notify.Telegram, sha, trimmedReason string) skipOutcome {
+	announce := fmt.Sprintf("%s: SKIPPED %s by hand -- %s", defaultAlertSubject, sha, trimmedReason)
+	if err := tg.Send(ctx, announce); err != nil {
+		return skipOutcome{Refused: fmt.Sprintf("refusing -- could not announce the skip (%v). "+
+			"A skip nobody is told about is the one thing this command must not be, so nothing has been written. "+
+			"Fix the alert transport and try again.", err)}
+	}
+
+	if err := journal.PutSkipped(ctx, sha, trimmedReason); err != nil {
+		return skipOutcome{Refused: fmt.Sprintf("could not write the skipped record for %s: %v", sha, err), NeedsLedger: true}
+	}
+	if err := journal.AdvanceHead(ctx, sha); err != nil {
+		return skipOutcome{Refused: fmt.Sprintf("wrote the skipped record for %s but could not advance HEAD: %v. The record is in place; try again once the ledger is reachable to finish advancing HEAD.", sha, err), NeedsLedger: true}
+	}
+	return skipOutcome{}
 }
 
 // parseSkipArgs pulls the sha and the --reason value out of args in any

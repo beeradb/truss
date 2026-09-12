@@ -206,6 +206,15 @@ scan() { # pattern description
   # the format sha256sum reads and there would be no reason to write it.
   hits=$(echo "$hits" | grep -vE '^scripts/toolchain\.sha256:[0-9]+:[0-9a-f]{64}  [A-Za-z0-9._-]+$' || true)
   hits=$(echo "$hits" | grep -vE '^\.github/workflows/[^:]+:[0-9]+:[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._/-]+@[0-9a-f]{40}([[:space:]]|#|$)' || true)
+  # ⚠️ THE CONTROL LISTENER'S COMPILED-IN LOOPBACK BIND, AND ONLY THAT
+  # DECLARATION. The design's whole control-listener authz argument is "it
+  # binds 127.0.0.1 only, and there is deliberately no option to widen it"
+  # -- a fact about the address, not a flag (the same shape
+  # internal/ledger/store.go's isLoopback already is). Anchored to the
+  # exact declaration in the exact file, so the exemption cannot cover a
+  # non-loopback value assigned to the same name, or the same literal
+  # written anywhere else in the tree.
+  hits=$(echo "$hits" | grep -vE '^cmd/truss/control_server\.go:[0-9]+:const controlBindHost = "127\.0\.0\.1"$' || true)
   # ⚠️ NO EXEMPTION SURVIVES A `..` IN A URL PATH, AND THIS IS ONE RULE RATHER
   # THAN SEVEN ANCHORS. Every exemption above is a substring match that drops
   # the WHOLE line, so a permitted address with `/../..` after it walks out of

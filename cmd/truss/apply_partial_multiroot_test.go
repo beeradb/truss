@@ -53,8 +53,9 @@ type dirKeyedTofu struct {
 	applyErr func(pass int, dir string) error
 }
 
-func (f *dirKeyedTofu) Init(context.Context, string) error         { return nil }
-func (f *dirKeyedTofu) Plan(context.Context, string, string) error { return nil }
+func (f *dirKeyedTofu) Init(context.Context, string) error                { return nil }
+func (f *dirKeyedTofu) Plan(context.Context, string, string) error        { return nil }
+func (f *dirKeyedTofu) ForceUnlock(context.Context, string, string) error { return nil }
 func (f *dirKeyedTofu) PlanDetailed(context.Context, string) (bool, error) {
 	return false, nil
 }

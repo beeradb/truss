@@ -99,6 +99,25 @@ func (r Runner) Apply(ctx context.Context, dir, planFile string) error {
 	return wrapExecError("apply", dir, out, err)
 }
 
+// ForceUnlock runs `tofu init` (the backend must be configured before a
+// lock can be addressed) then `tofu force-unlock -force <lockID>`. lockID
+// is required and never defaulted: force-unlocking "whatever lock is
+// there" is how a healthy concurrent apply gets broken. -force suppresses
+// tofu's own interactive confirmation; the caller's own confirmation
+// (the control API's own guard, naming the exact lock ID a real error
+// message printed) stands in for it.
+func (r Runner) ForceUnlock(ctx context.Context, dir, lockID string) error {
+	if lockID == "" {
+		return errors.New("force-unlock: refuses to run without a lock ID")
+	}
+	if err := r.Init(ctx, dir); err != nil {
+		return err
+	}
+	args := []string{"force-unlock", "-force", lockID}
+	out, err := r.run(ctx, dir, args)
+	return wrapExecError("force-unlock", dir, out, err)
+}
+
 // ShowJSON runs `tofu show -json <planFile>` and returns its stdout.
 // planFile is required: `show -json` with no file argument prints current
 // STATE, which has no resource_changes at all, so a caller that dropped the

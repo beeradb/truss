@@ -36,6 +36,7 @@ type tofuRunner interface {
 	PlanDetailed(ctx context.Context, dir string) (bool, error)
 	Apply(ctx context.Context, dir, planFile string) error
 	ShowJSON(ctx context.Context, dir, planFile string) ([]byte, error)
+	ForceUnlock(ctx context.Context, dir, lockID string) error
 }
 
 // tofuFactory builds a tofuRunner for one root apply, given that root's

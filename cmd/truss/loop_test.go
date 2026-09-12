@@ -42,9 +42,10 @@ func validLoopEnv(overrides map[string]string) func(string) string {
 		"HEARTBEAT_KEY":       "heartbeat/applier.json",
 		"HANDOFF_SOCKET":      "/var/run/publish/publish.sock",
 		// "localhost", not a literal IP: scripts/leakscan refuses any IPv4
-		// dotted quad anywhere in the tree, with no exemption yet -- that
-		// lands with the control listener's own bind address, later.
+		// dotted quad anywhere in the tree, with no exemption but the
+		// control listener's own compiled-in bind address.
 		"METRICS_LISTEN": "localhost:0",
+		"CONTROL_PORT":   "0",
 	}
 	for k, v := range overrides {
 		base[k] = v
@@ -135,6 +136,29 @@ func TestLoadLoopConfigRefusesAMissingHandoffSocket(t *testing.T) {
 	}
 }
 
+func TestLoadLoopConfigRefusesAMissingControlPort(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"CONTROL_PORT": ""}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "CONTROL_PORT") {
+		t.Fatalf("problems = %v, want exactly one refusal naming CONTROL_PORT", problems)
+	}
+}
+
+func TestLoadLoopConfigRefusesANonNumericControlPort(t *testing.T) {
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"CONTROL_PORT": "http"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "CONTROL_PORT") {
+		t.Fatalf("problems = %v, want exactly one refusal naming CONTROL_PORT", problems)
+	}
+}
+
+func TestLoadLoopConfigRefusesAHostPortStringAsControlPort(t *testing.T) {
+	// A host:port string is a bind address wearing a disguise -- the bind
+	// host is compiled in and must stay that way.
+	_, problems := loadLoopConfig(validLoopEnv(map[string]string{"CONTROL_PORT": "somehost:9999"}))
+	if len(problems) != 1 || !strings.Contains(problems[0], "CONTROL_PORT") {
+		t.Fatalf("problems = %v, want exactly one refusal naming CONTROL_PORT", problems)
+	}
+}
+
 func TestDriftScheduleDueOncePerDayAtTheWindow(t *testing.T) {
 	s := driftSchedule{hour: 4, minute: 10}
 	window := time.Date(2026, 9, 12, 4, 10, 0, 0, time.UTC)
@@ -204,7 +228,7 @@ func TestRunLoopCallsTurnImmediatelyWithoutWaitingForATick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, nil, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -219,7 +243,7 @@ func TestRunLoopTicksAgainAfterTheInterval(t *testing.T) {
 	defer cancel()
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, 20*time.Millisecond, ft.turn, neverStop, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, 20*time.Millisecond, ft.turn, neverStop, nil, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 3, 2*time.Second)
 	cancel()
@@ -235,7 +259,7 @@ func TestRunLoopStopsBetweenTicksWhenTheContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, nil, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -258,7 +282,7 @@ func TestRunLoopStopsOnAFatalTurnAndPrintsWhyWithoutASecondCall(t *testing.T) {
 	ft := &fakeTurn{fatalAt: 1}
 	var stderr bytes.Buffer
 
-	code := runLoop(context.Background(), time.Hour, ft.turn, neverStop, io.Discard, &stderr)
+	code := runLoop(context.Background(), time.Hour, ft.turn, neverStop, nil, io.Discard, &stderr)
 
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
@@ -280,7 +304,7 @@ func TestRunLoopPrintsANonEmptyNotifyTextToStdout(t *testing.T) {
 	var stdout bytes.Buffer
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, &stdout, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, nil, &stdout, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -311,7 +335,7 @@ func TestRunLoopStopsAfterTheCurrentTurnWhenStoppingIsTrue(t *testing.T) {
 		return s, f, p
 	}
 
-	code := runLoop(context.Background(), time.Hour, turn, stop.Load, io.Discard, io.Discard)
+	code := runLoop(context.Background(), time.Hour, turn, stop.Load, nil, io.Discard, io.Discard)
 
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
@@ -319,6 +343,26 @@ func TestRunLoopStopsAfterTheCurrentTurnWhenStoppingIsTrue(t *testing.T) {
 	if ft.count() != 1 {
 		t.Errorf("turn was called %d times, want exactly 1: stopping() true after the first call must prevent a second", ft.count())
 	}
+}
+
+// TestRunLoopRunsATurnWhenRunNowFires proves the control API's seam into
+// the loop: a send on runNow (from a different goroutine, as
+// control_server.go's handler does) triggers a turn without waiting for
+// the tick.
+func TestRunLoopRunsATurnWhenRunNowFires(t *testing.T) {
+	ft := &fakeTurn{}
+	runNow := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan int, 1)
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, runNow, io.Discard, io.Discard) }()
+
+	waitForCount(t, ft, 1, 2*time.Second) // the immediate call
+	runNow <- struct{}{}
+	waitForCount(t, ft, 2, 2*time.Second) // triggered by runNow, not the (1-hour) tick
+
+	cancel()
+	<-done
 }
 
 func waitForCount(t *testing.T, ft *fakeTurn, want int, timeout time.Duration) {

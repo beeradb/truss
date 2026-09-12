@@ -53,6 +53,16 @@ const (
 	itemTofuEncryption  = "tofu-encryption"
 	fieldTofuPassphrase = "passphrase"
 
+	// ⚠️ A CREDENTIAL ONLY TRUSS MOUNTS, DELIBERATELY NOT THE PUBLISHER.
+	// The control listener binds loopback, but every container in a pod
+	// shares one network namespace -- so "loopback only" means "reachable
+	// by every container in this pod", including the publisher sidecar,
+	// which the whole publisher-identity design exists to keep on a
+	// LESSER identity than the applier's own. A token the publisher does
+	// not have is what closes that in-pod privilege inversion.
+	itemControlToken  = "control-token"
+	fieldControlToken = "token"
+
 	// ⚠️ A CLASSIC PAT, AND IT EXISTS BECAUSE AN APP CANNOT CREATE A
 	// REPOSITORY UNDER A USER ACCOUNT. `POST /user/repos` is
 	// server-to-server: false in GitHub's permissions table and accepts only

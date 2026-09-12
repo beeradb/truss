@@ -544,3 +544,41 @@ func TestAFailureReasonIsNotATranscript(t *testing.T) {
 		})
 	}
 }
+
+func TestForceUnlockRefusesWithoutALockIDWithoutEverInvokingTofu(t *testing.T) {
+	fs := newFake(t, "ok")
+	err := fs.Runner.ForceUnlock(context.Background(), t.TempDir(), "")
+	if err == nil {
+		t.Fatal("ForceUnlock with no lock ID returned nil error")
+	}
+	if recordExists(fs) {
+		t.Fatal("ForceUnlock with no lock ID still ran tofu")
+	}
+}
+
+func TestForceUnlockBuildsTheExactArgv(t *testing.T) {
+	fs := newFake(t, "ok")
+	dir := t.TempDir()
+	if err := fs.Runner.ForceUnlock(context.Background(), dir, "abc-123"); err != nil {
+		t.Fatalf("ForceUnlock: %v", err)
+	}
+	// The fake tofu overwrites FAKE_TOFU_RECORD on every invocation, so the
+	// record left behind after ForceUnlock returns is its LAST exec: the
+	// force-unlock itself, run after Init succeeded.
+	rec := fs.readRecord(t)
+	want := []string{"force-unlock", "-force", "abc-123"}
+	if !equalStrings(rec.Argv, want) {
+		t.Fatalf("force-unlock argv = %v, want %v", rec.Argv, want)
+	}
+}
+
+func TestForceUnlocksErrorCarriesNoTofuTranscript(t *testing.T) {
+	fs := newFake(t, "fail")
+	err := fs.Runner.ForceUnlock(context.Background(), t.TempDir(), "abc-123")
+	if err == nil {
+		t.Fatal("ForceUnlock with a failing tofu returned nil error")
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("the failure reason spans lines, so it is a transcript: %q", err)
+	}
+}

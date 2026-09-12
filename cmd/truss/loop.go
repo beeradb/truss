@@ -56,6 +56,7 @@ type loopConfig struct {
 	driftHeartbeatKey string
 	handoffSocket     string
 	metricsListen     string
+	controlPort       string
 }
 
 // loadLoopConfig reads and validates the loop's own environment on top of
@@ -128,6 +129,22 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 		problems = append(problems, "refusing to start: $METRICS_LISTEN is unset -- the loop must be scrapeable, not just running")
 	}
 
+	// ⚠️ A PORT, NEVER A HOST:PORT STRING. The control listener's bind
+	// host is compiled in (control_server.go's controlBindHost) precisely
+	// so a config value cannot widen it; accepting a full address here
+	// would be a bind address wearing a disguise.
+	controlPort := getenv("CONTROL_PORT")
+	if controlPort == "" {
+		problems = append(problems, "refusing to start: $CONTROL_PORT is unset -- run-now, skip and force-unlock all need it")
+	} else {
+		for _, c := range controlPort {
+			if c < '0' || c > '9' {
+				problems = append(problems, fmt.Sprintf("refusing to start: $CONTROL_PORT must be digits only, not %q", controlPort))
+				break
+			}
+		}
+	}
+
 	if len(problems) > 0 {
 		return loopConfig{}, problems
 	}
@@ -137,6 +154,7 @@ func loadLoopConfig(getenv func(string) string) (loopConfig, []string) {
 		driftHeartbeatKey: driftHeartbeatKey,
 		handoffSocket:     handoffSocket,
 		metricsListen:     metricsListen,
+		controlPort:       controlPort,
 	}, nil
 }
 
@@ -232,9 +250,11 @@ func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() ti
 // stop requested while the loop is between iterations is noticed without
 // waiting for the next tick.
 //
-// ⚠️ RUN-NOW IS STILL MISSING. Each lands as its own change so every one
-// can be watched passing, and failing, on its own.
-func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stopping func() bool, stdout, stderr io.Writer) int {
+// runNow, if non-nil, is a channel the control API's POST /run-now also
+// sends on (control_server.go): a buffered, coalescing send from a
+// different goroutine, so an operator's request runs the next available
+// turn rather than waiting for the tick.
+func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stopping func() bool, runNow <-chan struct{}, stdout, stderr io.Writer) int {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -258,6 +278,7 @@ func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stoppin
 		case <-ctx.Done():
 			return 0
 		case <-ticker.C:
+		case <-runNow:
 		}
 	}
 }
@@ -299,14 +320,22 @@ func cmdLoop(ctx context.Context, args []string, getenv func(string) string, std
 	// a bounded grace period. The control listener (not yet built) needs
 	// its own shutdown ordering relative to this one -- the lease, once it
 	// exists, must not be released before both listeners are down -- so
-	// this is revisited in that change rather than half-designed here.
+	// this is revisited once the lease exists rather than half-designed here.
 	defer metricsSrv.Close()
+
+	runNow := make(chan struct{}, 1)
+	controlSrv := newControlServer(controlDeps{e: e, snap: snap, runNow: runNow})
+	if err := listenControl(ctx, controlSrv, controlBindHost+":"+lcfg.controlPort); err != nil {
+		fmt.Fprintln(stderr, "refusing to start: "+err.Error())
+		return 1
+	}
+	defer controlSrv.Close()
 
 	stopping, stop := armStopSignal(ctx, stderr)
 	defer stop()
 	turn := realLoopTurn(e, lcfg, lastDrift, time.Now, stopping, snap)
 
-	return runLoop(ctx, lcfg.interval, turn, stopping, stdout, stderr)
+	return runLoop(ctx, lcfg.interval, turn, stopping, runNow, stdout, stderr)
 }
 
 // armStopSignal installs the loop's only signal handler and returns a
