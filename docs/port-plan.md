@@ -150,6 +150,13 @@ owner, not for an implementer.
 7. **A busy state lock is contention, not a fault.** Matched on OpenTofu's own "Error
    acquiring the state lock" and nothing looser (676-678); the pass ends with no
    `failed/<sha>`, no failure alert, HEAD unmoved, exit 0 (824-828, 883-887).
+   ⚠️ **UNTIL IT HAS BEEN HELD TOO LONG TO BE ANYBODY'S WORK.** A backend lock
+   has no lease and no expiry, so a killed holder leaves one for ever and every
+   later pass defers again — sixteen hours of it on 2026-09-07, each pass
+   exiting 0. Truss reads the age out of tofu's own message and, past
+   `lockLeakAfter`, files it as a failure of class `lock` naming the root and
+   the lock ID. It still never breaks a lock itself: that decision is a
+   person's. Contention whose message carries no readable age stays contention.
 8. **The pass always writes a heartbeat and always sends a message**, including "nothing to
    apply", and exits 1 if and only if `failure` is non-empty (1112-1114).
 9. **Root order and credential separation.** Roots are always `credentials`, then `platform`,

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
+	"time"
 )
 
 // Runner drives the `tofu` binary. Every method builds an exact argv, runs
@@ -30,6 +32,77 @@ type Runner struct {
 var ErrLockBusy = errors.New("plan: state lock held elsewhere")
 
 const lockMessage = "Error acquiring the state lock"
+
+// LockInfo is what tofu's own lock message says about the holder. Every
+// field is as printed; Created is the one a caller can reason with, because
+// contention that is minutes old is another applier working and contention
+// that is hours old is a lock whose holder died.
+//
+// ⚠️ A BACKEND LOCK HAS NO LEASE AND NO EXPIRY. Nothing reclaims it when the
+// process holding it is killed, so "somebody holds it" is not evidence that
+// anybody is running. Age is the only thing in the message that tells those
+// apart, which is why this type exists rather than the bare sentinel.
+type LockInfo struct {
+	ID        string
+	Path      string
+	Operation string
+	Who       string
+	Version   string
+	// Created is the zero time when the message carried none, or carried one
+	// this package could not parse. Zero means UNKNOWN AGE, never "old".
+	Created time.Time
+}
+
+// LockBusyError is contention, with whatever the message said about the
+// holder. It matches ErrLockBusy so that errors.Is keeps working for every
+// caller that only needs "is this contention".
+type LockBusyError struct{ Info LockInfo }
+
+func (e *LockBusyError) Error() string { return ErrLockBusy.Error() }
+
+// Is reports true for ErrLockBusy, and nothing else.
+func (e *LockBusyError) Is(target error) bool { return target == ErrLockBusy }
+
+// parseLockInfo reads the `Lock Info:` block tofu prints under the lock
+// message. Anything it cannot read is left zero: a half-read message must
+// never become a confident claim about the lock's age.
+//
+// ⚠️ THE Created LAYOUT IS Go's OWN time.Time.String(), which is what tofu
+// prints -- "2026-09-07 05:56:12.310476673 +0000 UTC". Captured from a real
+// collision (two applies at once against one backend, tofu 1.12.6) rather
+// than copied from documentation.
+func parseLockInfo(output string) LockInfo {
+	var info LockInfo
+	for _, line := range strings.Split(output, "\n") {
+		// tofu draws a box around errors, so a line can arrive as
+		// "│   ID:        123". Trim the drawing before reading the label.
+		line = strings.TrimSpace(strings.TrimLeft(line, "│| \t"))
+		label, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(label) {
+		case "ID":
+			info.ID = value
+		case "Path":
+			info.Path = value
+		case "Operation":
+			info.Operation = value
+		case "Who":
+			info.Who = value
+		case "Version":
+			info.Version = value
+		case "Created":
+			// Cut above split on the FIRST colon, so a timestamp's own
+			// colons are still in value.
+			if t, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", value); err == nil {
+				info.Created = t
+			}
+		}
+	}
+	return info
+}
 
 // Init runs `tofu init` with the two flags that keep it off the network:
 // -plugin-dir, so providers resolve only from the image's baked-in
@@ -68,7 +141,7 @@ func (r Runner) PlanDetailed(ctx context.Context, dir string) (changes bool, err
 		return false, nil
 	}
 	if lockBusy(out) {
-		return false, ErrLockBusy
+		return false, &LockBusyError{Info: parseLockInfo(out)}
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 2 {
@@ -116,7 +189,7 @@ func (r Runner) ShowJSON(ctx context.Context, dir, planFile string) ([]byte, err
 	if runErr != nil {
 		combined := stdout.String() + stderr.String()
 		if lockBusy(combined) {
-			return nil, ErrLockBusy
+			return nil, &LockBusyError{Info: parseLockInfo(combined)}
 		}
 		return nil, fmt.Errorf("tofu show -json failed in %s: %w\n%s", dir, runErr, stderr.String())
 	}
@@ -172,7 +245,7 @@ func wrapExecError(step, dir, out string, err error) error {
 		return nil
 	}
 	if lockBusy(out) {
-		return ErrLockBusy
+		return &LockBusyError{Info: parseLockInfo(out)}
 	}
 	// The raw exec error and nothing else: "exit status 1". Every caller
 	// already names the step and the root ("tofu plan failed for %s: %v"),

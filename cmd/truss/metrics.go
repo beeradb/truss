@@ -37,6 +37,7 @@ const (
 	classPublish     = "publish"     // the publisher handoff failed
 	classLedger      = "ledger"      // a ledger object could not be written
 	classConfig      = "config"      // the repository does not contain what it says it does
+	classLock        = "lock"        // a state lock was held far longer than a pass can take
 )
 
 // failureClasses is every class, in the order the dashboard lists them.
@@ -47,7 +48,7 @@ const (
 var failureClasses = []string{
 	classProtection, classRulesets, classForge, classRepo, classCommit,
 	classCredentials, classPlan, classDigest, classApply, classRotation,
-	classPublish, classLedger, classConfig,
+	classPublish, classLedger, classConfig, classLock,
 }
 
 // rootPhase is one timed step of one root's apply.

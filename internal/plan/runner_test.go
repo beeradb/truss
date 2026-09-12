@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- fake tofu, run as this same test binary ----
@@ -63,6 +64,27 @@ func runFakeTofu() {
 	switch os.Getenv("FAKE_TOFU_MODE") {
 	case "lock-busy":
 		os.Stderr.WriteString("Error: Error acquiring the state lock\n")
+		os.Exit(1)
+	// ⚠️ CAPTURED FROM A REAL COLLISION, NOT COMPOSED. Recorded 2026-09-11 by
+	// running two `tofu apply` runs at once against one local backend, with
+	// tofu 1.12.6 -- the version this deployment pins. The label spelling,
+	// the column the values start in, and Go's own time format in Created are
+	// what a parser has to survive; a fixture written from memory would agree
+	// with the parser and with nothing else.
+	case "lock-busy-detailed":
+		os.Stderr.WriteString(`Error: Error acquiring the state lock
+
+Error message: resource temporarily unavailable
+Lock Info:
+  ID:        ff3fa170-d20d-971b-e575-af5503a795ee
+  Path:      terraform.tfstate
+  Operation: OperationTypeApply
+  Who:       applier@applier-truss-29321130-abcde
+  Version:   1.12.6
+  Created:   2026-09-07 05:56:12.310476673 +0000 UTC
+  Info:
+
+`)
 		os.Exit(1)
 	case "fail":
 		os.Stderr.WriteString("tofu blew up for a reason that is not a lock\n")
@@ -314,6 +336,54 @@ func TestALockedStateIsContentionNotFailure(t *testing.T) {
 		}
 		if errors.Is(err, ErrLockBusy) {
 			t.Fatalf("a plain failure was reported as ErrLockBusy: %v", err)
+		}
+	})
+}
+
+// TestAHeldLockSaysWhoHoldsItAndSinceWhen. Contention alone cannot tell a
+// live applier from a corpse: the GCS backend's lock is an object with no
+// lease and no expiry, so a pod killed mid-apply leaves one behind that every
+// later pass reads as "somebody is working" -- 16 hours of it, measured
+// 2026-09-07 (platform applier/force-unlock's own header). tofu's message
+// already carries what decides it, and the ID is what force-unlock needs.
+//
+// ⚠️ ErrLockBusy MUST STILL MATCH, because every caller tests it with
+// errors.Is and a message this parser cannot read is still contention.
+func TestAHeldLockSaysWhoHoldsItAndSinceWhen(t *testing.T) {
+	dir := t.TempDir()
+
+	fs := newFake(t, "lock-busy-detailed")
+	err := fs.Runner.Apply(context.Background(), dir, "tfplan")
+	if !errors.Is(err, ErrLockBusy) {
+		t.Fatalf("Apply error = %v, want it to match ErrLockBusy", err)
+	}
+
+	var busy *LockBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("Apply error = %v, want a *LockBusyError carrying the lock's own details", err)
+	}
+	if busy.Info.ID != "ff3fa170-d20d-971b-e575-af5503a795ee" {
+		t.Errorf("lock ID = %q, want the ID the message names", busy.Info.ID)
+	}
+	if busy.Info.Who != "applier@applier-truss-29321130-abcde" {
+		t.Errorf("lock Who = %q, want the holder the message names", busy.Info.Who)
+	}
+	want := time.Date(2026, 9, 7, 5, 56, 12, 310476673, time.UTC)
+	if !busy.Info.Created.Equal(want) {
+		t.Errorf("lock Created = %v, want %v", busy.Info.Created, want)
+	}
+
+	// Read as "no lock", a pass would call contention a failure; read as "a
+	// lock taken at the zero time", it would call every contention stale.
+	t.Run("a message with no lock info is contention of unknown age", func(t *testing.T) {
+		fs := newFake(t, "lock-busy")
+		err := fs.Runner.Apply(context.Background(), dir, "tfplan")
+		if !errors.Is(err, ErrLockBusy) {
+			t.Fatalf("Apply error = %v, want ErrLockBusy", err)
+		}
+		var busy *LockBusyError
+		if errors.As(err, &busy) && !busy.Info.Created.IsZero() {
+			t.Errorf("Created = %v, want the zero time when the message carries none", busy.Info.Created)
 		}
 	})
 }
