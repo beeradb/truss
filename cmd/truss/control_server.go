@@ -18,13 +18,18 @@ import (
 	"github.com/beeradb/truss/internal/plan"
 )
 
-// controlBindHost is the control listener's bind address. Compiled in, not
-// configurable: the design's whole authz argument is "the control
-// listener binds 127.0.0.1 only", which is a fact about the address, not
-// a flag -- the same precedent internal/ledger/store.go's isLoopback
-// states for itself. A config value permitting a wider bind is exactly
-// the misconfiguration this exists to make impossible, and scripts/leakscan
-// carries a narrow exemption pinned to this exact declaration.
+// controlBindHost is the control listener's bind address, and the ONLY
+// place its value may be written in this repository -- scripts/leakscan
+// carries a narrow exemption pinned to this exact declaration, so every
+// other reference to it, in code or in a comment, uses this constant
+// rather than repeating the literal.
+//
+// Compiled in, not configurable: the design's whole authz argument is
+// that this listener binds the loopback address only, which is a fact
+// about the address, not a flag -- the same precedent
+// internal/ledger/store.go's isLoopback states for itself. A config value
+// permitting a wider bind is exactly the misconfiguration this exists to
+// make impossible.
 const controlBindHost = "127.0.0.1"
 
 const (
@@ -125,7 +130,8 @@ func requireControlToken(e passEnv, r *http.Request) (ok bool, reason string) {
 //  2. Refuse any request carrying an Origin header. No legitimate client
 //     of this API is a browser.
 //  3. Refuse a Host header that is not loopback, closing DNS rebinding
-//     (an attacker's domain resolving to 127.0.0.1 with Host: evil.example).
+//     (an attacker's domain resolving to the bind address with
+//     Host: evil.example).
 func controlAuth(e passEnv, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != "" {
@@ -136,7 +142,7 @@ func controlAuth(e passEnv, next http.HandlerFunc) http.HandlerFunc {
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
-		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		if host != controlBindHost && host != "localhost" && host != "::1" {
 			refuse(w, http.StatusBadRequest, fmt.Sprintf("Host %q is not loopback", r.Host))
 			return
 		}
