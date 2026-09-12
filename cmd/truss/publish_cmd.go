@@ -10,11 +10,15 @@
 // rather than receive it over the handoff socket -- truss never sees the
 // value, not in memory, not in a request, not in a log.
 //
-// It is a rendezvous, not a server: it loads its config and the authored
-// expiry table, listens on one Unix socket for exactly one request
-// (internal/handoff.Serve), answers it, and exits. No timer, no state read,
-// no Vault login and no 1Password read until a request has actually
-// arrived.
+// ⚠️ IT USED TO BE A RENDEZVOUS, NOT A SERVER: load config and the
+// authored expiry table once, serve exactly one request, exit. Under a
+// long-running applier that runs one drift pass a day, that shape leaves
+// 364 days of the year with nobody listening. It is a server now:
+// internal/handoff.Serve answers requests until told to stop, and every
+// per-request-shaped assumption below (the Vault write identity, the
+// expiry table) is rebuilt fresh on every request rather than held from
+// startup -- see publishHandler's own doc for why each specifically must
+// be.
 package main
 
 import (
@@ -45,11 +49,6 @@ var publishRequiredEnv = []string{
 	"HANDOFF_SOCKET", "EXPIRIES_FILE",
 }
 
-// defaultPublishWait matches design §3's "PUBLISH_WAIT, default 30m": the
-// publisher's wait is bounded, and its exit code carries meaning (a failed
-// pass) only in the one case nobody ever connected.
-const defaultPublishWait = 30 * time.Minute
-
 // vaultCallTimeout bounds the handler's own Vault work per request. The
 // handler receives no context from internal/handoff.Serve (h's signature
 // is func(Request) Response, deliberately -- Serve's ctx governs only the
@@ -64,7 +63,6 @@ type publishConfig struct {
 	vault        secrets.KVConfig
 	socket       string
 	expiriesFile string
-	wait         time.Duration
 	// op is read but NOT validated here -- see loadPublishConfig's doc.
 	op secrets.OPConfig
 }
@@ -99,14 +97,14 @@ func loadPublishConfig(getenv func(string) string) (publishConfig, []string) {
 		values[name] = v
 	}
 
-	wait := defaultPublishWait
-	if raw := getenv("PUBLISH_WAIT"); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("refusing to start: $PUBLISH_WAIT is not a valid duration: %v", err))
-		} else {
-			wait = d
-		}
+	// ⚠️ $PUBLISH_WAIT RETIRES, AND ITS PRESENCE IS A REFUSAL RATHER THAN A
+	// SILENT NO-OP. It bounded the old rendezvous's accept-side wait, whose
+	// job (design §3's "truss died without ever asking") now belongs to
+	// the loop's own heartbeat staleness. A manifest that still sets it is
+	// an operator who believes a timeout exists here; silently ignoring
+	// the variable would leave that belief uncorrected.
+	if getenv("PUBLISH_WAIT") != "" {
+		problems = append(problems, "refusing to start: $PUBLISH_WAIT is set but no longer read -- the publisher is a long-lived server now and has no accept-side timeout; remove it from the manifest")
 	}
 
 	if len(problems) > 0 {
@@ -123,7 +121,6 @@ func loadPublishConfig(getenv func(string) string) (publishConfig, []string) {
 		},
 		socket:       values["HANDOFF_SOCKET"],
 		expiriesFile: values["EXPIRIES_FILE"],
-		wait:         wait,
 		op: secrets.OPConfig{
 			Vault:     getenv("OP_VAULT"),
 			TokenFile: getenv("OP_TOKEN_FILE"),
@@ -149,20 +146,33 @@ func newOPStore(cfg secrets.OPConfig) (opReader, error) {
 	return secrets.NewOP(cfg)
 }
 
-// publishHandler closes over everything one request needs to answer: the
-// write identity, a way to read the cas version PutValue's guard requires,
-// the authored expiry table loaded once at startup, before any request has
-// arrived, and how to build the 1Password reader a value publish needs
-// (newOP, not a constructed opReader -- see handle's own doc for why
-// construction is deferred rather than done once up front).
+// publishHandler closes over everything a request needs, but holds only
+// FACTORIES and PATHS for the two things that must be fresh on every
+// call, never a constructed value:
+//
+//   - newVault, because secrets.KV caches its Vault token for its own
+//     lifetime and never refreshes it (internal/secrets/kv.go). A
+//     publisher that built one at startup would work until the token's
+//     TTL expired and then 403 every request for as long as the pod
+//     lived -- once a day, on the one pass that rotates, with nobody
+//     watching. It also re-reads the projected ServiceAccount JWT from
+//     disk, which the kubelet rotates underneath this process.
+//   - expiriesFile, the PATH rather than the loaded table, because it is
+//     a ConfigMap mount that Kubernetes updates IN PLACE: holding the
+//     table in memory from startup would mean an edited table never
+//     takes effect for as long as the pod lived.
+//
+// newOP is the same shape for the 1Password reader, and predates this
+// change -- see handle's own doc for why its construction is already
+// deferred to the point of use.
 type publishHandler struct {
-	publisher secrets.Publisher
-	versions  currentVersionReader
-	table     secrets.Expiries
-	item      string // the one item this handler may write; itemCFInfraAdmin in production
-	field     string // the field read from item for its value; fieldCFPassword in production
-	opCfg     secrets.OPConfig
-	newOP     func(secrets.OPConfig) (opReader, error) // newOPStore in production
+	newVault     func(secrets.KVConfig) (vaultWriter, error) // newVaultWriter in production
+	vaultCfg     secrets.KVConfig
+	expiriesFile string
+	item         string // the one item this handler may write; itemCFInfraAdmin in production
+	field        string // the field read from item for its value; fieldCFPassword in production
+	opCfg        secrets.OPConfig
+	newOP        func(secrets.OPConfig) (opReader, error) // newOPStore in production
 }
 
 // currentVersionReader is the seam handle lets a test double the KV v2
@@ -170,6 +180,31 @@ type publishHandler struct {
 // implementation.
 type currentVersionReader interface {
 	CurrentVersion(ctx context.Context, item string) (version int, exists bool, err error)
+}
+
+// vaultWriter is the union of what one request needs from the Vault write
+// identity: secrets.Publisher for the patch/write calls, plus the CAS
+// version lookup PutValue's guard requires. *secrets.KV satisfies it by
+// its method set alone -- one construction answers both.
+type vaultWriter interface {
+	secrets.Publisher
+	currentVersionReader
+}
+
+// newVaultWriter is production's only implementation of h.newVault.
+func newVaultWriter(cfg secrets.KVConfig) (vaultWriter, error) {
+	return secrets.NewKV(cfg)
+}
+
+// loadExpiryTable re-reads the authored expiry table from its ConfigMap
+// mount. Called fresh on every request -- see publishHandler's own doc.
+func loadExpiryTable(path string) (secrets.Expiries, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening the expiry table at %s: %w", path, err)
+	}
+	defer f.Close()
+	return secrets.LoadExpiries(f, []string{itemCFTokenMint})
 }
 
 // handle answers one request. It always attempts the authored expiry
@@ -206,18 +241,35 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 		}
 	}
 
+	// ⚠️ BOTH REBUILT HERE, ON EVERY REQUEST -- see publishHandler's own
+	// doc for why. A construction failure is THIS REQUEST'S failure, the
+	// same fail-at-the-point-of-use discipline loadPublishConfig's own doc
+	// already argues for $OP_TOKEN_FILE: never a process exit, never a
+	// fallback to a stale value held from an earlier request.
+	publisher, err := h.newVault(h.vaultCfg)
+	if err != nil {
+		resp.Value = handoff.ValueFailed
+		resp.Error = fmt.Sprintf("could not build the Vault write identity: %v", err)
+		return finish(resp)
+	}
+	table, err := loadExpiryTable(h.expiriesFile)
+	if err != nil {
+		resp.Value = handoff.ValueFailed
+		resp.Error = err.Error()
+		return finish(resp)
+	}
+
 	// The authored table (design §4): read-only ConfigMap, never the repo
-	// checkout, loaded once by cmdPublish before any request arrived.
-	// Sorted so the order patches are attempted in -- and therefore which
-	// name lands first in Skipped on a partial failure -- is deterministic
-	// rather than Go's randomised map order.
-	names := make([]string, 0, len(h.table))
-	for name := range h.table {
+	// checkout. Sorted so the order patches are attempted in -- and
+	// therefore which name lands first in Skipped on a partial failure --
+	// is deterministic rather than Go's randomised map order.
+	names := make([]string, 0, len(table))
+	for name := range table {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := h.publisher.PatchExpiry(ctx, name, h.table[name]); err != nil {
+		if err := publisher.PatchExpiry(ctx, name, table[name]); err != nil {
 			note(name, err)
 			continue
 		}
@@ -274,7 +326,7 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 	// else failed, but must not stop the value write below from being
 	// attempted -- design §9's "a value publish can succeed even when an
 	// earlier expiry patch did not".
-	if err := h.publisher.PatchExpiry(ctx, h.item, expires); err != nil {
+	if err := publisher.PatchExpiry(ctx, h.item, expires); err != nil {
 		note(h.item+" (own expiry)", err)
 	} else {
 		patched++
@@ -282,7 +334,7 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 	resp.Expiries = patched
 	resp.Skipped = skipped
 
-	version, exists, err := h.versions.CurrentVersion(ctx, h.item)
+	version, exists, err := publisher.CurrentVersion(ctx, h.item)
 	if err != nil {
 		resp.Value = handoff.ValueFailed
 		resp.Error = err.Error()
@@ -293,7 +345,7 @@ func (h publishHandler) handle(req handoff.Request) handoff.Response {
 		cas = version
 	}
 
-	if err := h.publisher.PutValue(ctx, h.item, map[string]string{h.field: value}, cas); err != nil {
+	if err := publisher.PutValue(ctx, h.item, map[string]string{h.field: value}, cas); err != nil {
 		resp.Value = handoff.ValueFailed
 		resp.Error = err.Error()
 		return finish(resp)
@@ -324,17 +376,17 @@ func finish(resp handoff.Response) handoff.Response {
 	return resp
 }
 
-// cmdPublish is `truss publish`: load config, load the expiry table, serve
-// exactly one handoff request, and exit. It takes no arguments.
+// cmdPublish is `truss publish`: load config, sanity-check the expiry
+// table and the Vault write identity, then serve handoff requests until
+// ctx is cancelled. It takes no arguments.
 //
-// Exit 0 only when a request was served, regardless of whether that
-// request's own outcome was a Vault failure -- the Response.Error is how a
-// per-item failure reaches truss; cmdPublish's own exit code answers a
-// narrower question, "did I serve the rendezvous I exist for", the same
-// way internal/handoff.Serve's returned error does. Exit 1 covers every
-// refusal before or during serving: bad config, an invalid expiry table, a
-// Vault client that could not even be constructed, or nobody ever
-// connecting before PUBLISH_WAIT elapsed.
+// Exit 0 when Serve stops because ctx was cancelled (the loop's own
+// shutdown), regardless of any individual request's own outcome -- a
+// per-request Vault failure travels in that request's Response.Error,
+// never in this process's exit code. Exit 1 covers every refusal before
+// or during serving: bad config, an expiry table that will not even parse
+// at boot, a Vault client that could not be constructed at boot, or the
+// listener itself failing.
 func cmdPublish(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "usage: truss publish")
@@ -349,35 +401,31 @@ func cmdPublish(ctx context.Context, args []string, getenv func(string) string, 
 		return 1
 	}
 
-	expiriesFile, err := os.Open(cfg.expiriesFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "publish: opening the expiry table at %s: %v\n", cfg.expiriesFile, err)
-		return 1
-	}
-	table, err := secrets.LoadExpiries(expiriesFile, []string{itemCFTokenMint})
-	expiriesFile.Close()
-	if err != nil {
+	// Boot-time sanity checks only -- neither value is kept. handle()
+	// (below) rebuilds both fresh on every request, for the reasons
+	// publishHandler's own doc states; this is only "does the mount exist
+	// and parse, does Vault answer at all" failing fast and loudly rather
+	// than waiting for the first real request a day from now to find out.
+	if _, err := loadExpiryTable(cfg.expiriesFile); err != nil {
 		fmt.Fprintf(stderr, "publish: %v\n", err)
 		return 1
 	}
-
-	kv, err := secrets.NewKV(cfg.vault)
-	if err != nil {
+	if _, err := newVaultWriter(cfg.vault); err != nil {
 		fmt.Fprintf(stderr, "publish: %v\n", err)
 		return 1
 	}
 
 	handler := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table:     table,
-		item:      itemCFInfraAdmin,
-		field:     fieldCFPassword,
-		opCfg:     cfg.op,
-		newOP:     newOPStore,
+		newVault:     newVaultWriter,
+		vaultCfg:     cfg.vault,
+		expiriesFile: cfg.expiriesFile,
+		item:         itemCFInfraAdmin,
+		field:        fieldCFPassword,
+		opCfg:        cfg.op,
+		newOP:        newOPStore,
 	}
 
-	if err := handoff.Serve(ctx, cfg.socket, cfg.wait, handler.handle); err != nil {
+	if err := handoff.Serve(ctx, cfg.socket, handler.handle); err != nil {
 		fmt.Fprintf(stderr, "publish: %v\n", err)
 		return 1
 	}

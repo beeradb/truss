@@ -244,6 +244,15 @@ func newPublishTestKV(t *testing.T, fv *fakePublishVault, srv *httptest.Server) 
 	return kv
 }
 
+// vaultFactoryFor wraps an already-built vaultWriter (a real *secrets.KV
+// against a fake server, or a stub like noopPublisher) as the
+// publishHandler.newVault factory these tests need -- production rebuilds
+// one fresh per request; a test that only cares about ONE request's
+// behavior can hand back the same value every time.
+func vaultFactoryFor(v vaultWriter) func(secrets.KVConfig) (vaultWriter, error) {
+	return func(secrets.KVConfig) (vaultWriter, error) { return v, nil }
+}
+
 // --- fixtures ---
 
 func writePublishJWT(t *testing.T) string {
@@ -370,44 +379,41 @@ func TestLoadPublishConfigRefusesEachMissingVariable(t *testing.T) {
 	}
 }
 
-func TestLoadPublishConfigDefaultsPublishWaitAndAcceptsAnOverride(t *testing.T) {
+func TestLoadPublishConfigLoadsCleanlyWithNoOtherVariablesSet(t *testing.T) {
 	base := map[string]string{
 		"VAULT_ADDR": "http://vault.invalid", "VAULT_ROLE": "publisher",
 		"VAULT_JWT_PATH": "/token", "VAULT_MOUNT": "platform",
 		"HANDOFF_SOCKET": "/handoff/publish.sock", "EXPIRIES_FILE": "/etc/publisher/expiries.json",
 	}
-	cfg, problems := loadPublishConfig(func(n string) string { return base[n] })
+	_, problems := loadPublishConfig(func(n string) string { return base[n] })
 	if len(problems) != 0 {
 		t.Fatalf("unexpected problems: %v", problems)
-	}
-	if cfg.wait != defaultPublishWait {
-		t.Errorf("wait = %s, want the default %s", cfg.wait, defaultPublishWait)
-	}
-
-	withOverride := map[string]string{}
-	for k, v := range base {
-		withOverride[k] = v
-	}
-	withOverride["PUBLISH_WAIT"] = "5m"
-	cfg, problems = loadPublishConfig(func(n string) string { return withOverride[n] })
-	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
-	}
-	if cfg.wait != 5*time.Minute {
-		t.Errorf("wait = %s, want 5m", cfg.wait)
 	}
 }
 
-func TestLoadPublishConfigRefusesAnInvalidPublishWaitDuration(t *testing.T) {
+// TestLoadPublishConfigRefusesPublishWait pins $PUBLISH_WAIT's retirement:
+// the publisher is a long-lived server with no accept-side timeout, so a
+// manifest that still sets it is refused rather than silently ignored --
+// silence would leave an operator believing a timeout exists here.
+func TestLoadPublishConfigRefusesPublishWait(t *testing.T) {
 	base := map[string]string{
 		"VAULT_ADDR": "http://vault.invalid", "VAULT_ROLE": "publisher",
 		"VAULT_JWT_PATH": "/token", "VAULT_MOUNT": "platform",
 		"HANDOFF_SOCKET": "/handoff/publish.sock", "EXPIRIES_FILE": "/etc/publisher/expiries.json",
-		"PUBLISH_WAIT": "not-a-duration",
+		"PUBLISH_WAIT": "5m",
 	}
 	_, problems := loadPublishConfig(func(n string) string { return base[n] })
 	if len(problems) == 0 {
-		t.Fatal("no problem reported for an invalid PUBLISH_WAIT")
+		t.Fatal("no problem reported for a set $PUBLISH_WAIT, want a refusal")
+	}
+	found := false
+	for _, p := range problems {
+		if strings.Contains(p, "PUBLISH_WAIT") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("problems %v do not mention PUBLISH_WAIT", problems)
 	}
 }
 
@@ -446,15 +452,14 @@ func TestHandlePublishesTheFetchedValueAndExpiry(t *testing.T) {
 
 	op := &fakeOP{value: "gen2-cloudflare-token", expires: "2026-12-01", recorded: true}
 	h := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table: secrets.Expiries{
+		newVault: vaultFactoryFor(kv),
+		expiriesFile: writeExpiriesFile(t, map[string]string{
 			itemGitHubApp:      "2027-01-01",
 			itemTelegram:       "never",
 			itemGCPApply:       "2027-06-15",
 			itemLedger:         "2027-06-15",
 			itemTofuEncryption: "2027-06-15",
-		},
+		}),
 		item:  itemCFInfraAdmin,
 		field: fieldCFPassword,
 		newOP: op.asOPFactory(),
@@ -532,6 +537,83 @@ func TestHandlePublishesTheFetchedValueAndExpiry(t *testing.T) {
 	}
 }
 
+// TestEachRequestRereadsTheExpiryTableFromDisk is the property
+// publishHandler.expiriesFile exists for: the table is a ConfigMap mount
+// Kubernetes updates in place, so an edit between two requests must take
+// effect on the second one without a restart.
+func TestEachRequestRereadsTheExpiryTableFromDisk(t *testing.T) {
+	fv := newFakePublishVault()
+	srv := fv.server()
+	defer srv.Close()
+	kv := newPublishTestKV(t, fv, srv)
+
+	path := writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"})
+	h := publishHandler{
+		newVault:     vaultFactoryFor(kv),
+		expiriesFile: path,
+		item:         itemCFInfraAdmin,
+		field:        fieldCFPassword,
+	}
+
+	first := h.handle(handoff.Request{PublishValue: false})
+	if first.Expiries != 1 {
+		t.Fatalf("first request: Expiries = %d, want 1", first.Expiries)
+	}
+
+	// Edit the table in place, the way a ConfigMap update does -- add a
+	// second item, still pointing h at the SAME path.
+	overwritten := writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01", itemTelegram: "never"})
+	if err := os.Rename(overwritten, path); err != nil {
+		t.Fatalf("simulating an in-place ConfigMap update: %v", err)
+	}
+
+	second := h.handle(handoff.Request{PublishValue: false})
+	if second.Expiries != 2 {
+		t.Fatalf("second request: Expiries = %d, want 2 -- the edited table did not take effect without a restart", second.Expiries)
+	}
+}
+
+// TestEachRequestBuildsItsOwnVaultWriter is the property h.newVault exists
+// for: secrets.KV caches its Vault token for its own lifetime and never
+// refreshes it, so a handler that cached ONE successful construction
+// across requests would 403 forever after the token's TTL expired.
+// Asserted directly on the call count -- with both calls succeeding, a
+// cache-after-success bug is invisible to anything that only checks the
+// RESPONSE, since a cached, still-valid writer answers identically to a
+// freshly built one.
+func TestEachRequestBuildsItsOwnVaultWriter(t *testing.T) {
+	calls := 0
+	h := publishHandler{
+		newVault: func(secrets.KVConfig) (vaultWriter, error) {
+			calls++
+			return noopVault{}, nil
+		},
+		expiriesFile: writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"}),
+		item:         itemCFInfraAdmin,
+	}
+
+	h.handle(handoff.Request{PublishValue: false})
+	h.handle(handoff.Request{PublishValue: false})
+
+	if calls != 2 {
+		t.Fatalf("newVault was called %d times across two requests, want 2 -- it must not be cached from an earlier request", calls)
+	}
+}
+
+// noopVault answers every write with success and every table entry as
+// already at version 0 -- just enough for
+// TestEachRequestBuildsItsOwnVaultWriter's second call to reach
+// ValueSkipped rather than failing on some other, unrelated ground.
+type noopVault struct{}
+
+func (noopVault) PatchExpiry(ctx context.Context, item, expires string) error { return nil }
+func (noopVault) PutValue(ctx context.Context, item string, fields map[string]string, cas int) error {
+	return nil
+}
+func (noopVault) CurrentVersion(ctx context.Context, item string) (int, bool, error) {
+	return 0, false, nil
+}
+
 func TestCmdPublishReportsSkippedWhenPublishValueIsFalse(t *testing.T) {
 	fv := newFakePublishVault()
 	srv := fv.server()
@@ -551,6 +633,10 @@ func TestCmdPublishReportsSkippedWhenPublishValueIsFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
+	// Serve now runs until its context is cancelled rather than returning
+	// after one request; cancel explicitly so this test does not wait out
+	// the full 10s timeout to see cmdPublish exit.
+	cancel()
 	if code := <-exitCode; code != 0 {
 		t.Fatalf("cmdPublish exit code = %d, want 0; stderr: %s", code, stderrOut.String())
 	}
@@ -586,9 +672,8 @@ func TestHandleFailsClosedWhenTheOPTokenFileIsUnreadable(t *testing.T) {
 
 	missingTokenPath := filepath.Join(t.TempDir(), "does-not-exist", "token")
 	h := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		newVault:     vaultFactoryFor(kv),
+		expiriesFile: writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"}),
 		item:      itemCFInfraAdmin,
 		field:     fieldCFPassword,
 		opCfg:     secrets.OPConfig{Vault: "platform", TokenFile: missingTokenPath},
@@ -626,9 +711,8 @@ func TestHandleFailsClosedWhenOPConfigIsEmpty(t *testing.T) {
 	kv := newPublishTestKV(t, fv, srv)
 
 	h := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		newVault:     vaultFactoryFor(kv),
+		expiriesFile: writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"}),
 		item:      itemCFInfraAdmin,
 		field:     fieldCFPassword,
 		opCfg:     secrets.OPConfig{}, // both Vault and TokenFile empty
@@ -681,9 +765,8 @@ func TestHandleRefusesAnEmptyOrUnrecordedFetch(t *testing.T) {
 			kv := newPublishTestKV(t, fv, srv)
 
 			h := publishHandler{
-				publisher: kv,
-				versions:  kv,
-				table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+				newVault:     vaultFactoryFor(kv),
+				expiriesFile: writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"}),
 				item:      itemCFInfraAdmin,
 				field:     fieldCFPassword,
 				newOP:     tc.op.asOPFactory(),
@@ -725,9 +808,8 @@ func TestHandleNeverLeaksTheFetchedValueWhenPutValueFails(t *testing.T) {
 
 	op := &fakeOP{value: sentinel, expires: "2027-01-01", recorded: true}
 	h := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table:     secrets.Expiries{itemGitHubApp: "2027-01-01"},
+		newVault:     vaultFactoryFor(kv),
+		expiriesFile: writeExpiriesFile(t, map[string]string{itemGitHubApp: "2027-01-01"}),
 		item:      itemCFInfraAdmin,
 		field:     fieldCFPassword,
 		newOP:     op.asOPFactory(),
@@ -762,12 +844,11 @@ func TestPartialPublishReportsBothItsWritesAndItsError(t *testing.T) {
 
 	op := &fakeOP{value: "gen1-token", expires: "2027-01-01", recorded: true}
 	h := publishHandler{
-		publisher: kv,
-		versions:  kv,
-		table: secrets.Expiries{
+		newVault: vaultFactoryFor(kv),
+		expiriesFile: writeExpiriesFile(t, map[string]string{
 			itemGitHubApp: "2027-01-01", // will fail to patch
 			itemTelegram:  "never",      // will succeed
-		},
+		}),
 		item:  itemCFInfraAdmin,
 		field: fieldCFPassword,
 		newOP: op.asOPFactory(),
@@ -793,47 +874,21 @@ func TestPartialPublishReportsBothItsWritesAndItsError(t *testing.T) {
 	}
 }
 
-// TestAPublishThatDidNothingIsRefusedNotReportedAsSuccess drives
-// publishHandler directly (bypassing secrets.LoadExpiries, which already
-// refuses an empty table on its own) to construct the otherwise
-// unreachable "nothing happened at all" case and confirm the vacuous-pass
-// guard converts it to a failure rather than a silent, contentless success.
-func TestAPublishThatDidNothingIsRefusedNotReportedAsSuccess(t *testing.T) {
-	h := publishHandler{
-		publisher: noopPublisher{},
-		versions:  noopVersionReader{},
-		table:     secrets.Expiries{}, // empty: no LoadExpiries in this path to refuse it
-		item:      itemCFInfraAdmin,
-	}
-	resp := h.handle(handoff.Request{PublishValue: false})
+// TestFinishRefusesAVacuousPassRatherThanReportingSuccess drives finish()
+// directly rather than through handle(): with a real, path-backed expiry
+// table, secrets.LoadExpiries itself now refuses an empty table before
+// finish's vacuous-pass guard could ever see one (loadExpiryTable calls it
+// fresh on every request), so the "nothing happened at all" case finish
+// exists to catch is only reachable by calling the pure function itself.
+func TestFinishRefusesAVacuousPassRatherThanReportingSuccess(t *testing.T) {
+	resp := finish(handoff.Response{})
 
 	if resp.Value != handoff.ValueFailed {
-		t.Errorf("resp.Value = %q, want %q for a pass with nothing to do", resp.Value, handoff.ValueFailed)
+		t.Errorf("resp.Value = %q, want %q for a response with nothing to report", resp.Value, handoff.ValueFailed)
 	}
 	if resp.Error == "" {
 		t.Error("resp.Error is empty, want a refusal explaining nothing was done")
 	}
-	if resp.Expiries != 0 || len(resp.Skipped) != 0 {
-		t.Errorf("resp = %+v, want Expiries=0 and no Skipped entries for this scenario", resp)
-	}
-}
-
-// noopPublisher and noopVersionReader back
-// TestAPublishThatDidNothingIsRefusedNotReportedAsSuccess: that test's
-// point is the empty-table branch, which never calls either.
-type noopPublisher struct{}
-
-func (noopPublisher) PatchExpiry(ctx context.Context, item, expires string) error {
-	panic("PatchExpiry should not be called with an empty table and no requested expiry")
-}
-func (noopPublisher) PutValue(ctx context.Context, item string, fields map[string]string, cas int) error {
-	panic("PutValue should not be called when publish_value is false")
-}
-
-type noopVersionReader struct{}
-
-func (noopVersionReader) CurrentVersion(ctx context.Context, item string) (int, bool, error) {
-	panic("CurrentVersion should not be called when publish_value is false")
 }
 
 // TestPublishRefusesWhenItsJWTIsNotMounted is the design's own
@@ -867,8 +922,12 @@ func TestPublishRefusesWhenItsJWTIsNotMounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
+	// Serve now runs until its context is cancelled rather than returning
+	// after one request (handoff.go's own doc); cancel explicitly so this
+	// test does not wait out the full 10s timeout to see cmdPublish exit.
+	cancel()
 	if code := <-exitCode; code != 0 {
-		t.Fatalf("cmdPublish exit code = %d, want 0 (the request was served, per design §9); stderr: %s", code, stderrOut.String())
+		t.Fatalf("cmdPublish exit code = %d, want 0 (a cancelled context is a clean stop); stderr: %s", code, stderrOut.String())
 	}
 
 	if resp.Value != handoff.ValueFailed && resp.Value != handoff.ValueSkipped {

@@ -242,21 +242,30 @@ func (h *Harness) Run(ctx context.Context, s Scenario, now time.Time) (Outcome, 
 	if s.Env["DRIFT_CHECK"] == "1" {
 		sock := filepath.Join(root, "handoff.sock")
 		env["HANDOFF_SOCKET"] = sock
+		// ⚠️ ITS OWN CANCELLABLE CONTEXT, NOT ctx DIRECTLY. handoff.Serve
+		// now answers requests until its context is cancelled rather than
+		// returning after exactly one (the loop's publisher is a
+		// long-lived server; see handoff.go's own doc) -- so blocking on
+		// `ctx` here, the whole scenario's context, would leave this
+		// goroutine running past the `truss apply` subprocess exiting, and
+		// the `<-done` below would hang forever. serveCancel, called after
+		// the subprocess exits, is what makes Serve return.
+		serveCtx, serveCancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			// The error is deliberately dropped: a scenario where truss never
-			// contacts the publisher is a scenario where Serve times out, and
-			// that must surface as the pass's own recorded outcome rather than
-			// as a harness error that masks it.
-			_ = handoff.Serve(ctx, sock, 60*time.Second, func(req handoff.Request) handoff.Response {
+			// contacts the publisher is a scenario where nothing ever connects,
+			// and that must surface as the pass's own recorded outcome rather
+			// than as a harness error that masks it.
+			_ = handoff.Serve(serveCtx, sock, func(req handoff.Request) handoff.Response {
 				if req.PublishValue {
 					return handoff.Response{Value: handoff.ValueWritten, Expiries: 1}
 				}
 				return handoff.Response{Value: handoff.ValueSkipped}
 			})
 		}()
-		defer func() { <-done }()
+		defer func() { serveCancel(); <-done }()
 	}
 	for k, v := range s.Env {
 		// The scenario's own recorded environment wins, so a drift run's

@@ -89,21 +89,35 @@ type Response struct {
 	Error string `json:"error,omitempty"`
 }
 
-// Serve listens on a Unix domain socket at path and answers exactly one
-// request: it accepts one connection, reads and decodes one Request
-// (bounded to maxMessageSize), calls h, encodes and writes the Response,
-// and returns. It is not a server; it is a rendezvous (design §3) -- a
-// caller that wants to serve a second pass calls Serve again, from a fresh
-// process, the way a new pod does.
+// Serve listens on a Unix domain socket at path and answers requests until
+// ctx is cancelled: accept, read and decode one bounded Request, call h,
+// write the Response, close, accept again.
+//
+// ⚠️ IT USED TO ANSWER EXACTLY ONE, AND THIS PACKAGE'S DOC CALLED IT A
+// RENDEZVOUS RATHER THAN A SERVER. That was right while the publisher was
+// a sidecar in a CronJob pod: one pass, one request, one process. The
+// applier is a daemon now and its publisher is a daemon beside it, so a
+// Serve that returned after the first drift pass would leave 364 days of
+// the year with nobody listening -- and the failure mode is silence,
+// which is the one thing this system is built to refuse.
+//
+// ⚠️ THE `wait` PARAMETER IS GONE, DELIBERATELY, AND ITS JOB MOVED. It
+// existed so the publisher's own exit code could mean "truss died without
+// ever asking". Under the loop the interval between requests is a DAY by
+// design, so a timeout long enough to be correct would be far too long to
+// be a useful signal -- and the loop's own heartbeat staleness already
+// answers the question it was asking, from the side that knows the
+// answer.
+//
+// Requests are served ONE AT A TIME, in the order they are accepted:
+// there is one drift pass in flight at a time on the other end of this
+// socket, and concurrency here would only make two Vault logins race for
+// one credential-store version.
 //
 // The publisher acts only on a request: h is never called until a request
 // has arrived and been decoded, so a pass with nothing to publish costs
 // this package nothing beyond holding a socket open.
-//
-// If no connection arrives within wait, Serve returns a non-nil error --
-// the one case, per the design, where the publisher's own exit code
-// carries meaning ("truss died without ever asking").
-func Serve(ctx context.Context, path string, wait time.Duration, h func(Request) Response) error {
+func Serve(ctx context.Context, path string, h func(Request) Response) error {
 	// A stale socket file from a previous, uncleanly-killed process would
 	// otherwise make Listen fail with "address already in use" -- and the
 	// volume this runs on is emptyDir, so nothing else could have created
@@ -117,31 +131,33 @@ func Serve(ctx context.Context, path string, wait time.Duration, h func(Request)
 	if err != nil {
 		return fmt.Errorf("handoff: listening on %s: %w", path, err)
 	}
-	defer ln.Close()
-
-	type acceptResult struct {
-		conn net.Conn
-		err  error
-	}
-	accepted := make(chan acceptResult, 1)
+	// ctx cancellation is the only way this loop ends: closing the
+	// listener from a separate goroutine is what makes the blocking
+	// Accept below return, since net.Listener has no ctx-aware Accept.
 	go func() {
-		conn, err := ln.Accept()
-		accepted <- acceptResult{conn, err}
+		<-ctx.Done()
+		ln.Close()
 	}()
 
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-
-	select {
-	case res := <-accepted:
-		if res.err != nil {
-			return fmt.Errorf("handoff: accepting a connection on %s: %w", path, res.err)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				// A closed-listener error caused BY the cancellation above
+				// is expected shutdown, not a failure to report.
+				return nil
+			default:
+				return fmt.Errorf("handoff: accepting a connection on %s: %w", path, err)
+			}
 		}
-		return serveOne(res.conn, h)
-	case <-timer.C:
-		return fmt.Errorf("handoff: refusing to report success: no publish request arrived in %s -- the applier container did not reach the end of its pass", wait)
-	case <-ctx.Done():
-		return fmt.Errorf("handoff: %w", ctx.Err())
+		// A malformed request on ONE connection must not stop the
+		// publisher serving the next -- today it returned, which was
+		// fine when there was no "next". Narrated to stderr rather than
+		// treated as fatal.
+		if err := serveOne(conn, h); err != nil {
+			fmt.Fprintf(os.Stderr, "handoff: %v\n", err)
+		}
 	}
 }
 

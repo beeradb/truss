@@ -31,12 +31,14 @@ func socketPath(t *testing.T) string {
 // Send returns exactly what the handler returned.
 func TestSendCarriesPublishValueAndReturnsThePublishersVerdict(t *testing.T) {
 	path := socketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var gotReq Request
 	received := make(chan struct{})
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- Serve(context.Background(), path, 5*time.Second, func(r Request) Response {
+		serveErr <- Serve(ctx, path, func(r Request) Response {
 			gotReq = r
 			close(received)
 			return Response{Value: ValueWritten, Expiries: 3}
@@ -66,20 +68,25 @@ func TestSendCarriesPublishValueAndReturnsThePublishersVerdict(t *testing.T) {
 		t.Fatalf("handler received %+v, want the exact request Send sent (%+v)", gotReq, req)
 	}
 
+	cancel()
 	if err := <-serveErr; err != nil {
-		t.Fatalf("Serve returned an error after a successful exchange: %v", err)
+		t.Fatalf("Serve returned an error after being asked to stop: %v", err)
 	}
 }
 
-// TestServeAnswersExactlyOneRequestAndThenExits: a second connection after
-// the first is not served -- Serve is a rendezvous, not a server, so it
-// must have already returned by the time the first exchange completes.
-func TestServeAnswersExactlyOneRequestAndThenExits(t *testing.T) {
+// TestServeAnswersEveryRequestUntilItsContextIsCancelled replaces the old
+// rendezvous contract (exactly one request, then exit): the applier is a
+// daemon now and its publisher is a daemon beside it, so Serve answers a
+// second, independent request rather than having already exited by then,
+// and only stops once its context is cancelled.
+func TestServeAnswersEveryRequestUntilItsContextIsCancelled(t *testing.T) {
 	path := socketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
 	calls := 0
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- Serve(context.Background(), path, 5*time.Second, func(r Request) Response {
+		serveErr <- Serve(ctx, path, func(r Request) Response {
 			calls++
 			return Response{Value: ValueSkipped}
 		})
@@ -89,17 +96,26 @@ func TestServeAnswersExactlyOneRequestAndThenExits(t *testing.T) {
 	if _, err := Send(context.Background(), path, 5*time.Second, Request{}); err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
-	if err := <-serveErr; err != nil {
-		t.Fatalf("Serve: %v", err)
+	if _, err := Send(context.Background(), path, 5*time.Second, Request{}); err != nil {
+		t.Fatalf("second Send: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("handler called %d times, want exactly 1", calls)
+	if calls != 2 {
+		t.Fatalf("handler called %d times, want exactly 2 -- Serve must not have exited after the first", calls)
 	}
 
-	// A second Send against the now-exited Serve must fail to connect --
-	// proof that nothing is still listening.
+	cancel()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned an error after cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return within 2s of its context being cancelled")
+	}
+
+	// Confirm nothing is listening any more.
 	if _, err := Send(context.Background(), path, 500*time.Millisecond, Request{}); err == nil {
-		t.Fatal("a second Send after Serve returned succeeded, want a dial failure")
+		t.Fatal("a Send after Serve returned succeeded, want a dial failure")
 	}
 }
 
@@ -132,41 +148,25 @@ func TestSendFailsDistinguishablyWhenNoPublisherIsListening(t *testing.T) {
 	}
 }
 
-// TestServeExitsNonZeroWhenNobodyConnectsBeforeTheDeadline: Serve's own
-// contract is a returned error (cmd/truss turns that into exit 1) when its
-// wait elapses with no connection at all.
-func TestServeExitsNonZeroWhenNobodyConnectsBeforeTheDeadline(t *testing.T) {
+// TestAnOversizedRequestIsRefusedAndTheNextConnectionIsStillServed: a
+// message exceeding maxMessageSize must never reach the handler, AND must
+// not stop the publisher serving the next, well-formed connection --
+// serveOne's error is narrated and Serve continues, which is the whole
+// point of it being a server now rather than a rendezvous that exited
+// after its one exchange. Request no longer has any field big enough to
+// build an oversized one from (it is a single bool), so this dials the
+// socket directly and writes raw oversized bytes the way a malformed or
+// hostile peer would.
+func TestAnOversizedRequestIsRefusedAndTheNextConnectionIsStillServed(t *testing.T) {
 	path := socketPath(t)
-	start := time.Now()
-	err := Serve(context.Background(), path, 100*time.Millisecond, func(r Request) Response {
-		t.Fatal("handler called despite nobody connecting")
-		return Response{}
-	})
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("Serve with nobody connecting = nil error, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "no publish request arrived") {
-		t.Errorf("error %q does not explain that nobody connected", err.Error())
-	}
-	if elapsed < 100*time.Millisecond {
-		t.Errorf("Serve returned after %s, want it to have waited out its deadline", elapsed)
-	}
-}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-// TestARequestLargerThanTheLimitIsRefused: a message exceeding
-// maxMessageSize must never reach the handler. Request no longer has any
-// field big enough to build one from (it is a single bool), so this dials
-// the socket directly and writes raw oversized bytes the way a malformed or
-// hostile peer would -- serveOne's size check runs before JSON decoding, so
-// this still exercises exactly the guard the old test did.
-func TestARequestLargerThanTheLimitIsRefused(t *testing.T) {
-	path := socketPath(t)
-	handlerCalled := false
+	calls := 0
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- Serve(context.Background(), path, 5*time.Second, func(r Request) Response {
-			handlerCalled = true
+		serveErr <- Serve(ctx, path, func(r Request) Response {
+			calls++
 			return Response{Value: ValueWritten}
 		})
 	}()
@@ -188,13 +188,18 @@ func TestARequestLargerThanTheLimitIsRefused(t *testing.T) {
 	}
 	conn.Close()
 
-	if err := <-serveErr; err == nil {
-		t.Fatal("Serve accepted an oversized request, want a refusal")
-	} else if !strings.Contains(err.Error(), fmt.Sprintf("%d bytes", maxMessageSize)) {
-		t.Errorf("Serve error %q does not name the size limit", err.Error())
+	// The publisher must still be listening: a well-formed request right
+	// after the malformed one must succeed.
+	if _, err := Send(context.Background(), path, 5*time.Second, Request{}); err != nil {
+		t.Fatalf("Send after the oversized connection: %v -- one bad connection must not stop the publisher serving the next", err)
 	}
-	if handlerCalled {
-		t.Fatal("the handler was called with an oversized request")
+	if calls != 1 {
+		t.Fatalf("handler called %d times, want exactly 1 (only for the well-formed request)", calls)
+	}
+
+	cancel()
+	if err := <-serveErr; err != nil {
+		t.Fatalf("Serve returned an error after cancellation: %v", err)
 	}
 }
 
