@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -197,7 +200,7 @@ func TestRunLoopCallsTurnImmediatelyWithoutWaitingForATick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -212,7 +215,7 @@ func TestRunLoopTicksAgainAfterTheInterval(t *testing.T) {
 	defer cancel()
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, 20*time.Millisecond, ft.turn, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, 20*time.Millisecond, ft.turn, neverStop, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 3, 2*time.Second)
 	cancel()
@@ -228,7 +231,7 @@ func TestRunLoopStopsBetweenTicksWhenTheContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, io.Discard, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, io.Discard, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -251,7 +254,7 @@ func TestRunLoopStopsOnAFatalTurnAndPrintsWhyWithoutASecondCall(t *testing.T) {
 	ft := &fakeTurn{fatalAt: 1}
 	var stderr bytes.Buffer
 
-	code := runLoop(context.Background(), time.Hour, ft.turn, io.Discard, &stderr)
+	code := runLoop(context.Background(), time.Hour, ft.turn, neverStop, io.Discard, &stderr)
 
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
@@ -273,7 +276,7 @@ func TestRunLoopPrintsANonEmptyNotifyTextToStdout(t *testing.T) {
 	var stdout bytes.Buffer
 
 	done := make(chan int, 1)
-	go func() { done <- runLoop(ctx, time.Hour, ft.turn, &stdout, io.Discard) }()
+	go func() { done <- runLoop(ctx, time.Hour, ft.turn, neverStop, &stdout, io.Discard) }()
 
 	waitForCount(t, ft, 1, 2*time.Second)
 	cancel()
@@ -281,6 +284,36 @@ func TestRunLoopPrintsANonEmptyNotifyTextToStdout(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "OK: nothing to do") {
 		t.Errorf("stdout = %q, want the pass's notify text", stdout.String())
+	}
+}
+
+// neverStop is the stopping func for every test that is not itself about
+// stopping.
+func neverStop() bool { return false }
+
+// TestRunLoopStopsAfterTheCurrentTurnWhenStoppingIsTrue is runLoop's own
+// half of graceful stop: once stopping() reports true, right after a turn
+// returns, the loop must exit without waiting for ctx.Done() and without
+// starting a second turn.
+func TestRunLoopStopsAfterTheCurrentTurnWhenStoppingIsTrue(t *testing.T) {
+	ft := &fakeTurn{}
+	var stop atomic.Bool
+	// Flips true from inside the first call, mirroring how a signal
+	// handler flips the same flag while a turn (a whole pass) is in
+	// flight.
+	turn := func(ctx context.Context) (string, bool, []string) {
+		s, f, p := ft.turn(ctx)
+		stop.Store(true)
+		return s, f, p
+	}
+
+	code := runLoop(context.Background(), time.Hour, turn, stop.Load, io.Discard, io.Discard)
+
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if ft.count() != 1 {
+		t.Errorf("turn was called %d times, want exactly 1: stopping() true after the first call must prevent a second", ft.count())
 	}
 }
 
@@ -294,4 +327,40 @@ func waitForCount(t *testing.T, ft *fakeTurn, want int, timeout time.Duration) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("turn was called %d times within %s, want at least %d", ft.count(), timeout, want)
+}
+
+// TestASigtermAsksTheLoopToStopWithoutCancellingTheContext installs the
+// real signal handler and sends this test process a real SIGTERM, the one
+// piece of the graceful-stop chain the fake-based tests above cannot
+// reach: proof that signal.Notify is wired to SIGTERM (and SIGINT) at all,
+// and that the context handed to a turn is NOT the thing cancelled --
+// docs/work-items.md records a harness that twice killed its own test
+// suite doing signal work, so this test arms the handler, sends exactly
+// one signal, and bounds its own wait rather than risking a hang.
+func TestASigtermAsksTheLoopToStopWithoutCancellingTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stopping, cleanup := armStopSignal(ctx, io.Discard)
+	defer cleanup()
+
+	if stopping() {
+		t.Fatalf("stopping() is true before any signal was sent")
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("sending SIGTERM to self: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !stopping() {
+		if time.Now().After(deadline) {
+			t.Fatalf("stopping() did not become true within 2s of SIGTERM")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if ctx.Err() != nil {
+		t.Errorf("ctx.Err() = %v, want nil: SIGTERM must set a flag, never cancel the context a pass is running with", ctx.Err())
+	}
 }

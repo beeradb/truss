@@ -1007,6 +1007,12 @@ type fakeTofu struct {
 	PlanDetailedChanged        bool
 	PlanDetailedErr            error
 
+	// OnApply, if set, runs at the top of Apply, before ApplyErr is
+	// returned -- the seam a graceful-stop test uses to flip a Stop flag
+	// from INSIDE an in-flight unit, the only moment "does a stop let this
+	// unit finish" is actually about.
+	OnApply func(dir string)
+
 	mu      sync.Mutex
 	applies []string
 }
@@ -1019,6 +1025,9 @@ func (f *fakeTofu) Plan(ctx context.Context, dir, outFile string) error { return
 // has to be able to see it -- "the pass failed" is also true of a pass that
 // applied and then failed afterwards.
 func (f *fakeTofu) Apply(ctx context.Context, dir, planFile string) error {
+	if f.OnApply != nil {
+		f.OnApply(dir)
+	}
 	f.mu.Lock()
 	f.applies = append(f.applies, dir)
 	f.mu.Unlock()

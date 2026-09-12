@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/beeradb/truss/internal/config"
@@ -177,7 +182,12 @@ type loopTurn func(ctx context.Context) (notifyText string, fatal bool, problems
 // when the pass RETURNS, not when the heartbeat write inside it succeeds
 // -- a broken ledger costs one missed drift rather than a rotation storm
 // on every tick until the ledger recovers.
-func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() time.Time) loopTurn {
+// stop, when non-nil, is wired to applyDeps.Stop on the deps buildPass
+// returns -- the seam that lets a pass in flight finish its current unit
+// and return rather than being cancelled through ctx (which would reach
+// exec.CommandContext and SIGKILL a running tofu, orphaning its state
+// lock; see internal/childproc's doc comment for the measurement).
+func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() time.Time, stop func() bool) loopTurn {
 	return func(ctx context.Context) (string, bool, []string) {
 		n := now()
 		drift := lcfg.driftAt.due(n, lastDrift)
@@ -186,6 +196,7 @@ func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() ti
 		if len(problems) > 0 {
 			return "", true, problems
 		}
+		deps.Stop = stop
 		result := runApplyPass(ctx, deps, last)
 		if drift {
 			lastDrift = n
@@ -195,16 +206,20 @@ func realLoopTurn(e passEnv, lcfg loopConfig, lastDrift time.Time, now func() ti
 }
 
 // runLoop calls turn once immediately and then on every tick, until ctx is
-// done or turn reports fatal. It is `cmdLoop`'s body with the pass
-// construction factored out, purely so it can be driven by a fake turn in
-// tests.
+// done, stopping reports true, or turn reports fatal.
 //
-// ⚠️ THIS IS STILL MISSING RUN-NOW AND GRACEFUL STOP. ctx.Done() is the
-// only way this returns before a fatal turn, and nothing today ever
-// cancels the ctx that reaches here (run.go's context.Background() is
-// never cancelled). Each is landed as its own change so every one of them
+// stopping is consulted right after turn returns, not before it is called
+// or during it: a signal that arrives mid-pass is applyDeps.Stop's job
+// (deps.Stop, wired by realLoopTurn to the same underlying flag) to let
+// the in-flight unit finish; this check is what stops the LOOP itself from
+// starting another turn once that one has returned. It is checked before
+// the immediate-or-ticked wait, not folded into the select below, so a
+// stop requested while the loop is between iterations is noticed without
+// waiting for the next tick.
+//
+// ⚠️ RUN-NOW IS STILL MISSING. Each lands as its own change so every one
 // can be watched passing, and failing, on its own.
-func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stdout, stderr io.Writer) int {
+func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stopping func() bool, stdout, stderr io.Writer) int {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -218,6 +233,10 @@ func runLoop(ctx context.Context, interval time.Duration, turn loopTurn, stdout,
 		}
 		if text != "" {
 			fmt.Fprintln(stdout, text)
+		}
+
+		if stopping() {
+			return 0
 		}
 
 		select {
@@ -254,7 +273,52 @@ func cmdLoop(ctx context.Context, args []string, getenv func(string) string, std
 	}
 
 	lastDrift := seedLastDrift(ctx, e.Cfg, lcfg.driftHeartbeatKey)
-	turn := realLoopTurn(e, lcfg, lastDrift, time.Now)
 
-	return runLoop(ctx, lcfg.interval, turn, stdout, stderr)
+	stopping, stop := armStopSignal(ctx, stderr)
+	defer stop()
+	turn := realLoopTurn(e, lcfg, lastDrift, time.Now, stopping)
+
+	return runLoop(ctx, lcfg.interval, turn, stopping, stdout, stderr)
+}
+
+// armStopSignal installs the loop's only signal handler and returns a
+// stopping func reporting whether it has fired, plus a cleanup to call
+// when the loop returns for any other reason.
+//
+// ⚠️ signal.Notify, NEVER signal.NotifyContext. NotifyContext cancels a
+// context, and every external command this binary runs is built with
+// childproc.Command around exec.CommandContext -- whose Cancel this
+// package sets to SIGINT the child's process group, but only because
+// nothing UPSTREAM of that already killed it. Cancelling ctx here would
+// reach a running `tofu apply` through code that was never written to
+// expect it, mid-unit, which is the exact leaked-lock failure this change
+// exists to prevent. The signal sets a flag; nothing here cancels a
+// context.
+//
+// Extracted from cmdLoop so the signal-to-flag wiring is testable with a
+// real SIGTERM against a real process, without needing a working ledger,
+// forge, Vault and git behind it.
+func armStopSignal(ctx context.Context, stderr io.Writer) (stopping func() bool, cleanup func()) {
+	var stopped atomic.Bool
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		// Reads ONCE: signal.Notify drops a second signal on this full
+		// channel while nobody is reading, which is deliberate -- there is
+		// one way to stop, and "I mean it, right now" is SIGKILL from
+		// whatever supervises this process, which is not ours to design.
+		// The ctx.Done() branch exists only so this goroutine does not
+		// outlive a caller that returned for some other reason (a fatal
+		// turn, a cancelled ctx) without ever receiving a signal -- in
+		// production ctx never cancels and this branch never fires.
+		select {
+		case s := <-sig:
+			fmt.Fprintf(stderr, "time=%s level=info msg=%s\n",
+				time.Now().UTC().Format("15:04:05"),
+				strconv.Quote(fmt.Sprintf("stopping: %s received; no new unit will start", s)))
+			stopped.Store(true)
+		case <-ctx.Done():
+		}
+	}()
+	return stopped.Load, func() { signal.Stop(sig) }
 }

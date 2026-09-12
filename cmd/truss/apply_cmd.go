@@ -134,7 +134,24 @@ type applyDeps struct {
 	// directly records nothing rather than needing a recorder for a pass it
 	// is not running. Nothing reads it back to make a decision.
 	Obs *passObs
+
+	// Stop reports that a graceful stop has been asked for: the pass must
+	// start no NEW unit and return what it has, so the tail (heartbeat,
+	// alert, metrics) still runs -- see the stopping() helper and its call
+	// sites. Nil under `truss apply`, which installs no signal handler at
+	// all; only `truss loop` sets this.
+	Stop func() bool
+	// Progress is handed every narration line (see log, below), so a
+	// future GET /status can answer "it is applying projects/recipes", not
+	// just "a pass is running". Nil under `truss apply`. Nothing reads it
+	// back to make a decision.
+	Progress func(string)
 }
+
+// stopping reports whether a graceful stop has been asked for. Nil-safe,
+// matching every method on *passObs: most callers of applyDeps -- every
+// one under `truss apply` -- never set Stop at all.
+func (d applyDeps) stopping() bool { return d.Stop != nil && d.Stop() }
 
 // handoffTimeout bounds one publish exchange from the truss side. It
 // matches internal/handoff's own connDeadline (30s), which that package's
@@ -204,9 +221,12 @@ const (
 // corpus depends on this.
 func (d applyDeps) log(level, format string, args ...any) {
 	d.Obs.logged(level)
+	line := fmt.Sprintf(format, args...)
 	fmt.Fprintf(d.Stderr, "time=%s level=%s msg=%s\n",
-		d.now().UTC().Format("15:04:05"), level,
-		strconv.Quote(fmt.Sprintf(format, args...)))
+		d.now().UTC().Format("15:04:05"), level, strconv.Quote(line))
+	if d.Progress != nil {
+		d.Progress(line)
+	}
 }
 
 // loadHandoffConfig reads $HANDOFF_SOCKET, whose presence depends on which
@@ -1014,6 +1034,15 @@ func tofuUnitsFor(changedFiles, treeUnits []string) []string {
 // stop), and whether it stopped because of state-lock contention -- which
 // is not a failure (§2 item 7): no failed/<sha> is filed, HEAD is not
 // advanced past the contended commit, and the returned failure is empty.
+//
+// d.stopping() is consulted at four points -- the top of this loop, the
+// top of the roots loop, before the plays block, and the top of the
+// renders loop -- each returning the identical shape lock contention uses
+// (empty failure, HEAD at the last FINISHED commit) but with
+// lockContended left false, because a graceful stop is not lock
+// contention and must not feed that metric. Every check point is a UNIT
+// boundary: nothing here interrupts a root's own init/plan/apply, a single
+// play, or a single render.
 func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache) (newLast string, applied, noop int, failure passFailure, lockContended bool) {
 	// The clone, the fetch and the installation token are runApplyPass's job
 	// now, done BEFORE the drift branch so both paths get a repository -- see
@@ -1041,6 +1070,16 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 	}
 
 	for _, sha := range commits {
+		// ⚠️ CHECKED BEFORE THE COMMIT IS EVEN CONSIDERED, THE SAME SHAPE
+		// LOCK CONTENTION ALREADY USES: an empty failure and last (not sha)
+		// leaves HEAD exactly where the previous, FINISHED commit left it,
+		// so the next pass re-walks from there rather than re-applying or
+		// silently skipping a commit this one never started. lockContended
+		// stays false -- a graceful stop is not lock contention, and the
+		// metric that name feeds must not conflate the two.
+		if d.stopping() {
+			return last, applied, noop, passFailure{}, false
+		}
 		d.logf("considering %s", sha)
 
 		// ⚠️ THE GATE RUNS BEFORE THE ROOTS ARE DERIVED, AND THE ORDER IS THE
@@ -1184,6 +1223,13 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 
 		summaries := map[string]ledger.RootSummary{}
 		for _, root := range roots {
+			// Same shape as the top-of-commit check above: HEAD stays at
+			// `last`, not `sha`, because only SOME of this commit's roots
+			// may have applied -- a commit is recorded only once every root,
+			// play and render has passed.
+			if d.stopping() {
+				return last, applied, noop, passFailure{}, false
+			}
 			d.logf("applying %s at %s (head %s)", root, sha, headSHA)
 			summary, lockBusy, reason := applyOneRoot(ctx, d, cc, baseEnv, headSHA, root)
 			if lockBusy {
@@ -1213,6 +1259,20 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		// root would configure a host whose cloud resources, DNS record or
 		// tailnet auth key this same commit has not created yet.
 		if len(plays) > 0 {
+			// ⚠️ INSIDE THE len(plays)>0 GUARD, NOT BEFORE IT. A commit with
+			// no plays and no renders left has already finished its only
+			// units (its roots) the moment this line is reached, and
+			// checking unconditionally here would discard that completed
+			// work -- returning before PutApplied/AdvanceHead ever run,
+			// forcing a needless re-apply of an already-applied root next
+			// pass. Checked before the whole plays block, not inside
+			// runAnsibleUnits: a play is one unit, and a half-run playbook
+			// against a live host is exactly the state this exists to
+			// prevent -- so the check happens before the first one starts,
+			// never between two plays in the list.
+			if d.stopping() {
+				return last, applied, noop, passFailure{}, false
+			}
 			if reason := runAnsibleUnits(ctx, d, d.NewAnsible(ansibleEnv(d)), headSHA, plays); reason != "" {
 				d.Obs.failed(classApply)
 				if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
@@ -1236,6 +1296,9 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		// actually applies the manifests, from a ref this pass advances only
 		// once every unit has passed.
 		for _, unit := range renderUnits {
+			if d.stopping() {
+				return last, applied, noop, passFailure{}, false
+			}
 			d.logf("rendering %s at %s (head %s)", unit, sha, headSHA)
 			_, reason := renderOneUnit(ctx, d, d.NewRender(renderEnv(d)), headSHA, unit)
 			if reason != "" {
