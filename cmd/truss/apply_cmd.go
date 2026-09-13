@@ -1038,7 +1038,23 @@ func runCommitLoop(ctx context.Context, d applyDeps, last string, cc *credCache)
 		// would let it be recorded as uneventful and waved through unchecked.
 		// See checkInventoryAtCommit's own doc for what it refuses and the
 		// two cases it deliberately skips rather than refuses.
-		if reason := checkInventoryAtCommit(ctx, d, headSHA); reason != "" {
+		//
+		// ⚠️ sha, NOT headSHA. checkInventoryAtCommit diffs whatever commit
+		// it is handed against THAT COMMIT'S OWN git first parent
+		// (d.Git.Parent), so the commit handed in has to be the one actually
+		// sitting in main's history -- sha, the value this loop is walking.
+		// headSHA is checkCommitGate's pr.HeadSHA, a PR branch's own head
+		// commit: correct for the approval check, which must ask "did the
+		// approver review this exact content," but wrong here, where its
+		// first parent is whatever the PR branch's own history says came
+		// before it, not sha's real predecessor on main. A PR resynced with
+		// more than one `git merge origin/main` builds exactly that trap:
+		// headSHA's parent is the PR's own prior sync commit, so a stateful
+		// placement change that landed on main INSIDE that merge bubble is
+		// invisible to headSHA's parent and can surface as a false move
+		// against a completely unrelated later commit instead. Measured
+		// live 2026-09-12 (platform PR #120, TestInventoryGateComparesMainsCommitNotThePRHeadSHA).
+		if reason := checkInventoryAtCommit(ctx, d, sha); reason != "" {
 			d.Obs.failed(classConfig)
 			if err := d.Journal.PutFailed(ctx, sha, reason); err != nil {
 				d.Obs.ledgerError()
